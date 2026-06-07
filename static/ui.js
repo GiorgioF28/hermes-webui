@@ -1260,9 +1260,40 @@ async function populateModelDropdown(opts={}){
       return groups;
     };
 
-    const groups=(Array.isArray(data.groups)&&data.groups.length)
+    let groups=(Array.isArray(data.groups)&&data.groups.length)
       ? data.groups
       : _synthGroupsFromConfigured();
+    const localProviderIds=new Set(['claude-code','codex-cli']);
+    groups=groups.filter(g=>localProviderIds.has(String(g.provider_id||'').toLowerCase()));
+
+    const hasClaudeCodeGroup=groups.some(g=>String(g.provider_id||'').toLowerCase()==='claude-code');
+    if(!hasClaudeCodeGroup){
+      groups.push({
+        provider:'Claude Code',
+        provider_id:'claude-code',
+        models:[{
+          id:'claude-code/local-session',
+          label:'Claude Code (local session)'
+        }]
+      });
+    }
+    const hasCodexCliGroup=groups.some(g=>String(g.provider_id||'').toLowerCase()==='codex-cli');
+    if(!hasCodexCliGroup){
+      groups.push({
+        provider:'Codex CLI',
+        provider_id:'codex-cli',
+        models:[
+          {
+            id:'codex-cli/local-chatgpt-session',
+            label:'Codex CLI Safe (local ChatGPT session)'
+          },
+          {
+            id:'codex-cli/full-agent',
+            label:'Codex CLI Full Agent'
+          }
+        ]
+      });
+    }
 
     if(!groups.length) return; // no server groups and no configured fallback
     const previousSelection=_captureModelDropdownSelection(sel);

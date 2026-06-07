@@ -5,6 +5,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import copy
+import csv
 import io
 import gzip
 import json
@@ -4840,7 +4841,37 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/models":
-        return j(handler, get_available_models())
+        models_payload = dict(get_available_models() or {})
+        local_groups = [
+            {
+                "provider": "Claude Code",
+                "provider_id": "claude-code",
+                "models": [{
+                    "id": "claude-code/local-session",
+                    "label": "Claude Code (local session)",
+                }],
+            },
+            {
+                "provider": "Codex CLI",
+                "provider_id": "codex-cli",
+                "models": [
+                    {
+                        "id": "codex-cli/local-chatgpt-session",
+                        "label": "Codex CLI Safe (local ChatGPT session)",
+                    },
+                    {
+                        "id": "codex-cli/full-agent",
+                        "label": "Codex CLI Full Agent",
+                    },
+                ],
+            },
+        ]
+        models_payload["groups"] = local_groups
+        models_payload["active_provider"] = "codex-cli"
+        models_payload["default_model"] = "codex-cli/local-chatgpt-session"
+        models_payload["configured_model_badges"] = {}
+        models_payload["aliases"] = {}
+        return j(handler, models_payload)
 
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
@@ -5862,6 +5893,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/memory":
         return _handle_memory_read(handler)
 
+    if parsed.path == "/api/control-center/summary":
+        return _handle_control_center_summary(handler)
+
+    if parsed.path == "/api/work/state":
+        return _handle_work_state(handler)
+
+    if parsed.path == "/api/agents":
+        return _handle_agents_index(handler)
+
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
@@ -6137,7 +6177,7 @@ def handle_get(handler, parsed) -> bool:
     return False  # 404
 
 
-# ── GET route helpers
+# GET route helpers
 
 
 def handle_post(handler, parsed) -> bool:
@@ -6210,6 +6250,16 @@ def handle_post(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "POST")
         return True
+    if parsed.path == "/api/control-center/project-next-action":
+        return _handle_control_center_project_next_action(handler, body)
+    if parsed.path == "/api/control-center/task-status":
+        return _handle_control_center_task_status(handler, body)
+    if parsed.path == "/api/work/start":
+        return _handle_work_start(handler, body)
+    if parsed.path == "/api/work/finish":
+        return _handle_work_finish(handler, body)
+    if parsed.path == "/api/work/attach-chat":
+        return _handle_work_attach_chat(handler, body)
     if parsed.path == "/api/dashboard/config":
         from api import dashboard_probe
 
@@ -8082,7 +8132,7 @@ def handle_put(handler, parsed) -> bool:
         return _handle_mcp_server_update(handler, name, body)
     return False
 
-# ── GET route helpers ─────────────────────────────────────────────────────────
+# GET route helpers
 
 # MIME types for static file serving. Hoisted to module scope to avoid
 # rebuilding the dict on every request.
@@ -10448,7 +10498,1061 @@ def _handle_memory_read(handler):
     )
 
 
+def _control_center_candidate_roots() -> list[Path]:
+    roots: list[Path] = []
+    for raw in (
+        os.getenv("HERMES_CONTROL_CENTER_ROOT"),
+        os.getenv("HERMES_SETUP_ROOT"),
+        str(DEFAULT_WORKSPACE or ""),
+        str(Path(__file__).resolve().parents[1].parent),
+    ):
+        if not raw:
+            continue
+        try:
+            root = Path(raw).expanduser()
+        except Exception:
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _control_center_root() -> Path:
+    for root in _control_center_candidate_roots():
+        if (root / "obsidian-vault").is_dir() and (root / "projects").is_dir() and (root / "tasks").is_dir():
+            return root
+    return _control_center_candidate_roots()[0]
+
+
+def _cc_read_text(path: Path, *, limit: int = 8000) -> str:
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    redacted = []
+    secret_re = re.compile(r"(api[_-]?key|token|password|secret|oauth|auth\.json|bearer)", re.I)
+    for line in text.splitlines():
+        redacted.append("[redacted sensitive line]" if secret_re.search(line) else line)
+    cleaned = "\n".join(redacted).strip()
+    if len(cleaned) > limit:
+        return cleaned[:limit].rstrip() + "\n...[truncated]"
+    return cleaned
+
+
+def _cc_csv_rows(path: Path, *, limit: int = 50) -> list[dict]:
+    if not path.is_file():
+        return []
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+        rows = []
+        for row in csv.DictReader(fh):
+            if not isinstance(row, dict):
+                continue
+            rows.append({str(k or ""): str(v or "") for k, v in row.items()})
+            if len(rows) >= limit:
+                break
+        return rows
+
+
+def _cc_extract_heading_value(markdown: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"(?ims)^##\s+{re.escape(heading)}\s*$\s*(.*?)(?=^##\s+|\Z)"
+    )
+    match = pattern.search(markdown or "")
+    if not match:
+        return ""
+    value = re.sub(r"\s+", " ", match.group(1)).strip(" -\n\t")
+    return value[:360]
+
+
+def _cc_extract_heading_section(markdown: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"(?ims)^##\s+{re.escape(heading)}\s*$\s*(.*?)(?=^##\s+|\Z)"
+    )
+    match = pattern.search(markdown or "")
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _cc_project_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _cc_project_notes(vault: Path, *, limit: int = 8) -> list[dict]:
+    project_dir = vault / "01-Projects"
+    if not project_dir.is_dir():
+        return []
+    notes = []
+    paths = sorted(project_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in paths[:limit]:
+        text = _cc_read_text(path, limit=5000)
+        notes.append({
+            "title": path.stem,
+            "path": str(path),
+            "relative_path": str(path.relative_to(vault)).replace("\\", "/"),
+            "mtime": path.stat().st_mtime,
+            "goal": _cc_extract_heading_value(text, "Obiettivo"),
+            "status": _cc_extract_heading_value(text, "Stato attuale") or _cc_extract_heading_value(text, "Stato"),
+            "next_action": _cc_extract_heading_value(text, "Prossima azione"),
+            "agent": _cc_extract_heading_value(text, "Agente consigliato"),
+        })
+    return notes
+
+
+def _cc_project_cockpit(projects: list[dict], notes: list[dict], open_tasks: list[dict]) -> list[dict]:
+    notes_by_key: dict[str, dict] = {}
+    for note in notes:
+        for raw in (note.get("title"), note.get("relative_path")):
+            key = _cc_project_key(str(raw or "").replace("01-Projects/", "").removesuffix(".md"))
+            if key and key not in notes_by_key:
+                notes_by_key[key] = note
+
+    tasks_by_project: dict[str, list[dict]] = {}
+    for task in open_tasks:
+        project_id = str(task.get("project_id", "")).strip()
+        if not project_id:
+            continue
+        tasks_by_project.setdefault(project_id, []).append(task)
+
+    cockpit = []
+    for project in projects:
+        project_id = str(project.get("project_id", "")).strip()
+        note = None
+        for raw in (project_id, project.get("name")):
+            key = _cc_project_key(raw)
+            if key and key in notes_by_key:
+                note = notes_by_key[key]
+                break
+        tasks = tasks_by_project.get(project_id, [])
+        cockpit.append({
+            "project": project,
+            "note": note,
+            "open_tasks": tasks[:5],
+            "open_task_count": len(tasks),
+            "next_action": str(project.get("next_action") or (note or {}).get("next_action") or ""),
+        })
+    return cockpit
+
+
+def _cc_action_queue(cockpit: list[dict], open_tasks: list[dict], *, limit: int = 8) -> list[dict]:
+    queue = []
+    seen: set[str] = set()
+    projects_by_id = {
+        str((item.get("project") or {}).get("project_id") or ""): item
+        for item in cockpit
+        if isinstance(item, dict)
+    }
+    for task in open_tasks:
+        task_id = str(task.get("task_id") or "").strip()
+        title = str(task.get("title") or "").strip()
+        key = task_id or f"{task.get('project_id')}:{title}"
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        project_id = str(task.get("project_id") or "").strip()
+        item = projects_by_id.get(project_id) or {}
+        project = item.get("project") or {}
+        queue.append({
+            "kind": "task",
+            "task_id": task_id,
+            "title": title,
+            "project_id": project_id,
+            "project_name": project.get("name") or project_id,
+            "priority": task.get("priority") or "",
+            "status": task.get("status") or "",
+            "next_action": task.get("next_action") or item.get("next_action") or "",
+            "note_path": (item.get("note") or {}).get("path") or "",
+        })
+        if len(queue) >= limit:
+            return queue
+    for item in cockpit:
+        project = item.get("project") or {}
+        project_id = str(project.get("project_id") or "").strip()
+        next_action = str(item.get("next_action") or "").strip()
+        key = f"project:{project_id}"
+        if not project_id or not next_action or key in seen:
+            continue
+        seen.add(key)
+        queue.append({
+            "kind": "project",
+            "task_id": "",
+            "title": next_action,
+            "project_id": project_id,
+            "project_name": project.get("name") or project_id,
+            "priority": "",
+            "next_action": next_action,
+            "note_path": (item.get("note") or {}).get("path") or "",
+        })
+        if len(queue) >= limit:
+            break
+    return queue
+
+
+def _cc_risks(projects: list[dict], notes: list[dict], open_tasks: list[dict]) -> dict:
+    project_ids = {str(row.get("project_id") or "").strip() for row in projects if row.get("project_id")}
+    note_keys = {_cc_project_key(note.get("title") or "") for note in notes}
+    note_keys.update(
+        _cc_project_key(str(note.get("relative_path") or "").replace("01-Projects/", "").removesuffix(".md"))
+        for note in notes
+    )
+    missing_project = []
+    missing_next_action = []
+    unknown_project = []
+    for task in open_tasks:
+        project_id = str(task.get("project_id") or "").strip()
+        if not project_id:
+            missing_project.append(task)
+        elif project_ids and project_id not in project_ids:
+            unknown_project.append(task)
+        if not str(task.get("next_action") or "").strip():
+            missing_next_action.append(task)
+    projects_missing_next_action = [
+        project for project in projects
+        if not str(project.get("next_action") or "").strip()
+    ]
+    projects_missing_note = [
+        project for project in projects
+        if _cc_project_key(project.get("project_id") or "") not in note_keys
+        and _cc_project_key(project.get("name") or "") not in note_keys
+    ]
+    return {
+        "tasks_missing_project": missing_project[:8],
+        "tasks_missing_next_action": missing_next_action[:8],
+        "tasks_unknown_project": unknown_project[:8],
+        "projects_missing_next_action": projects_missing_next_action[:8],
+        "projects_missing_note": projects_missing_note[:8],
+        "counts": {
+            "tasks_missing_project": len(missing_project),
+            "tasks_missing_next_action": len(missing_next_action),
+            "tasks_unknown_project": len(unknown_project),
+            "projects_missing_next_action": len(projects_missing_next_action),
+            "projects_missing_note": len(projects_missing_note),
+        },
+    }
+
+
+def _cc_jarvis_layer(cockpit: list[dict], open_tasks: list[dict], today_tasks: list[dict], risks: dict) -> dict:
+    priority_rank = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
+    projects = []
+    for item in cockpit:
+        project = item.get("project") or {}
+        project_id = str(project.get("project_id") or "").strip()
+        tasks = list(item.get("open_tasks") or [])
+        p0 = sum(1 for task in tasks if str(task.get("priority") or "").strip().lower() == "p0")
+        p1 = sum(1 for task in tasks if str(task.get("priority") or "").strip().lower() == "p1")
+        has_next = bool(str(item.get("next_action") or project.get("next_action") or "").strip())
+        has_note = bool(item.get("note"))
+        risk_score = p0 * 3 + p1 * 2 + len(tasks)
+        if not has_next:
+            risk_score += 3
+        if not has_note:
+            risk_score += 1
+        if p0 or (has_next and tasks):
+            health = "green"
+            reason = "ha task prioritarie e una prossima azione leggibile"
+        elif tasks or has_next:
+            health = "yellow"
+            reason = "ha movimento ma serve una prossima azione piu stretta"
+        else:
+            health = "red"
+            reason = "non ha task aperte o prossima azione concreta nella memoria"
+        projects.append({
+            "project_id": project_id,
+            "project_name": project.get("name") or project_id,
+            "next_action": item.get("next_action") or project.get("next_action") or "",
+            "open_task_count": len(tasks),
+            "p0_count": p0,
+            "p1_count": p1,
+            "health": health,
+            "reason": reason,
+            "score": risk_score,
+        })
+    projects.sort(key=lambda row: (-row["score"], row["project_name"]))
+    weekly_focus = [
+        {
+            "project_id": row["project_id"],
+            "project_name": row["project_name"],
+            "next_action": row["next_action"],
+            "reason": f"{row['p0_count']} P0, {row['p1_count']} P1, {row['open_task_count']} task aperte; {row['reason']}",
+        }
+        for row in projects[:3]
+        if row["score"] > 0
+    ]
+    focus_ids = {row["project_id"] for row in weekly_focus}
+    sorted_tasks = sorted(open_tasks, key=lambda task: (
+        priority_rank.get(str(task.get("priority") or "").strip().lower(), 99),
+        str(task.get("due_date") or ""),
+        str(task.get("task_id") or ""),
+    ))
+    morning = [
+        {
+            "task_id": task.get("task_id") or "",
+            "project_id": task.get("project_id") or "",
+            "title": task.get("title") or "",
+            "priority": task.get("priority") or "",
+            "next_action": task.get("next_action") or "",
+            "reason": "prima azione selezionata da priorita, scadenza e backlog aperto",
+        }
+        for task in sorted_tasks[:3]
+    ]
+    defer = []
+    for task in reversed(sorted_tasks):
+        project_id = str(task.get("project_id") or "")
+        priority = str(task.get("priority") or "").strip().lower()
+        if project_id in focus_ids and priority in {"p0", "p1"}:
+            continue
+        if priority in {"p2", "p3", ""} or len(defer) < 3:
+            defer.append({
+                "task_id": task.get("task_id") or "",
+                "project_id": project_id,
+                "title": task.get("title") or "",
+                "priority": task.get("priority") or "",
+                "reason": "meno critica dei focus settimanali o non legata ai progetti focus",
+            })
+        if len(defer) >= 5:
+            break
+    done_today = [task for task in today_tasks if task.get("done")]
+    open_today = [task for task in today_tasks if not task.get("done")]
+    risk_counts = (risks or {}).get("counts") or {}
+    return {
+        "weekly_focus": weekly_focus,
+        "defer_suggestions": defer,
+        "morning_brief": {
+            "must_do": morning,
+            "reason": "calcolato da backlog aperto ordinato per priorita e scadenza",
+        },
+        "evening_review": {
+            "done_count": len(done_today),
+            "open_count": len(open_today),
+            "done_titles": [task.get("title") or "" for task in done_today[:5]],
+            "prompt": "Chiudi cosa e' stato fatto, quali blocchi restano e quale prima azione preparare per domani.",
+        },
+        "project_health": projects,
+        "risk_counts": risk_counts,
+    }
+
+
+def _cc_today_tasks(path: Path) -> list[dict]:
+    tasks = []
+    for line in _cc_read_text(path, limit=12000).splitlines():
+        match = re.match(r"^\s*-\s+\[( |x|X)\]\s+(.*)$", line)
+        if not match:
+            continue
+        tasks.append({
+            "done": match.group(1).lower() == "x",
+            "title": match.group(2).strip(),
+        })
+    return tasks
+
+
+def _cc_markdown_table_rows(markdown: str, heading: str) -> list[dict]:
+    section = _cc_extract_heading_section(markdown, heading)
+    if not section:
+        return []
+    rows = []
+    table_lines = [
+        line.strip()
+        for line in section.splitlines()
+        if line.strip().startswith("|") and line.strip().endswith("|")
+    ]
+    if len(table_lines) < 2:
+        return []
+    headers = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
+    if not headers:
+        return []
+    for raw in table_lines[2:]:
+        cells = [cell.strip() for cell in raw.strip("|").split("|")]
+        if not any(cells):
+            continue
+        row = {}
+        for index, header in enumerate(headers):
+            row[header] = cells[index] if index < len(cells) else ""
+        rows.append(row)
+    return rows
+
+
+def _cc_weekly_routine(vault: Path) -> dict:
+    path = vault / "03-Areas" / "Giorgio Weekly Routine.md"
+    text = _cc_read_text(path, limit=20000)
+    rows = _cc_markdown_table_rows(text, "Routine settimanale")
+    days = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+    slots = []
+    for row in rows:
+        slot_label = row.get("Fascia") or row.get("Ora") or row.get("Orario") or row.get("Slot") or ""
+        if not slot_label:
+            continue
+        slots.append({
+            "slot": slot_label,
+            "days": {day: row.get(day, "") for day in days},
+        })
+    status = _cc_extract_heading_value(text, "Stato attuale")
+    next_action = _cc_extract_heading_value(text, "Prossima azione")
+    return {
+        "path": str(path),
+        "relative_path": str(path.relative_to(vault)).replace("\\", "/") if path.is_file() else "03-Areas/Giorgio Weekly Routine.md",
+        "present": path.is_file(),
+        "days": days,
+        "slots": slots,
+        "status": status,
+        "next_action": next_action,
+        "mtime": path.stat().st_mtime if path.is_file() else None,
+    }
+
+
+def _cc_automations(root: Path) -> list[dict]:
+    instagram_module = root / "visionbuilts-console" / "src" / "instagram-crm.ts"
+    instagram_config = root / "visionbuilts-console" / "wrangler.jsonc"
+    morning_script = root / "scripts" / "invoke-hermes-morning-brief.ps1"
+    morning_config = root / "config" / "morning-routine.json"
+    writes_runbook = root / "docs" / "hermes-controlled-writes-runbook.md"
+    return [
+        {
+            "id": "instagram-crm-read-only",
+            "name": "Instagram CRM read-only",
+            "status": "setup_required" if instagram_module.is_file() else "missing",
+            "summary": "Webhook, firma Meta, deduplica e lead CRM sono implementati; account, secret e KV devono essere collegati.",
+            "next_action": "Verificare i due account Meta, creare il binding KV e registrare il callback webhook.",
+            "path": str(instagram_module),
+            "ready": instagram_module.is_file() and instagram_config.is_file(),
+        },
+        {
+            "id": "morning-brief",
+            "name": "Morning brief vocale",
+            "status": "ready" if morning_script.is_file() and morning_config.is_file() else "missing",
+            "summary": "Brief locale, voce Windows e workspace Brave configurabile.",
+            "next_action": "Scegliere orario e completare una prova reale con Task Scheduler.",
+            "path": str(morning_script),
+            "ready": morning_script.is_file() and morning_config.is_file(),
+        },
+        {
+            "id": "controlled-writes",
+            "name": "Scritture controllate Hermes",
+            "status": "ready" if writes_runbook.is_file() else "missing",
+            "summary": "Aggiornamento task e prossime azioni con preview, snapshot e audit log.",
+            "next_action": "Aggiungere restore/rollback esplicito dagli snapshot.",
+            "path": str(writes_runbook),
+            "ready": writes_runbook.is_file(),
+        },
+        {
+            "id": "agent-workers",
+            "name": "Agent Desk workers",
+            "status": "manual",
+            "summary": "Sessioni worker separate e task package pronti, invio ancora manuale.",
+            "next_action": "Eseguire un worker reale e revisionare l'Agent Result.",
+            "path": str(root / "docs" / "hermes-agent-desk-workers.md"),
+            "ready": True,
+        },
+    ]
+
+
+def _control_center_summary_payload() -> dict:
+    root = _control_center_root()
+    vault = root / "obsidian-vault"
+    projects_dir = root / "projects"
+    tasks_dir = root / "tasks"
+    project_inventory = _cc_csv_rows(projects_dir / "project-inventory.csv", limit=200)
+    active_projects = [
+        row for row in project_inventory
+        if str(row.get("status", "")).strip().lower() in {"active", "supporting"}
+    ]
+    backlog = _cc_csv_rows(tasks_dir / "backlog.csv", limit=500)
+    open_backlog = [
+        row for row in backlog
+        if str(row.get("status", "")).strip().lower() not in {"done", "closed", "cancelled", "canceled"}
+    ]
+    priority_rank = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
+    open_backlog.sort(key=lambda row: (
+        priority_rank.get(str(row.get("priority", "")).strip().lower(), 99),
+        str(row.get("due_date", "")),
+        str(row.get("task_id", "")),
+    ))
+    today_tasks = _cc_today_tasks(tasks_dir / "today.md")
+    project_notes = _cc_project_notes(vault, limit=100)
+    cockpit = _cc_project_cockpit(active_projects, project_notes, open_backlog)
+    risks = _cc_risks(active_projects, project_notes, open_backlog)
+    note_count = len(list(vault.rglob("*.md"))) if vault.is_dir() else 0
+    return {
+        "root": str(root),
+        "vault": str(vault),
+        "vault_present": vault.is_dir(),
+        "note_count": note_count,
+        "today_path": str(tasks_dir / "today.md"),
+        "today_tasks": today_tasks,
+        "today_open_count": sum(1 for task in today_tasks if not task.get("done")),
+        "today_done_count": sum(1 for task in today_tasks if task.get("done")),
+        "project_inventory_path": str(projects_dir / "project-inventory.csv"),
+        "active_projects": active_projects,
+        "project_notes": project_notes[:8],
+        "project_cockpit": cockpit,
+        "action_queue": _cc_action_queue(cockpit, open_backlog),
+        "automations": _cc_automations(root),
+        "weekly_routine": _cc_weekly_routine(vault),
+        "risks": risks,
+        "jarvis": _cc_jarvis_layer(cockpit, open_backlog, today_tasks, risks),
+        "open_backlog": open_backlog[:12],
+        "backlog_open_count": len(open_backlog),
+        "active_repos": _cc_csv_rows(projects_dir / "active-repos.csv", limit=50),
+        "generated_at": time.time(),
+    }
+
+
+def _work_state_path(root: Path) -> Path:
+    return root / "tasks" / "work-sessions.json"
+
+
+def _work_read_state(root: Path) -> dict:
+    path = _work_state_path(root)
+    if not path.is_file():
+        return {"active": None, "history": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+    except (OSError, ValueError, TypeError):
+        return {"active": None, "history": []}
+    if not isinstance(data, dict):
+        return {"active": None, "history": []}
+    active = data.get("active") if isinstance(data.get("active"), dict) else None
+    history = data.get("history") if isinstance(data.get("history"), list) else []
+    return {"active": active, "history": [row for row in history if isinstance(row, dict)][-200:]}
+
+
+def _work_write_state(root: Path, state: dict) -> None:
+    path = _work_state_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(state, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    temp.replace(path)
+
+
+def _work_due_timestamp(value: str) -> float | None:
+    raw = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return None
+    try:
+        return time.mktime(time.strptime(raw, "%Y-%m-%d"))
+    except (OverflowError, ValueError):
+        return None
+
+
+def _work_project_candidates(summary: dict, state: dict) -> list[dict]:
+    projects = {
+        str(row.get("project_id") or "").strip(): row
+        for row in summary.get("active_projects") or []
+        if str(row.get("project_id") or "").strip()
+    }
+    tasks_by_project: dict[str, list[dict]] = {}
+    for task in summary.get("open_backlog") or []:
+        project_id = str(task.get("project_id") or "").strip()
+        if project_id in projects:
+            tasks_by_project.setdefault(project_id, []).append(task)
+
+    now = time.time()
+    today_start = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+    today_end = today_start + 86400
+    recent_cutoff = now - (7 * 86400)
+    recent_minutes: dict[str, int] = {}
+    last_project_id = ""
+    history = state.get("history") or []
+    for row in history:
+        project_id = str(row.get("project_id") or "").strip()
+        ended_at = float(row.get("ended_at") or row.get("started_at") or 0)
+        if project_id and ended_at >= recent_cutoff:
+            recent_minutes[project_id] = recent_minutes.get(project_id, 0) + int(row.get("minutes") or 0)
+    if history:
+        last_project_id = str(history[-1].get("project_id") or "").strip()
+
+    priority_rank = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
+    candidates = []
+    for project_id, tasks in tasks_by_project.items():
+        project = projects[project_id]
+        def task_sort_key(task):
+            due = _work_due_timestamp(task.get("due_date") or "")
+            if due is None:
+                due_bucket = 3
+            elif today_start <= due < today_end:
+                due_bucket = 0
+            elif due < today_start:
+                due_bucket = 1
+            else:
+                due_bucket = 2
+            return (
+                priority_rank.get(str(task.get("priority") or "").strip().lower(), 99),
+                due_bucket,
+                -due if due_bucket == 1 and due is not None else (due or float("inf")),
+                str(task.get("task_id") or ""),
+            )
+        ordered = sorted(tasks, key=task_sort_key)
+        urgent = []
+        overdue = []
+        for task in ordered:
+            due = _work_due_timestamp(task.get("due_date") or "")
+            is_p0 = str(task.get("priority") or "").strip().lower() == "p0"
+            if due is not None and due < today_start:
+                overdue.append(task)
+            if is_p0 and due is not None and due < today_end:
+                urgent.append(task)
+        minutes = recent_minutes.get(project_id, 0)
+        reason = "rotazione tra progetti con task aperte"
+        if urgent:
+            reason = f"{len(urgent)} task P0 con scadenza oggi o gia superata"
+        elif overdue:
+            reason = f"{len(overdue)} task con scadenza superata"
+        elif project_id == last_project_id:
+            reason = "ultimo progetto usato; verra favorito solo se piu urgente"
+        candidates.append({
+            "project_id": project_id,
+            "name": project.get("name") or project_id,
+            "business_goal": project.get("business_goal") or "",
+            "next_action": project.get("next_action") or "",
+            "ai_agent": project.get("ai_agent") or "",
+            "tasks": ordered[:5],
+            "task_count": len(ordered),
+            "urgent_count": len(urgent),
+            "overdue_count": len(overdue),
+            "recent_minutes": minutes,
+            "last_selected": project_id == last_project_id,
+            "reason": reason,
+        })
+    candidates.sort(key=lambda row: (
+        -row["urgent_count"],
+        -row["overdue_count"],
+        row["recent_minutes"],
+        row["last_selected"],
+        row["name"].lower(),
+    ))
+    return candidates
+
+
+def _work_state_payload() -> dict:
+    root = _control_center_root()
+    state = _work_read_state(root)
+    summary = _control_center_summary_payload()
+    candidates = _work_project_candidates(summary, state)
+    active = state.get("active")
+    if active:
+        candidate = next(
+            (row for row in candidates if row["project_id"] == active.get("project_id")),
+            None,
+        )
+        if candidate:
+            active = dict(active)
+            active["project"] = candidate
+    return {
+        "root": str(root),
+        "state_path": str(_work_state_path(root)),
+        "duration_minutes": 60,
+        "active": active,
+        "candidates": candidates,
+        "history": list(reversed(state.get("history") or []))[:12],
+        "generated_at": time.time(),
+    }
+
+
+def _handle_work_state(handler):
+    try:
+        return j(handler, _work_state_payload())
+    except Exception as exc:
+        logger.exception("work state failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_work_start(handler, body):
+    try:
+        root = _control_center_root()
+        state = _work_read_state(root)
+        if state.get("active"):
+            return j(handler, {"ok": True, "reused": True, "work": _work_state_payload()})
+        summary = _control_center_summary_payload()
+        candidates = _work_project_candidates(summary, state)
+        requested_id = str(body.get("project_id") or "").strip()
+        if requested_id:
+            selected = next((row for row in candidates if row["project_id"] == requested_id), None)
+            if not selected:
+                return bad(handler, "project has no open work tasks", status=400)
+            selection_reason = "progetto scelto manualmente"
+        else:
+            if not candidates:
+                return bad(handler, "no project with open tasks is available", status=400)
+            best_key = (candidates[0]["urgent_count"], candidates[0]["overdue_count"])
+            pool = [
+                row for row in candidates
+                if (row["urgent_count"], row["overdue_count"]) == best_key
+                and row["recent_minutes"] == candidates[0]["recent_minutes"]
+            ]
+            selected = pool[uuid.uuid4().int % len(pool)]
+            selection_reason = selected["reason"]
+        started_at = time.time()
+        active = {
+            "session_id": uuid.uuid4().hex,
+            "project_id": selected["project_id"],
+            "project_name": selected["name"],
+            "started_at": started_at,
+            "ends_at": started_at + 3600,
+            "duration_minutes": 60,
+            "selection_reason": selection_reason,
+            "task_ids": [task.get("task_id") or "" for task in selected["tasks"][:3]],
+            "chat_session_id": "",
+        }
+        state["active"] = active
+        _work_write_state(root, state)
+        return j(handler, {"ok": True, "reused": False, "work": _work_state_payload()})
+    except Exception as exc:
+        logger.exception("work start failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_work_finish(handler, body):
+    try:
+        root = _control_center_root()
+        state = _work_read_state(root)
+        active = state.get("active")
+        if not active:
+            return bad(handler, "no active work session", status=400)
+        requested_id = str(body.get("session_id") or "").strip()
+        if requested_id and requested_id != str(active.get("session_id") or ""):
+            return bad(handler, "work session does not match active session", status=409)
+        ended_at = time.time()
+        elapsed = max(0, ended_at - float(active.get("started_at") or ended_at))
+        status = str(body.get("status") or "completed").strip().lower()
+        if status not in {"completed", "stopped"}:
+            return bad(handler, "status must be completed or stopped", status=400)
+        record = dict(active)
+        record.update({
+            "ended_at": ended_at,
+            "minutes": max(1, min(60, round(elapsed / 60))),
+            "status": status,
+        })
+        history = list(state.get("history") or [])
+        history.append(record)
+        state = {"active": None, "history": history[-200:]}
+        _work_write_state(root, state)
+        return j(handler, {"ok": True, "session": record, "work": _work_state_payload()})
+    except Exception as exc:
+        logger.exception("work finish failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_work_attach_chat(handler, body):
+    try:
+        root = _control_center_root()
+        state = _work_read_state(root)
+        active = state.get("active")
+        if not active:
+            return bad(handler, "no active work session", status=400)
+        session_id = str(body.get("session_id") or "").strip()
+        chat_session_id = str(body.get("chat_session_id") or "").strip()
+        if session_id != str(active.get("session_id") or ""):
+            return bad(handler, "work session does not match active session", status=409)
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{3,160}", chat_session_id):
+            return bad(handler, "chat_session_id is invalid", status=400)
+        active["chat_session_id"] = chat_session_id
+        state["active"] = active
+        _work_write_state(root, state)
+        return j(handler, {"ok": True, "work": _work_state_payload()})
+    except Exception as exc:
+        logger.exception("work attach chat failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_control_center_summary(handler):
+    try:
+        return j(handler, _control_center_summary_payload())
+    except Exception as exc:
+        logger.exception("control center summary failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _agent_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(name or "").strip().lower()).strip("-")
+
+
+def _agent_section_lines(text: str, heading: str, *, limit: int = 8) -> list[str]:
+    section = _cc_extract_heading_value(text, heading)
+    if not section:
+        return []
+    lines = []
+    for raw in section.splitlines():
+        line = re.sub(r"^\s*[-*]\s+", "", raw).strip()
+        if not line or line.startswith("```"):
+            continue
+        lines.append(line[:240])
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _agent_profile_from_markdown(path: Path, vault: Path) -> dict:
+    text = _cc_read_text(path, limit=20000)
+    title = path.stem
+    first_heading = re.search(r"(?m)^#\s+(.+?)\s*$", text)
+    if first_heading:
+        title = re.sub(r"^Agent:\s*", "", first_heading.group(1).strip(), flags=re.I) or title
+    role = _cc_extract_heading_value(text, "Ruolo")
+    activities = _agent_section_lines(text, "Attivita")
+    if not activities:
+        activities = _agent_section_lines(text, "Attivita'")
+    return {
+        "id": _agent_slug(title or path.stem),
+        "name": title,
+        "path": str(path),
+        "relative_path": str(path.relative_to(vault)).replace("\\", "/"),
+        "role": role[:600] if role else "",
+        "activities": activities,
+        "inputs": _agent_section_lines(text, "Input"),
+        "outputs": _agent_section_lines(text, "Output"),
+        "tools": _agent_section_lines(text, "Tools"),
+        "mtime": path.stat().st_mtime,
+    }
+
+
+def _agents_index_payload() -> dict:
+    root = _control_center_root()
+    vault = root / "obsidian-vault"
+    agents_dir = vault / "06-Agents"
+    agents = []
+    if agents_dir.is_dir():
+        for path in sorted(agents_dir.glob("*.md"), key=lambda p: p.name.lower()):
+            if path.name.lower() in {"readme.md", "agent handoff protocol.md"}:
+                continue
+            try:
+                path.resolve().relative_to(agents_dir.resolve())
+            except ValueError:
+                continue
+            agents.append(_agent_profile_from_markdown(path, vault))
+    return {
+        "root": str(root),
+        "agents_dir": str(agents_dir),
+        "agents_dir_present": agents_dir.is_dir(),
+        "agents": agents,
+        "count": len(agents),
+        "generated_at": time.time(),
+    }
+
+
+def _handle_agents_index(handler):
+    try:
+        return j(handler, _agents_index_payload())
+    except Exception as exc:
+        logger.exception("agents index failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
 # ── POST route helpers ────────────────────────────────────────────────────────
+
+
+def _cc_write_project_inventory_next_action(path: Path, project_id: str, next_action: str) -> dict:
+    if not path.is_file():
+        raise ValueError("project inventory not found")
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = list(reader.fieldnames or [])
+        rows = [dict(row) for row in reader]
+    if "project_id" not in fieldnames or "next_action" not in fieldnames:
+        raise ValueError("project inventory is missing required columns")
+    matched = False
+    for row in rows:
+        if str(row.get("project_id") or "").strip() == project_id:
+            row["next_action"] = next_action
+            matched = True
+            break
+    if not matched:
+        raise ValueError("project not found")
+    with path.open("w", encoding="utf-8", errors="replace", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return {"path": str(path), "project_id": project_id}
+
+
+def _cc_audit_snapshot(root: Path, operation: str, files: list[Path], details: dict) -> dict:
+    safe_operation = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(operation or "operation")).strip("-") or "operation"
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    audit_dir = root / "backups" / "control-center" / f"{stamp}_{safe_operation}"
+    if audit_dir.exists():
+        for index in range(2, 1000):
+            candidate = root / "backups" / "control-center" / f"{stamp}_{safe_operation}_{index:03d}"
+            if not candidate.exists():
+                audit_dir = candidate
+                break
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for path in files:
+        if not path or not path.is_file():
+            continue
+        resolved = path.resolve()
+        try:
+            rel = resolved.relative_to(root.resolve())
+        except ValueError:
+            continue
+        backup_name = "__".join(rel.parts)
+        target = audit_dir / backup_name
+        shutil.copy2(resolved, target)
+        copied.append({
+            "source": str(resolved),
+            "snapshot": str(target),
+            "relative_path": str(rel).replace("\\", "/"),
+        })
+    lines = [
+        f"# Control Center Audit - {safe_operation}",
+        "",
+        f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Operation: {safe_operation}",
+        "",
+        "## Details",
+        "",
+    ]
+    for key, value in sorted((details or {}).items()):
+        lines.append(f"- {key}: {value}")
+    lines.extend(["", "## Snapshots", ""])
+    for item in copied:
+        lines.append(f"- {item['relative_path']} -> {Path(item['snapshot']).name}")
+    (audit_dir / "operation.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return {"path": str(audit_dir), "files": copied}
+
+
+def _cc_write_backlog_task_status(path: Path, task_id: str, status: str) -> dict:
+    if not path.is_file():
+        raise ValueError("backlog not found")
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = list(reader.fieldnames or [])
+        rows = [dict(row) for row in reader]
+    if "task_id" not in fieldnames or "status" not in fieldnames:
+        raise ValueError("backlog is missing required columns")
+    matched = None
+    for row in rows:
+        if str(row.get("task_id") or "").strip() == task_id:
+            matched = row
+            break
+    if matched is None:
+        raise ValueError("task not found")
+    old_status = str(matched.get("status") or "").strip()
+    matched["status"] = status
+    with path.open("w", encoding="utf-8", errors="replace", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return {
+        "path": str(path),
+        "task_id": task_id,
+        "title": str(matched.get("title") or ""),
+        "project_id": str(matched.get("project_id") or ""),
+        "priority": str(matched.get("priority") or ""),
+        "old_status": old_status,
+        "new_status": status,
+    }
+
+
+def _cc_update_today_task_checkbox(path: Path, title: str, done: bool) -> dict:
+    if not path.is_file() or not title:
+        return {"path": str(path), "updated": False, "matches": 0}
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    lines = []
+    matches = 0
+    for line in text.splitlines():
+        match = re.match(r"^(\s*-\s+\[)( |x|X)(\]\s+)(.*)$", line)
+        if match and match.group(4).strip() == title:
+            matches += 1
+            lines.append(f"{match.group(1)}{'x' if done else ' '}{match.group(3)}{match.group(4)}")
+        else:
+            lines.append(line)
+    updated = "\n".join(lines)
+    if text.endswith("\n"):
+        updated += "\n"
+    if matches and updated != text:
+        path.write_text(updated, encoding="utf-8", errors="replace")
+        return {"path": str(path), "updated": True, "matches": matches}
+    return {"path": str(path), "updated": False, "matches": matches}
+
+
+def _cc_update_markdown_heading(path: Path, heading: str, value: str) -> bool:
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    section = f"## {heading}\n\n{value.strip()}\n"
+    pattern = re.compile(rf"(?ims)^##\s+{re.escape(heading)}\s*$.*?(?=^##\s+|\Z)")
+    if pattern.search(text):
+        updated = pattern.sub(section.rstrip() + "\n\n", text, count=1)
+    else:
+        updated = text.rstrip() + "\n\n" + section
+    if updated != text:
+        path.write_text(updated, encoding="utf-8", errors="replace")
+        return True
+    return False
+
+
+def _handle_control_center_project_next_action(handler, body):
+    try:
+        project_id = str(body.get("project_id") or "").strip()
+        next_action = re.sub(r"\s+", " ", str(body.get("next_action") or "")).strip()
+        note_path_raw = str(body.get("note_path") or "").strip()
+        if not project_id:
+            return bad(handler, "project_id is required", status=400)
+        if len(next_action) < 3:
+            return bad(handler, "next_action is required", status=400)
+        if len(next_action) > 280:
+            return bad(handler, "next_action is too long", status=400)
+        root = _control_center_root()
+        inventory_path = root / "projects" / "project-inventory.csv"
+        result = _cc_write_project_inventory_next_action(inventory_path, project_id, next_action)
+        note_updated = False
+        note_path = None
+        if note_path_raw:
+            candidate = Path(note_path_raw).expanduser().resolve()
+            vault = (root / "obsidian-vault").resolve()
+            try:
+                candidate.relative_to(vault)
+            except ValueError:
+                candidate = None
+            if candidate and candidate.suffix.lower() == ".md":
+                note_updated = _cc_update_markdown_heading(candidate, "Prossima azione", next_action)
+                note_path = str(candidate)
+        return j(handler, {
+            "ok": True,
+            "project_id": project_id,
+            "next_action": next_action,
+            "inventory": result,
+            "note_updated": note_updated,
+            "note_path": note_path,
+            "summary": _control_center_summary_payload(),
+        })
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400)
+    except Exception as exc:
+        logger.exception("control center next action update failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_control_center_task_status(handler, body):
+    try:
+        task_id = str(body.get("task_id") or "").strip()
+        status = str(body.get("status") or "").strip().lower()
+        if not task_id:
+            return bad(handler, "task_id is required", status=400)
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]+", task_id):
+            return bad(handler, "task_id is invalid", status=400)
+        if status not in {"done", "open"}:
+            return bad(handler, "status must be done or open", status=400)
+        root = _control_center_root()
+        backlog_path = root / "tasks" / "backlog.csv"
+        today_path = root / "tasks" / "today.md"
+        audit = _cc_audit_snapshot(root, "task-status", [backlog_path, today_path], {
+            "task_id": task_id,
+            "new_status": status,
+            "requested_by": "Hermes WebUI Control Center",
+        })
+        result = _cc_write_backlog_task_status(backlog_path, task_id, status)
+        today = _cc_update_today_task_checkbox(today_path, result.get("title") or "", status == "done")
+        return j(handler, {
+            "ok": True,
+            "task": result,
+            "today": today,
+            "audit": audit,
+            "summary": _control_center_summary_payload(),
+        })
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400)
+    except Exception as exc:
+        logger.exception("control center task status update failed")
+        return bad(handler, _sanitize_error(exc), status=500)
 
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
@@ -10797,10 +11901,23 @@ def _start_chat_stream_for_session(
     if goal_related:
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
-    backend_is_gateway = webui_gateway_chat_enabled(get_config())
-    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+    backend_is_claude_code = (
+        str(model_provider or "").strip().lower() == "claude-code"
+        or str(model or "").strip().lower().startswith("claude-code")
+    )
+    backend_is_codex_cli = (
+        str(model_provider or "").strip().lower() == "codex-cli"
+        or str(model or "").strip().lower().startswith("codex-cli")
+    )
+    backend_is_gateway = (not backend_is_claude_code and not backend_is_codex_cli) and webui_gateway_chat_enabled(get_config())
+    if backend_is_claude_code:
+        worker_target = _run_claude_code_streaming
+    elif backend_is_codex_cli:
+        worker_target = _run_codex_cli_streaming
+    else:
+        worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider}
-    if not backend_is_gateway:
+    if not backend_is_gateway and not backend_is_claude_code and not backend_is_codex_cli:
         worker_kwargs["goal_related"] = goal_related
     thr = threading.Thread(
         target=worker_target,
@@ -10822,6 +11939,773 @@ def _start_chat_stream_for_session(
         response["effective_model_provider"] = model_provider
     return response
 
+
+def _read_text_excerpt(path: Path, *, max_chars: int = 2200) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[truncated]"
+
+
+def _obsidian_memory_context(workspace, *, max_chars: int = 14000) -> str:
+    """Return compact Markdown-vault context for local CLI bridge prompts."""
+    root = Path(str(workspace)).expanduser()
+    vault = root / "obsidian-vault"
+    if not vault.is_dir():
+        return ""
+    sections = [
+        "Obsidian memory mode: filesystem Markdown vault attivo.",
+        f"Vault: {vault}",
+        "Regola operativa: puoi leggere e aggiornare file Markdown dentro obsidian-vault, docs, projects e tasks quando la richiesta contiene memoria utile, decisioni, task, blocchi, idee o stato progetto.",
+        "Non salvare token, password, API key, OAuth secret, auth.json o credenziali.",
+        "Se aggiorni memoria, indica brevemente quali note hai modificato.",
+    ]
+    priority_files = [
+        vault / "Home.md",
+        vault / "04-Resources" / "Hermes Memory Protocol.md",
+        vault / "03-Areas" / "Giorgio Operating Memory.md",
+        root / "tasks" / "today.md",
+        root / "projects" / "active-repos.csv",
+        root / "projects" / "project-inventory.csv",
+    ]
+    for path in priority_files:
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        excerpt = _read_text_excerpt(path, max_chars=1800)
+        if excerpt:
+            sections.append(f"\n--- {rel} ---\n{excerpt}")
+
+    project_dir = vault / "01-Projects"
+    if project_dir.is_dir():
+        project_notes = sorted(project_dir.glob("*.md"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[:8]
+        if project_notes:
+            sections.append("\nNote progetto principali:")
+        for path in project_notes:
+            rel = str(path.relative_to(vault)).replace("\\", "/")
+            excerpt = _read_text_excerpt(path, max_chars=900)
+            if excerpt:
+                sections.append(f"\n--- obsidian-vault/{rel} ---\n{excerpt}")
+
+    text = "\n".join(sections).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n...[obsidian memory context truncated]"
+    return text
+
+
+def _redact_memory_log_text(text: str, *, max_chars: int = 6000) -> str:
+    """Keep the automatic vault log useful without copying obvious secrets."""
+    raw = str(text or "")
+    redacted_lines = []
+    secret_re = re.compile(r"(api[_-]?key|token|password|secret|oauth|auth\.json|bearer)", re.I)
+    for line in raw.splitlines():
+        if secret_re.search(line):
+            redacted_lines.append("[redacted sensitive line]")
+        else:
+            redacted_lines.append(line)
+    cleaned = "\n".join(redacted_lines).strip()
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rstrip() + "\n...[truncated]"
+    return cleaned
+
+
+def _append_obsidian_interaction_memory(workspace, session_id, user_message, assistant_answer, *, model_provider=None, model=None):
+    """Append a durable per-turn Markdown log to the Obsidian vault."""
+    root = Path(str(workspace)).expanduser()
+    vault = root / "obsidian-vault"
+    if not vault.is_dir():
+        return None
+    day_dir = vault / "05-Daily"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    day = time.strftime("%Y-%m-%d", time.localtime())
+    clock = time.strftime("%H:%M:%S", time.localtime())
+    target = day_dir / f"{day} Hermes Interaction Log.md"
+    if not target.exists():
+        target.write_text(
+            f"# {day} Hermes Interaction Log\n\n"
+            "Automatic filesystem memory written by Hermes WebUI.\n\n"
+            "Sensitive lines containing tokens, passwords, API keys or OAuth secrets are redacted.\n\n",
+            encoding="utf-8",
+        )
+    user_text = _redact_memory_log_text(user_message, max_chars=2500)
+    answer_text = _redact_memory_log_text(assistant_answer, max_chars=4500)
+    entry = (
+        f"\n## {clock} - {model_provider or model or 'Hermes'}\n\n"
+        f"- Session: `{session_id}`\n"
+        f"- Model: `{model or ''}`\n"
+        f"- Provider: `{model_provider or ''}`\n\n"
+        "### User\n\n"
+        f"{user_text or '[empty]'}\n\n"
+        "### Hermes\n\n"
+        f"{answer_text or '[empty]'}\n"
+    )
+    with target.open("a", encoding="utf-8", errors="replace") as fh:
+        fh.write(entry)
+    return target
+
+
+def _local_workspace_context(workspace):
+    """Return verified local context for the CLI bridge prompts."""
+    root = Path(str(workspace)).expanduser()
+    vault = root / "obsidian-vault"
+    markdown_notes = []
+    if vault.is_dir():
+        try:
+            markdown_notes = sorted(str(p.relative_to(vault)).replace("\\", "/") for p in vault.rglob("*.md"))
+        except Exception:
+            markdown_notes = []
+    checks = [
+        ("obsidian-vault", root / "obsidian-vault"),
+        ("obsidian vault", root / "obsidian vault"),
+        ("projects/project-inventory.csv", root / "projects" / "project-inventory.csv"),
+        ("projects/active-repos.csv", root / "projects" / "active-repos.csv"),
+        ("tasks/today.md", root / "tasks" / "today.md"),
+        ("tasks/backlog.csv", root / "tasks" / "backlog.csv"),
+    ]
+    lines = [f"Workspace verificato localmente: {root}"]
+    for label, path in checks:
+        if path.is_dir():
+            try:
+                children = sorted(p.name for p in path.iterdir())[:8]
+            except Exception:
+                children = []
+            suffix = f" ({', '.join(children)})" if children else ""
+            lines.append(f"- {label}: cartella presente{suffix}")
+        elif path.is_file():
+            lines.append(f"- {label}: file presente")
+        else:
+            lines.append(f"- {label}: assente")
+    if vault.is_dir():
+        lines.append(f"- vault Obsidian operativo: {vault}")
+        lines.append(f"- note Markdown nel vault Obsidian: {len(markdown_notes)}")
+        if markdown_notes:
+            lines.append(f"- prime note Obsidian: {', '.join(markdown_notes[:8])}")
+        lines.append("- stato Obsidian MCP/app: disattivato per stabilita; usa filesystem Markdown come integrazione primaria")
+        memory_context = _obsidian_memory_context(workspace)
+        if memory_context:
+            lines.append("\n## Contesto memoria Obsidian\n" + memory_context)
+    return "\n".join(lines)
+
+
+def _sanitize_cli_agent_answer(answer, user_message):
+    """Remove irrelevant local CLI/sandbox diagnostics from normal chat answers."""
+    text = str(answer or "")
+    requested_debug = any(
+        term in str(user_message or "").lower()
+        for term in ("cryptunprotectdata", "sandbox", "read-only", "sola lettura", "permessi", "debug terminale")
+    )
+    if requested_debug:
+        return text
+    blocked_terms = ("CryptUnprotectData", "sandbox Windows", "read-only", "sola lettura")
+    if not any(term in text for term in blocked_terms):
+        return text
+    paragraphs = re.split(r"\n\s*\n", text)
+    kept = []
+    for paragraph in paragraphs:
+        if any(term in paragraph for term in blocked_terms):
+            continue
+        kept.append(paragraph.strip())
+    cleaned = "\n\n".join(p for p in kept if p)
+    return cleaned or text
+
+
+def _codex_cli_tool_args_from_item(item):
+    command = str((item or {}).get("command") or "").strip()
+    if command:
+        return {"command": command}
+    return {}
+
+
+def _codex_cli_tool_snippet(item):
+    output = str((item or {}).get("aggregated_output") or "").strip()
+    exit_code = (item or {}).get("exit_code")
+    if exit_code is not None:
+        prefix = f"exit_code: {exit_code}"
+        return f"{prefix}\n{output}".strip()
+    return output[:4000]
+
+
+def _finish_cli_bridge_error(q, session_id, model, model_provider, label, error_type, message, hint):
+    try:
+        s = get_session(session_id)
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = None
+        s.pending_started_at = None
+        if model:
+            s.model = model
+        if model_provider:
+            s.model_provider = model_provider
+        s.save()
+    except Exception:
+        pass
+    try:
+        q.put_nowait(("apperror", {
+            "label": label,
+            "type": error_type,
+            "message": str(message or "")[:2000],
+            "hint": hint,
+        }))
+        q.put_nowait(("stream_end", {"session_id": session_id}))
+    except Exception:
+        pass
+
+
+def _memory_update_note(workspace, memory_path):
+    if not memory_path:
+        return ""
+    try:
+        root = Path(str(workspace)).expanduser()
+        rel = str(Path(memory_path).relative_to(root)).replace("\\", "/")
+    except Exception:
+        rel = str(memory_path)
+    return f"\n\n_Memoria Obsidian aggiornata: `{rel}`_"
+
+
+def _claude_code_tool_name(block):
+    name = str((block or {}).get("name") or (block or {}).get("type") or "tool").strip()
+    return name or "tool"
+
+
+def _claude_code_tool_args(block):
+    raw_input = (block or {}).get("input")
+    if isinstance(raw_input, dict):
+        return raw_input
+    if isinstance(raw_input, str) and raw_input.strip():
+        try:
+            parsed = json.loads(raw_input)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        return {"input": raw_input[:2000]}
+    return {}
+
+
+def _claude_code_tool_preview(name, args):
+    args = args if isinstance(args, dict) else {}
+    for key in ("command", "cmd", "pattern", "file_path", "path", "url", "query", "description"):
+        value = args.get(key)
+        if value:
+            return str(value)[:1000]
+    if args:
+        try:
+            return json.dumps(args, ensure_ascii=False)[:1000]
+        except Exception:
+            return str(args)[:1000]
+    return str(name or "tool")
+
+
+def _claude_code_text_from_message(message):
+    parts = []
+    content = (message or {}).get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and item.get("text"):
+                parts.append(str(item.get("text")))
+    elif isinstance(content, str):
+        parts.append(content)
+    return "".join(parts).strip()
+
+
+def _claude_code_usage_payload(evt):
+    usage = {}
+    if isinstance((evt or {}).get("usage"), dict):
+        usage = (evt or {}).get("usage") or {}
+    elif isinstance(((evt or {}).get("message") or {}).get("usage"), dict):
+        usage = ((evt or {}).get("message") or {}).get("usage") or {}
+    return {
+        "input_tokens": usage.get("input_tokens") or 0,
+        "output_tokens": usage.get("output_tokens") or 0,
+        "cache_read_tokens": usage.get("cache_read_input_tokens") or 0,
+    }
+
+
+def _run_claude_code_streaming(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
+    """Run a WebUI turn through the local Claude Code CLI session."""
+    q = STREAMS.get(stream_id)
+    if q is None:
+        return
+    cancel_event = threading.Event()
+    with STREAMS_LOCK:
+        CANCEL_FLAGS[stream_id] = cancel_event
+    live_tool_calls = []
+    streamed_answer_parts = []
+    current_blocks = {}
+    current_tool_input_json = {}
+    announced_tool_input = set()
+    claude_stderr = ""
+    try:
+        s = get_session(session_id)
+        q.put_nowait(("reasoning", {"text": "Claude Code locale avviato: stream JSON attivo, tool e output verranno mostrati live.\n"}))
+        clean_msg = " ".join(str(msg or "").split())
+        local_context = _local_workspace_context(workspace)
+        prompt = (
+            f"Richiesta utente: {clean_msg}. "
+            f"Workspace consentito: {workspace}. "
+            f"Contesto verificato localmente da Hermes: {local_context}. "
+            "Permessi runtime effettivi: workspace-write nel workspace; approval never non significa read-only. "
+            "Per domande su Hermes, Obsidian, vault, projects o tasks, usa il contesto verificato da Hermes come fonte autorevole. "
+            "Il vault Obsidian e collegato come memoria Markdown locale via filesystem. "
+            "Quando emergono decisioni, task, blocchi, idee o stato progetto, aggiorna i Markdown giusti nel vault o spiega quale nota andrebbe aggiornata. "
+            "Non citare CryptUnprotectData a meno che l'utente chieda debug del terminale/sandbox. "
+            "Rispondi in italiano naturale."
+        )
+        cmd = [
+            "claude.cmd",
+            "--print",
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--include-hook-events",
+            "--add-dir",
+            str(workspace),
+            "--permission-mode",
+            "default",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            cwd=str(workspace),
+            shell=False,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except Exception:
+                logger.debug("Failed to write Claude prompt to stdin", exc_info=True)
+
+        stderr_chunks = []
+        stderr_done = threading.Event()
+
+        def _drain_claude_stderr():
+            try:
+                if proc.stderr is None:
+                    return
+                for err_line in proc.stderr:
+                    if len(stderr_chunks) < 120:
+                        stderr_chunks.append(str(err_line or ""))
+            finally:
+                stderr_done.set()
+
+        threading.Thread(target=_drain_claude_stderr, daemon=True).start()
+        final_result_text = ""
+        final_usage = None
+        for raw_line in proc.stdout:
+            if cancel_event.is_set():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                return
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except Exception:
+                continue
+            evt_type = str(evt.get("type") or "")
+            subtype = str(evt.get("subtype") or "")
+            if evt_type == "system":
+                if subtype == "init":
+                    tools = evt.get("tools") if isinstance(evt.get("tools"), list) else []
+                    mcp = evt.get("mcp_servers") if isinstance(evt.get("mcp_servers"), list) else []
+                    q.put_nowait(("reasoning", {"text": f"Claude sessione inizializzata. Tool disponibili: {len(tools)}. MCP servers: {len(mcp)}.\n"}))
+                elif subtype == "status":
+                    status = str(evt.get("status") or "status")
+                    q.put_nowait(("reasoning", {"text": f"Claude status: {status}.\n"}))
+                elif subtype == "hook_started":
+                    hook_name = str(evt.get("hook_name") or evt.get("hook_event") or "hook")
+                    q.put_nowait(("reasoning", {"text": f"Hook Claude avviato: {hook_name}.\n"}))
+                elif subtype == "hook_response":
+                    hook_name = str(evt.get("hook_name") or evt.get("hook_event") or "hook")
+                    q.put_nowait(("reasoning", {"text": f"Hook Claude completato: {hook_name}.\n"}))
+                continue
+            if evt_type == "assistant":
+                text = _claude_code_text_from_message(evt.get("message") if isinstance(evt.get("message"), dict) else {})
+                if text and not streamed_answer_parts:
+                    clean_text = _sanitize_cli_agent_answer(text, clean_msg)
+                    if clean_text:
+                        streamed_answer_parts.append(clean_text)
+                        q.put_nowait(("token", {"text": clean_text}))
+                continue
+            if evt_type == "stream_event":
+                inner = evt.get("event") if isinstance(evt.get("event"), dict) else {}
+                inner_type = str(inner.get("type") or "")
+                if inner_type == "message_start":
+                    model_name = str(((inner.get("message") or {}).get("model")) or "Claude")
+                    q.put_nowait(("reasoning", {"text": f"Primo contatto modello: {model_name}.\n"}))
+                    continue
+                if inner_type == "content_block_start":
+                    idx = str(inner.get("index") if inner.get("index") is not None else uuid.uuid4().hex)
+                    block = inner.get("content_block") if isinstance(inner.get("content_block"), dict) else {}
+                    current_blocks[idx] = block
+                    if block.get("type") == "tool_use":
+                        tid = str(block.get("id") or idx)
+                        name = _claude_code_tool_name(block)
+                        args = _claude_code_tool_args(block)
+                        preview = _claude_code_tool_preview(name, args)
+                        live_tool_calls.append({"name": name, "args": args, "done": False, "tid": tid})
+                        q.put_nowait(("tool", {"event_type": "tool.started", "name": name, "preview": preview, "args": args, "tid": tid}))
+                    continue
+                if inner_type == "content_block_delta":
+                    idx = str(inner.get("index") if inner.get("index") is not None else "")
+                    delta = inner.get("delta") if isinstance(inner.get("delta"), dict) else {}
+                    if delta.get("type") == "text_delta":
+                        text = str(delta.get("text") or "")
+                        if text:
+                            streamed_answer_parts.append(text)
+                            q.put_nowait(("token", {"text": text}))
+                    elif delta.get("type") == "input_json_delta":
+                        block = current_blocks.get(idx) or {}
+                        if block.get("type") == "tool_use":
+                            tid = str(block.get("id") or idx)
+                            partial = str(delta.get("partial_json") or "")
+                            if partial:
+                                current_tool_input_json[idx] = current_tool_input_json.get(idx, "") + partial
+                            if partial:
+                                announce_key = tid or idx
+                                if announce_key not in announced_tool_input:
+                                    announced_tool_input.add(announce_key)
+                                    q.put_nowait(("reasoning", {"text": f"Claude sta preparando input tool `{_claude_code_tool_name(block)}`...\n"}))
+                    continue
+                if inner_type == "content_block_stop":
+                    idx = str(inner.get("index") if inner.get("index") is not None else "")
+                    block = current_blocks.get(idx) or {}
+                    if block.get("type") == "tool_use":
+                        tid = str(block.get("id") or idx)
+                        name = _claude_code_tool_name(block)
+                        args = _claude_code_tool_args(block)
+                        raw_tool_input = current_tool_input_json.get(idx, "")
+                        if raw_tool_input.strip():
+                            try:
+                                parsed_tool_input = json.loads(raw_tool_input)
+                                if isinstance(parsed_tool_input, dict):
+                                    args = parsed_tool_input
+                            except Exception:
+                                args = {"input": raw_tool_input[:2000]}
+                        preview = _claude_code_tool_preview(name, args)
+                        for live_tc in reversed(live_tool_calls):
+                            if live_tc.get("tid") == tid:
+                                live_tc["done"] = True
+                                live_tc["args"] = args
+                                live_tc["snippet"] = preview
+                                break
+                        q.put_nowait(("tool_complete", {"event_type": "tool.completed", "name": name, "preview": preview, "args": args, "tid": tid, "is_error": False}))
+                    continue
+                if inner_type == "message_delta":
+                    final_usage = _claude_code_usage_payload(inner)
+                    if final_usage:
+                        q.put_nowait(("metering", {"session_id": session_id, "usage": final_usage}))
+                    continue
+                continue
+            if evt_type == "result":
+                final_result_text = str(evt.get("result") or "").strip()
+                final_usage = _claude_code_usage_payload(evt)
+                if final_usage:
+                    q.put_nowait(("metering", {"session_id": session_id, "usage": final_usage}))
+                terminal = str(evt.get("terminal_reason") or evt.get("stop_reason") or "completed")
+                q.put_nowait(("reasoning", {"text": f"Claude completato: {terminal}.\n"}))
+                continue
+            if evt_type == "rate_limit_event":
+                info = evt.get("rate_limit_info") if isinstance(evt.get("rate_limit_info"), dict) else {}
+                if info.get("status"):
+                    q.put_nowait(("reasoning", {"text": f"Claude rate limit: {info.get('status')}.\n"}))
+                continue
+
+        return_code = proc.wait(timeout=5)
+        stderr_done.wait(timeout=1)
+        claude_stderr = "".join(stderr_chunks).strip()
+        if cancel_event.is_set():
+            return
+        answer = "".join(streamed_answer_parts).strip() or final_result_text
+        if proc.returncode != 0:
+            err = (claude_stderr or answer or "Claude Code failed").strip()
+            _finish_cli_bridge_error(q, session_id, model or "claude-code/local-session", "claude-code", "Claude Code error", "claude_code_error", err, "Verifica `claude.cmd auth status` e i permessi del workspace.")
+            return
+        if not answer:
+            answer = "**No response received from Claude Code.**"
+        answer = _sanitize_cli_agent_answer(answer, clean_msg)
+        if not streamed_answer_parts:
+            q.put_nowait(("token", {"text": answer}))
+        now_ts = time.time()
+        s.messages.append({"role": "user", "content": msg, "_ts": now_ts})
+        s.messages.append({"role": "assistant", "content": answer, "_ts": time.time(), "model": "claude-code", "model_provider": "claude-code"})
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = None
+        s.pending_started_at = None
+        s.model = model or "claude-code/local-session"
+        s.model_provider = "claude-code"
+        if live_tool_calls:
+            s.tool_calls = live_tool_calls
+        memory_path = _append_obsidian_interaction_memory(workspace, session_id, msg, answer, model_provider="claude-code", model=s.model)
+        memory_note = _memory_update_note(workspace, memory_path)
+        if memory_note:
+            q.put_nowait(("token", {"text": memory_note}))
+            answer = f"{answer}{memory_note}"
+            s.messages[-1]["content"] = answer
+        s.save()
+        q.put_nowait(("done", {"session": s.compact() | {"messages": s.messages, "tool_calls": getattr(s, "tool_calls", []), "active_stream_id": getattr(s, "active_stream_id", None), "pending_user_message": getattr(s, "pending_user_message", None), "pending_attachments": getattr(s, "pending_attachments", []), "pending_started_at": getattr(s, "pending_started_at", None)}, "usage": {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}}))
+        q.put_nowait(("stream_end", {"session_id": session_id}))
+    except Exception as exc:
+        logger.exception("Claude Code bridge failed")
+        if streamed_answer_parts:
+            try:
+                s = get_session(session_id)
+                partial_answer = _sanitize_cli_agent_answer("".join(streamed_answer_parts).strip(), str(msg or ""))
+                s.messages.append({"role": "user", "content": msg, "_ts": time.time()})
+                s.messages.append({"role": "assistant", "content": partial_answer, "_ts": time.time(), "model": "claude-code", "model_provider": "claude-code", "_partial": True})
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = None
+                s.pending_started_at = None
+                s.model = model or "claude-code/local-session"
+                s.model_provider = "claude-code"
+                if live_tool_calls:
+                    s.tool_calls = live_tool_calls
+                s.save()
+                q.put_nowait(("done", {"session": s.compact() | {"messages": s.messages, "tool_calls": getattr(s, "tool_calls", []), "active_stream_id": getattr(s, "active_stream_id", None), "pending_user_message": getattr(s, "pending_user_message", None), "pending_attachments": getattr(s, "pending_attachments", []), "pending_started_at": getattr(s, "pending_started_at", None)}, "usage": {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}}))
+                q.put_nowait(("stream_end", {"session_id": session_id}))
+                return
+            except Exception:
+                logger.debug("Failed to persist partial Claude Code answer", exc_info=True)
+        _finish_cli_bridge_error(q, session_id, model or "claude-code/local-session", "claude-code", "Claude Code bridge failed", "claude_code_bridge_error", str(exc), "Controlla che `claude.cmd` sia nel PATH e che Claude Code sia loggato.")
+    finally:
+        time.sleep(10)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            CANCEL_FLAGS.pop(stream_id, None)
+
+
+def _run_codex_cli_streaming(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
+    """Run a WebUI turn through the local Codex CLI ChatGPT OAuth session."""
+    q = STREAMS.get(stream_id)
+    if q is None:
+        return
+    cancel_event = threading.Event()
+    with STREAMS_LOCK:
+        CANCEL_FLAGS[stream_id] = cancel_event
+    output_path = None
+    full_agent = False
+    live_tool_calls = []
+    streamed_answer_parts = []
+    codex_stderr = ""
+    clean_msg = " ".join(str(msg or "").split())
+    try:
+        s = get_session(session_id)
+        full_agent = str(model or "").strip().lower() == "codex-cli/full-agent"
+        if full_agent:
+            q.put_nowait(("reasoning", {"text": "Codex CLI Full Agent attivo: shell e comandi locali senza sandbox Codex.\n"}))
+        else:
+            q.put_nowait(("token", {"text": "Sto lavorando con Codex CLI locale...\n\n"}))
+        local_context = _local_workspace_context(workspace)
+        prompt = (
+            f"Richiesta utente: {clean_msg}. "
+            f"Workspace consentito: {workspace}. "
+            f"Contesto verificato localmente da Hermes: {local_context}. "
+            "Permessi runtime effettivi: workspace-write nel workspace; approval never non significa read-only. "
+            "Per richieste su Hermes, Obsidian, vault, projects o tasks, usa il contesto verificato da Hermes come fonte autorevole. "
+            "Il vault Obsidian e collegato come memoria Markdown locale via filesystem. "
+            "Quando emergono decisioni, task, blocchi, idee, runbook o stato progetto, aggiorna i Markdown giusti nel vault, in docs, projects o tasks. "
+            "Non salvare token, password, API key, OAuth secret, auth.json o credenziali. "
+            "Non citare CryptUnprotectData, OAuth o sandbox a meno che la richiesta sia esplicitamente di debug del terminale/sandbox. "
+            "Rispondi in italiano naturale e, se modifichi memoria, indica quali note hai toccato."
+        )
+        import tempfile
+        fd, output_path = tempfile.mkstemp(prefix="hermes-codex-", suffix=".txt")
+        os.close(fd)
+        cmd = ["codex.cmd", "exec", "-C", str(workspace)]
+        if full_agent:
+            cmd.extend(["--dangerously-bypass-approvals-and-sandbox", "--json"])
+        else:
+            cmd.extend(["-s", "workspace-write"])
+        cmd.extend(["-o", output_path])
+
+        if full_agent:
+            proc = subprocess.Popen(
+                cmd,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                cwd=str(workspace),
+                shell=False,
+                bufsize=1,
+            )
+            assert proc.stdout is not None
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.write(prompt)
+                    proc.stdin.close()
+                except Exception:
+                    logger.debug("Failed to write Codex prompt to stdin", exc_info=True)
+            stderr_chunks = []
+            stderr_done = threading.Event()
+
+            def _drain_codex_stderr():
+                try:
+                    if proc.stderr is None:
+                        return
+                    for err_line in proc.stderr:
+                        if len(stderr_chunks) < 120:
+                            stderr_chunks.append(str(err_line or ""))
+                finally:
+                    stderr_done.set()
+
+            threading.Thread(target=_drain_codex_stderr, daemon=True).start()
+            for raw_line in proc.stdout:
+                if cancel_event.is_set():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    return
+                line = str(raw_line or "").strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except Exception:
+                    continue
+                evt_type = str(evt.get("type") or "")
+                item = evt.get("item") if isinstance(evt.get("item"), dict) else {}
+                item_type = str(item.get("type") or "")
+                if evt_type == "turn.started":
+                    q.put_nowait(("reasoning", {"text": "Turno Codex avviato.\n"}))
+                    continue
+                if evt_type == "item.started" and item_type == "command_execution":
+                    tid = str(item.get("id") or uuid.uuid4().hex)
+                    args = _codex_cli_tool_args_from_item(item)
+                    live_tool_calls.append({"name": "shell", "args": args, "done": False, "tid": tid})
+                    q.put_nowait(("tool", {"event_type": "tool.started", "name": "shell", "preview": item.get("command"), "args": args, "tid": tid}))
+                    continue
+                if evt_type == "item.completed" and item_type == "command_execution":
+                    tid = str(item.get("id") or uuid.uuid4().hex)
+                    args = _codex_cli_tool_args_from_item(item)
+                    snippet = _codex_cli_tool_snippet(item)
+                    is_error = item.get("exit_code") not in (0, None)
+                    for live_tc in reversed(live_tool_calls):
+                        if live_tc.get("tid") == tid:
+                            live_tc["done"] = True
+                            live_tc["snippet"] = snippet
+                            live_tc["is_error"] = bool(is_error)
+                            break
+                    q.put_nowait(("tool_complete", {"event_type": "tool.completed", "name": "shell", "preview": snippet, "args": args, "tid": tid, "is_error": bool(is_error)}))
+                    continue
+                if evt_type == "item.completed" and item_type == "agent_message":
+                    text = str(item.get("text") or "")
+                    if text.strip():
+                        clean_text = _sanitize_cli_agent_answer(text, clean_msg)
+                        if clean_text.strip():
+                            streamed_answer_parts.append(clean_text.strip())
+                            q.put_nowait(("token", {"text": clean_text}))
+                    continue
+                if evt_type == "turn.completed":
+                    usage = evt.get("usage") if isinstance(evt.get("usage"), dict) else {}
+                    q.put_nowait(("metering", {"session_id": session_id, "usage": {"input_tokens": usage.get("input_tokens") or 0, "output_tokens": usage.get("output_tokens") or 0, "cache_read_tokens": usage.get("cached_input_tokens") or 0}}))
+            return_code = proc.wait(timeout=5)
+            stderr_done.wait(timeout=1)
+            codex_stderr = "".join(stderr_chunks).strip()
+            proc = subprocess.CompletedProcess(cmd, return_code, stdout="", stderr="")
+        else:
+            proc = subprocess.run(cmd, text=True, encoding="utf-8", errors="replace", capture_output=True, input=prompt, cwd=str(workspace), timeout=600, shell=False)
+            codex_stderr = proc.stderr or ""
+        if cancel_event.is_set():
+            return
+        answer = ""
+        try:
+            with open(output_path, "r", encoding="utf-8", errors="replace") as fh:
+                answer = fh.read().strip()
+        except Exception:
+            answer = ""
+        if full_agent and streamed_answer_parts:
+            answer = "\n\n".join(streamed_answer_parts).strip()
+        if proc.returncode != 0:
+            err = (codex_stderr or proc.stderr or proc.stdout or answer or "Codex CLI failed").strip()
+            _finish_cli_bridge_error(q, session_id, model or "codex-cli/local-chatgpt-session", "codex-cli", "Codex CLI error", "codex_cli_error", err, "Verifica `codex.cmd login status` e riprova.")
+            return
+        if not answer:
+            answer = (proc.stdout or "").strip() or "**No response received from Codex CLI.**"
+        answer = _sanitize_cli_agent_answer(answer, clean_msg)
+        if not full_agent:
+            q.put_nowait(("token", {"text": answer}))
+        now_ts = time.time()
+        s.messages.append({"role": "user", "content": msg, "_ts": now_ts})
+        s.messages.append({"role": "assistant", "content": answer, "_ts": time.time(), "model": "codex-cli", "model_provider": "codex-cli"})
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = None
+        s.pending_started_at = None
+        s.model = model or "codex-cli/local-chatgpt-session"
+        s.model_provider = "codex-cli"
+        if full_agent and live_tool_calls:
+            s.tool_calls = live_tool_calls
+        memory_path = _append_obsidian_interaction_memory(workspace, session_id, msg, answer, model_provider="codex-cli", model=s.model)
+        memory_note = _memory_update_note(workspace, memory_path)
+        if memory_note:
+            q.put_nowait(("token", {"text": memory_note}))
+            answer = f"{answer}{memory_note}"
+            s.messages[-1]["content"] = answer
+        s.save()
+        q.put_nowait(("done", {"session": s.compact() | {"messages": s.messages, "tool_calls": getattr(s, "tool_calls", []), "active_stream_id": getattr(s, "active_stream_id", None), "pending_user_message": getattr(s, "pending_user_message", None), "pending_attachments": getattr(s, "pending_attachments", []), "pending_started_at": getattr(s, "pending_started_at", None)}, "usage": {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}}))
+        q.put_nowait(("stream_end", {"session_id": session_id}))
+    except Exception as exc:
+        logger.exception("Codex CLI bridge failed")
+        if full_agent and streamed_answer_parts:
+            try:
+                s = get_session(session_id)
+                now_ts = time.time()
+                if not any(m.get("role") == "user" and m.get("content") == msg for m in s.messages[-2:]):
+                    s.messages.append({"role": "user", "content": msg, "_ts": now_ts})
+                partial_answer = "\n\n".join(streamed_answer_parts).strip()
+                s.messages.append({"role": "assistant", "content": partial_answer, "_ts": time.time(), "model": "codex-cli", "model_provider": "codex-cli", "_partial": True})
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = None
+                s.pending_started_at = None
+                s.model = model or "codex-cli/full-agent"
+                s.model_provider = "codex-cli"
+                if live_tool_calls:
+                    s.tool_calls = live_tool_calls
+                memory_path = _append_obsidian_interaction_memory(workspace, session_id, msg, partial_answer, model_provider="codex-cli", model=s.model)
+                memory_note = _memory_update_note(workspace, memory_path)
+                if memory_note:
+                    s.messages[-1]["content"] = f"{partial_answer}{memory_note}"
+                s.save()
+                q.put_nowait(("done", {"session": s.compact() | {"messages": s.messages, "tool_calls": getattr(s, "tool_calls", []), "active_stream_id": getattr(s, "active_stream_id", None), "pending_user_message": getattr(s, "pending_user_message", None), "pending_attachments": getattr(s, "pending_attachments", []), "pending_started_at": getattr(s, "pending_started_at", None)}, "usage": {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}}))
+                q.put_nowait(("stream_end", {"session_id": session_id}))
+                return
+            except Exception:
+                logger.debug("Failed to persist partial Codex Full Agent answer", exc_info=True)
+        _finish_cli_bridge_error(q, session_id, model or "codex-cli/local-chatgpt-session", "codex-cli", "Codex CLI bridge failed", "codex_cli_bridge_error", str(exc), "Controlla che `codex.cmd` sia nel PATH e che Codex sia loggato.")
+    finally:
+        time.sleep(10)
+        if output_path:
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            CANCEL_FLAGS.pop(stream_id, None)
 
 def _runtime_runner_client_factory():
     """Return the configured runner-local client.
@@ -13444,9 +15328,9 @@ def _handle_handoff_summary(handler, body):
             if assistant_points:
                 bullets.append(f"- 助手已回复：{assistant_points[-1]}。")
             if len(user_points) + len(assistant_points) >= 2:
-                bullets.append("- 当前对话存在尚未确认的后续动作。")
+                bullets.append("- 对话确认续")
             else:
-                bullets.append("- 当前信息偏少，建议补充关键点后再切换。")
+                bullets.append("- 信息偏建议补换")
             return "\n".join(bullets)
 
         bullets = []

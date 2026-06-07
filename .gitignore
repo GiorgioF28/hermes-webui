@@ -28,6 +28,7 @@ copilot-instructions.md
 # Generated screenshots and transient artifacts
 screenshot-*.png
 full-UI.png
+*.log
 
 # Version file written by Docker/CI build — generated, never committed
 api/_version.py

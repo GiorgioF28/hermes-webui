@@ -170,6 +170,24 @@ if (-not $env:HERMES_WEBUI_STATE_DIR) {
     $env:HERMES_WEBUI_STATE_DIR = Join-Path $env:HERMES_HOME 'webui'
 }
 
+# === Load local Obsidian REST/MCP API key for this workspace =============
+# Keep the secret in Obsidian's plugin data.json; expose it only to this
+# WebUI process so Codex/Claude MCP clients can authenticate to Obsidian.
+if (-not $env:OBSIDIAN_API_KEY) {
+    $workspaceRoot = Split-Path -Parent $RepoRoot
+    $obsidianRestConfig = Join-Path $workspaceRoot 'obsidian-vault\.obsidian\plugins\obsidian-local-rest-api\data.json'
+    if (Test-Path $obsidianRestConfig) {
+        try {
+            $obsidianRestData = Get-Content -Raw -LiteralPath $obsidianRestConfig -Encoding UTF8 | ConvertFrom-Json
+            if ($obsidianRestData.apiKey) {
+                $env:OBSIDIAN_API_KEY = [string]$obsidianRestData.apiKey
+            }
+        } catch {
+            Write-Warning "Could not load Obsidian Local REST API key from $obsidianRestConfig"
+        }
+    }
+}
+
 # === Ensure dirs exist =================================================
 New-Item -ItemType Directory -Force -Path $env:HERMES_HOME | Out-Null
 New-Item -ItemType Directory -Force -Path $env:HERMES_WEBUI_STATE_DIR | Out-Null

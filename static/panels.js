@@ -37,7 +37,7 @@ let _logsSeverityFilter = 'all';
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  chat: 'tab_chat', command: 'tab_command', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
@@ -245,11 +245,13 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+    ['settings','skills','memory','command','work','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
+  if (nextPanel === 'command') await loadCommandCenter();
+  if (nextPanel === 'work') await loadWorkMode();
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
@@ -3940,6 +3942,10 @@ async function deleteCurrentSkill() {
 
 // ── Memory (main view) ──
 let _memoryData = null;
+let _controlCenterData = null;
+let _controlCenterAgents = null;
+let _workData = null;
+let _workTimer = null;
 let _notesSourcesData = null;
 let _notesSearchResults = [];
 let _notesSelectedSource = 'joplin';
@@ -3950,6 +3956,7 @@ let _currentMemorySection = null; // 'memory' | 'user' | 'soul' | 'external_note
 let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
 
 const MEMORY_SECTIONS = [
+  { key: 'daily_command', labelKey: 'daily_command', emptyKey: 'daily_command_empty', iconKey: 'square' },
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
@@ -3962,6 +3969,7 @@ function _memorySectionMeta(key) {
 
 function _memorySectionContent(key) {
   if (!_memoryData) return '';
+  if (key === 'daily_command') return '';
   if (key === 'user') return _memoryData.user || '';
   if (key === 'soul') return _memoryData.soul || '';
   return _memoryData.memory || '';
@@ -3969,6 +3977,7 @@ function _memorySectionContent(key) {
 
 function _memorySectionMtime(key) {
   if (!_memoryData) return 0;
+  if (key === 'daily_command') return _controlCenterData ? _controlCenterData.generated_at || 0 : 0;
   if (key === 'user') return _memoryData.user_mtime || 0;
   if (key === 'soul') return _memoryData.soul_mtime || 0;
   return _memoryData.memory_mtime || 0;
@@ -3980,7 +3989,7 @@ function _setMemoryHeaderButtons(mode) {
   const editBtn = $('btnEditMemoryDetail');
   const cancelBtn = $('btnCancelMemoryDetail');
   const saveBtn = $('btnSaveMemoryDetail');
-  if (mode === 'read' && _currentMemorySection !== 'external_notes') { show(editBtn); hide(cancelBtn); hide(saveBtn); }
+  if (mode === 'read' && _currentMemorySection !== 'external_notes' && _currentMemorySection !== 'daily_command') { show(editBtn); hide(cancelBtn); hide(saveBtn); }
   else if (mode === 'edit') { hide(editBtn); show(cancelBtn); show(saveBtn); }
   else { hide(editBtn); hide(cancelBtn); hide(saveBtn); }
 }
@@ -4052,7 +4061,857 @@ function _renderExternalNotesSources() {
   _setMemoryHeaderButtons('read');
 }
 
+function _ccLimitRows(rows, max) {
+  return (Array.isArray(rows) ? rows : []).slice(0, max);
+}
+
+function _ccPathButton(path) {
+  if (!path) return '';
+  return `<button type="button" class="cc-mini-btn" data-cc-path="${esc(path)}" onclick="copyControlCenterPath(this.dataset.ccPath||'')">${li('copy',12)}<span>${esc(t('copy'))}</span></button>`;
+}
+
+function _ccTaskChatButton(task, project) {
+  const taskId = task && task.task_id ? String(task.task_id) : '';
+  const taskTitle = task && task.title ? String(task.title) : '';
+  const projectId = (project && project.project_id) || (task && task.project_id) || '';
+  if (!taskId && !taskTitle) return '';
+  return `<button type="button" class="cc-mini-btn cc-chat-btn" data-cc-task-id="${esc(taskId)}" data-cc-task-title="${esc(taskTitle)}" data-cc-project-id="${esc(projectId)}" onclick="bringControlCenterTaskToChat(this)">${li('message-square',12)}<span>${esc(t('daily_command_bring_to_chat') || 'Bring to chat')}</span></button>`;
+}
+
+function _ccProjectNextActionButton(project, notePath, currentAction) {
+  const projectId = project && project.project_id ? String(project.project_id) : '';
+  if (!projectId) return '';
+  const projectName = project && project.name ? String(project.name) : projectId;
+  return `<button type="button" class="cc-mini-btn cc-next-action-btn" data-cc-project-id="${esc(projectId)}" data-cc-project-name="${esc(projectName)}" data-cc-note-path="${esc(notePath || '')}" data-cc-current-action="${esc(currentAction || '')}" onclick="setControlCenterProjectNextAction(this)">${li('target',12)}<span>${esc(t('daily_command_set_next_action') || 'Set next action')}</span></button>`;
+}
+
+function _ccTaskStatusButton(task) {
+  const taskId = task && task.task_id ? String(task.task_id) : '';
+  if (!taskId) return '';
+  const title = task && task.title ? String(task.title) : taskId;
+  const currentStatus = String((task && task.status) || 'open').toLowerCase();
+  const nextStatus = currentStatus === 'done' ? 'open' : 'done';
+  const label = nextStatus === 'done' ? 'Done' : 'Reopen';
+  const icon = nextStatus === 'done' ? 'target' : 'rotate-ccw';
+  return `<button type="button" class="cc-mini-btn cc-task-status-btn" data-cc-task-id="${esc(taskId)}" data-cc-task-title="${esc(title)}" data-cc-task-status="${esc(nextStatus)}" onclick="setControlCenterTaskStatus(this)">${li(icon,12)}<span>${esc(label)}</span></button>`;
+}
+
+function _ccAgentHandoffButton(agentId) {
+  if (!agentId) return '';
+  return `<button type="button" class="cc-mini-btn cc-agent-btn" data-agent-id="${esc(agentId)}" onclick="prepareAgentHandoff(this)">${li('send',12)}<span>Prepara handoff</span></button>`;
+}
+
+function _ccAgentRunButton(agentId) {
+  if (!agentId) return '';
+  return `<button type="button" class="cc-mini-btn cc-agent-run-btn" data-agent-id="${esc(agentId)}" onclick="runAgentWorker(this)">${li('play',12)}<span>Run worker</span></button>`;
+}
+
+function _ccRoutineChatButton() {
+  return `<button type="button" class="cc-mini-btn cc-chat-btn" onclick="prepareWeeklyRoutineChat()">${li('message-square',12)}<span>Porta routine in chat</span></button>`;
+}
+
+function _ccJarvisChatButton() {
+  return `<button type="button" class="cc-mini-btn cc-chat-btn" onclick="prepareJarvisBriefChat()">${li('message-square',12)}<span>Porta brief in chat</span></button>`;
+}
+
+function _findControlCenterTask(taskId, taskTitle, projectId) {
+  const data = _controlCenterData || {};
+  const pools = [];
+  if (Array.isArray(data.open_backlog)) pools.push(...data.open_backlog);
+  if (Array.isArray(data.today_tasks)) pools.push(...data.today_tasks);
+  if (Array.isArray(data.project_cockpit)) {
+    data.project_cockpit.forEach(item => {
+      const project = item && item.project ? item.project : {};
+      (item && Array.isArray(item.open_tasks) ? item.open_tasks : []).forEach(task => {
+        pools.push(Object.assign({}, task, {
+          project_id: task.project_id || project.project_id || '',
+          _cockpit_project: project,
+          _cockpit_note: item.note || null,
+          _cockpit_next_action: item.next_action || project.next_action || '',
+        }));
+      });
+    });
+  }
+  return pools.find(task => taskId && String(task.task_id || '') === taskId)
+    || pools.find(task => (
+      taskTitle && String(task.title || '') === taskTitle
+      && (!projectId || String(task.project_id || '') === projectId)
+    ))
+    || null;
+}
+
+async function bringControlCenterTaskToChat(btn) {
+  const taskId = btn && btn.dataset ? (btn.dataset.ccTaskId || '') : '';
+  const taskTitle = btn && btn.dataset ? (btn.dataset.ccTaskTitle || '') : '';
+  const projectId = btn && btn.dataset ? (btn.dataset.ccProjectId || '') : '';
+  const task = _findControlCenterTask(taskId, taskTitle, projectId) || {task_id: taskId, title: taskTitle, project_id: projectId};
+  const data = _controlCenterData || {};
+  const cockpitItem = Array.isArray(data.project_cockpit)
+    ? data.project_cockpit.find(item => item && item.project && String(item.project.project_id || '') === String(task.project_id || projectId || ''))
+    : null;
+  const project = task._cockpit_project || (cockpitItem && cockpitItem.project) || {};
+  const note = task._cockpit_note || (cockpitItem && cockpitItem.note) || null;
+  const nextAction = task.next_action || task._cockpit_next_action || (cockpitItem && cockpitItem.next_action) || project.next_action || '';
+  const lines = [
+    'Richiesta: continua e completa questa task di Hermes.',
+    '',
+    `Progetto: ${project.name || task.project_id || projectId || 'non indicato'}`,
+    task.task_id ? `Task ID: ${task.task_id}` : '',
+    `Task: ${task.title || taskTitle || ''}`,
+    task.priority ? `Priorita: ${task.priority}` : '',
+    task.status ? `Stato: ${task.status}` : '',
+    nextAction ? `Prossima azione: ${nextAction}` : '',
+    note ? `Nota progetto: ${note.relative_path || note.title || note.path || ''}` : '',
+    data.root ? `Workspace: ${data.root}` : '',
+    '',
+    'Prima leggi il contesto locale utile, poi procedi in modo operativo. Se servono modifiche, implementale e verifica il risultato.',
+  ].filter(line => line !== '').join('\n');
+  if (typeof switchPanel === 'function') await switchPanel('chat');
+  const msg = $('msg');
+  if (msg) {
+    const existing = msg.value.trim();
+    msg.value = existing ? `${existing}\n\n${lines}` : lines;
+    msg.dispatchEvent(new Event('input', {bubbles: true}));
+    msg.focus();
+    msg.selectionStart = msg.selectionEnd = msg.value.length;
+  }
+  if (typeof showToast === 'function') showToast(t('daily_command_brought_to_chat') || 'Task prompt added to chat.');
+}
+
+async function copyControlCenterPath(path) {
+  try {
+    await navigator.clipboard.writeText(path || '');
+    showToast(t('path_copied'));
+  } catch (e) {
+    showToast((t('path_copy_failed') || 'Copy failed: ') + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function setControlCenterProjectNextAction(btn) {
+  const projectId = btn && btn.dataset ? (btn.dataset.ccProjectId || '') : '';
+  const projectName = btn && btn.dataset ? (btn.dataset.ccProjectName || projectId) : projectId;
+  const notePath = btn && btn.dataset ? (btn.dataset.ccNotePath || '') : '';
+  const currentAction = btn && btn.dataset ? (btn.dataset.ccCurrentAction || '') : '';
+  if (!projectId) return;
+  const nextAction = window.prompt(t('daily_command_next_action_prompt') || 'New next action', currentAction || '');
+  if (nextAction === null) return;
+  const cleaned = nextAction.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return;
+  const preview = [
+    `${t('daily_command_update_project') || 'Project'}: ${projectName}`,
+    `${t('daily_command_next_action_preview') || 'Next action'}: ${cleaned}`,
+    notePath ? `${t('daily_command_note') || 'Note'}: ${notePath}` : '',
+  ].filter(Boolean).join('\n');
+  if (!window.confirm(preview + '\n\n' + (t('daily_command_confirm_update') || 'Update project next action?'))) return;
+  btn.disabled = true;
+  try {
+    const data = await api('/api/control-center/project-next-action', {
+      method: 'POST',
+      body: JSON.stringify({project_id: projectId, next_action: cleaned, note_path: notePath}),
+    });
+    _controlCenterData = data.summary || null;
+    if (_currentPanel === 'command') _renderControlCenterSummaryInto('commandDetailTitle', 'commandDetailBody', 'commandDetailEmpty');
+    if (_currentMemorySection === 'daily_command') _renderControlCenterSummary();
+    showToast(t('daily_command_next_action_saved') || 'Next action saved.');
+  } catch (e) {
+    showToast((t('error_prefix') || 'Error: ') + (e && e.message ? e.message : String(e)));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function setControlCenterTaskStatus(btn) {
+  const taskId = btn && btn.dataset ? (btn.dataset.ccTaskId || '') : '';
+  const taskTitle = btn && btn.dataset ? (btn.dataset.ccTaskTitle || taskId) : taskId;
+  const status = btn && btn.dataset ? (btn.dataset.ccTaskStatus || '') : '';
+  if (!taskId || !status) return;
+  const preview = [
+    `Task: ${taskTitle}`,
+    `Task ID: ${taskId}`,
+    `Nuovo stato: ${status}`,
+    '',
+    'Hermes creera prima uno snapshot in backups/control-center, poi aggiornera backlog e today se la task e presente.'
+  ].join('\n');
+  if (!window.confirm(preview + '\n\nConfermi la scrittura controllata?')) return;
+  btn.disabled = true;
+  try {
+    const data = await api('/api/control-center/task-status', {
+      method: 'POST',
+      body: JSON.stringify({task_id: taskId, status}),
+    });
+    _controlCenterData = data.summary || null;
+    if (_currentPanel === 'command') _renderControlCenterSummaryInto('commandDetailTitle', 'commandDetailBody', 'commandDetailEmpty');
+    if (_currentMemorySection === 'daily_command') _renderControlCenterSummary();
+    const auditPath = data && data.audit && data.audit.path ? ` Snapshot: ${data.audit.path}` : '';
+    showToast((status === 'done' ? 'Task segnata done.' : 'Task riaperta.') + auditPath);
+  } catch (e) {
+    showToast((t('error_prefix') || 'Error: ') + (e && e.message ? e.message : String(e)));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function _findControlCenterAgent(agentId) {
+  const data = _controlCenterAgents || {};
+  const agents = Array.isArray(data.agents) ? data.agents : [];
+  return agents.find(agent => String(agent.id || '') === String(agentId || '')) || null;
+}
+
+function _ccAgentTaskPackage(agent) {
+  const projects = Array.isArray((_controlCenterData || {}).active_projects) ? _controlCenterData.active_projects : [];
+  const defaultProject = projects[0] || {};
+  const activityLines = Array.isArray(agent.activities) ? agent.activities.slice(0, 5) : [];
+  const inputLines = Array.isArray(agent.inputs) ? agent.inputs.slice(0, 5) : [];
+  const outputLines = Array.isArray(agent.outputs) ? agent.outputs.slice(0, 5) : [];
+  const toolLines = Array.isArray(agent.tools) ? agent.tools.slice(0, 5) : [];
+  return [
+    '## Handoff',
+    '',
+    'From: Orchestratore',
+    `To: ${agent.name || agentId}`,
+    `Project: ${defaultProject.name || defaultProject.project_id || 'da selezionare'}`,
+    `Goal: ${defaultProject.next_action || defaultProject.business_goal || 'scrivi obiettivo concreto'}`,
+    '',
+    'Context:',
+    agent.role ? `- Profilo agente: ${agent.role}` : '',
+    agent.relative_path ? `- Nota agente: ${agent.relative_path}` : '',
+    defaultProject.project_id ? `- Project ID: ${defaultProject.project_id}` : '',
+    defaultProject.next_action ? `- Prossima azione progetto: ${defaultProject.next_action}` : '',
+    activityLines.length ? `- Attivita tipiche: ${activityLines.join('; ')}` : '',
+    inputLines.length ? `- Input attesi: ${inputLines.join('; ')}` : '',
+    outputLines.length ? `- Output attesi: ${outputLines.join('; ')}` : '',
+    toolLines.length ? `- Tools previsti: ${toolLines.join('; ')}` : '',
+    '',
+    'Task:',
+    '- Esegui un task piccolo e verificabile coerente con il tuo ruolo.',
+    '- Leggi prima il contesto locale necessario.',
+    '- Non salvare token, password, API key, OAuth secret, auth.json o credenziali.',
+    '',
+    'Definition of Done:',
+    '- Risultato in formato Agent Result.',
+    '- File o note toccate, se presenti.',
+    '- Prossima azione concreta.',
+    '',
+    '## Agent Result',
+    '',
+    `Agent: ${agent.name || ''}`,
+    'Status: done | blocked | partial',
+    `Project: ${defaultProject.name || defaultProject.project_id || ''}`,
+    '',
+    'What I found:',
+    '- ',
+    '',
+    'What I changed:',
+    '- ',
+    '',
+    'Files or notes touched:',
+    '- ',
+    '',
+    'Next action:',
+    '- ',
+    '',
+    'Handoff suggestion:',
+    '- To: ',
+    '- Reason: ',
+  ].filter(line => line !== '').join('\n');
+}
+
+async function prepareAgentHandoff(btn) {
+  const agentId = btn && btn.dataset ? (btn.dataset.agentId || '') : '';
+  const agent = _findControlCenterAgent(agentId);
+  if (!agent) return;
+  const lines = _ccAgentTaskPackage(agent);
+  if (typeof switchPanel === 'function') await switchPanel('chat');
+  const msg = $('msg');
+  if (msg) {
+    const existing = msg.value.trim();
+    msg.value = existing ? `${existing}\n\n${lines}` : lines;
+    msg.dispatchEvent(new Event('input', {bubbles: true}));
+    msg.focus();
+    msg.selectionStart = msg.selectionEnd = msg.value.length;
+  }
+  if (typeof showToast === 'function') showToast('Handoff agente preparato in chat.');
+}
+
+async function runAgentWorker(btn) {
+  const agentId = btn && btn.dataset ? (btn.dataset.agentId || '') : '';
+  const agent = _findControlCenterAgent(agentId);
+  if (!agent) return;
+  const prompt = _ccAgentTaskPackage(agent);
+  const projects = Array.isArray((_controlCenterData || {}).active_projects) ? _controlCenterData.active_projects : [];
+  const defaultProject = projects[0] || {};
+  const title = `Worker - ${agent.name || agentId}${defaultProject.name ? ` - ${defaultProject.name}` : ''}`.slice(0, 80);
+  btn.disabled = true;
+  try {
+    if (typeof newSession === 'function') {
+      await newSession(false, {awaitWorkspaceLoad: false});
+      if (S && S.session && S.session.session_id) {
+        try {
+          await api('/api/session/rename', {
+            method: 'POST',
+            body: JSON.stringify({session_id: S.session.session_id, title}),
+          });
+          S.session.title = title;
+          if (typeof syncTopbar === 'function') syncTopbar();
+          if (typeof renderSessionList === 'function') renderSessionList();
+        } catch (_) {}
+      }
+    }
+    if (typeof switchPanel === 'function') {
+      await switchPanel('chat');
+    }
+    const msg = $('msg');
+    if (msg) {
+      msg.value = prompt;
+      msg.dispatchEvent(new Event('input', {bubbles: true}));
+      msg.focus();
+      msg.selectionStart = msg.selectionEnd = msg.value.length;
+    }
+    if (typeof showToast === 'function') showToast('Sessione worker preparata. Controlla il prompt e invia quando vuoi.');
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((t('error_prefix') || 'Error: ') + (e && e.message ? e.message : String(e)));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function prepareWeeklyRoutineChat() {
+  const routine = (_controlCenterData || {}).weekly_routine || {};
+  const days = Array.isArray(routine.days) ? routine.days : [];
+  const slots = Array.isArray(routine.slots) ? routine.slots : [];
+  const table = slots.length
+    ? [
+        ['Fascia'].concat(days).join(' | '),
+        ['---'].concat(days.map(() => '---')).join(' | '),
+        ...slots.map(slot => {
+          const dayMap = slot.days || {};
+          return [slot.slot || ''].concat(days.map(day => dayMap[day] || '')).join(' | ');
+        }),
+      ].join('\n')
+    : 'Routine non ancora definita.';
+  const lines = [
+    'Richiesta: aiutami a gestire e migliorare la mia weekly routine in Hermes.',
+    '',
+    routine.relative_path ? `Nota sorgente: ${routine.relative_path}` : '',
+    routine.status ? `Stato attuale: ${routine.status}` : '',
+    routine.next_action ? `Prossima azione: ${routine.next_action}` : '',
+    '',
+    table,
+    '',
+    'Obiettivo: trasformala in una routine settimanale pratica, con blocchi chiari per lavoro, palestra/energia, creazione contenuti, studio, admin e recupero. Fammi prima 3 domande solo se servono davvero; altrimenti proponi una versione aggiornata e indica quali blocchi spostare.',
+  ].filter(line => line !== '').join('\n');
+  if (typeof switchPanel === 'function') await switchPanel('chat');
+  const msg = $('msg');
+  if (msg) {
+    const existing = msg.value.trim();
+    msg.value = existing ? `${existing}\n\n${lines}` : lines;
+    msg.dispatchEvent(new Event('input', {bubbles: true}));
+    msg.focus();
+    msg.selectionStart = msg.selectionEnd = msg.value.length;
+  }
+  if (typeof showToast === 'function') showToast('Routine settimanale portata in chat.');
+}
+
+async function prepareJarvisBriefChat() {
+  const jarvis = (_controlCenterData || {}).jarvis || {};
+  const focus = Array.isArray(jarvis.weekly_focus) ? jarvis.weekly_focus : [];
+  const morning = jarvis.morning_brief && Array.isArray(jarvis.morning_brief.must_do) ? jarvis.morning_brief.must_do : [];
+  const defer = Array.isArray(jarvis.defer_suggestions) ? jarvis.defer_suggestions : [];
+  const health = Array.isArray(jarvis.project_health) ? jarvis.project_health : [];
+  const lines = [
+    'Richiesta: usa questo Jarvis brief per decidere focus operativo, task da rimandare e prossime azioni.',
+    '',
+    '## Weekly focus',
+    ...focus.map(item => `- ${item.project_name || item.project_id}: ${item.next_action || ''} (${item.reason || ''})`),
+    '',
+    '## Morning brief',
+    ...morning.map(item => `- ${item.priority || ''} ${item.title || item.task_id}: ${item.next_action || ''}`),
+    '',
+    '## Task da rimandare',
+    ...defer.map(item => `- ${item.priority || ''} ${item.title || item.task_id}: ${item.reason || ''}`),
+    '',
+    '## Project health',
+    ...health.slice(0, 6).map(item => `- ${item.project_name || item.project_id}: ${item.health || ''} - ${item.reason || ''}`),
+    '',
+    'Output richiesto: dammi 3 must-do, cosa rimandare, e una motivazione concreta. Non modificare file senza conferma.',
+  ].join('\n');
+  if (typeof switchPanel === 'function') await switchPanel('chat');
+  const msg = $('msg');
+  if (msg) {
+    const existing = msg.value.trim();
+    msg.value = existing ? `${existing}\n\n${lines}` : lines;
+    msg.dispatchEvent(new Event('input', {bubbles: true}));
+    msg.focus();
+    msg.selectionStart = msg.selectionEnd = msg.value.length;
+  }
+  if (typeof showToast === 'function') showToast('Jarvis brief portato in chat.');
+}
+
+function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
+  const title = $(titleId);
+  const body = $(bodyId);
+  const empty = $(emptyId);
+  if (!title || !body) return;
+  title.textContent = t('daily_command');
+  const data = _controlCenterData || {};
+  if (!data.vault_present) {
+    body.innerHTML = `<div class="main-view-content"><div class="memory-empty">${esc(t('daily_command_empty'))}</div></div>`;
+    body.style.display = '';
+    if (empty) empty.style.display = 'none';
+    if (opts.memory) {
+      _memoryMode = 'read';
+      _setMemoryHeaderButtons('read');
+    }
+    return;
+  }
+
+  const todayTasks = _ccLimitRows(data.today_tasks, 10);
+  const openTasks = todayTasks.filter(task => !task.done);
+  const projects = _ccLimitRows(data.active_projects, 8);
+  const backlog = _ccLimitRows(data.open_backlog, 8);
+  const notes = _ccLimitRows(data.project_notes, 6);
+  const cockpit = _ccLimitRows(data.project_cockpit, 6);
+  const queue = _ccLimitRows(data.action_queue, 8);
+  const automations = _ccLimitRows(data.automations, 8);
+  const agents = _ccLimitRows((_controlCenterAgents && _controlCenterAgents.agents) || [], 8);
+  const routine = data.weekly_routine || {};
+  const routineDays = Array.isArray(routine.days) ? routine.days : [];
+  const routineSlots = _ccLimitRows(routine.slots, 8);
+  const jarvis = data.jarvis || {};
+  const weeklyFocus = _ccLimitRows(jarvis.weekly_focus, 3);
+  const morningMustDo = _ccLimitRows(jarvis.morning_brief && jarvis.morning_brief.must_do, 3);
+  const deferSuggestions = _ccLimitRows(jarvis.defer_suggestions, 5);
+  const projectHealth = _ccLimitRows(jarvis.project_health, 6);
+  const risks = data.risks || {};
+  const riskCounts = risks.counts || {};
+  const generated = data.generated_at ? new Date(data.generated_at * 1000).toLocaleString() : '';
+  const taskRows = openTasks.length ? openTasks.map(task => `<li>${esc(task.title || '')}</li>`).join('') : `<li class="cc-muted">${esc(t('daily_command_no_open_today'))}</li>`;
+  const weeklyFocusRows = weeklyFocus.length ? weeklyFocus.map(item => `
+    <article class="cc-list-card compact">
+      <div class="cc-list-title">${esc(item.project_name || item.project_id || '')}</div>
+      <div class="cc-list-body">${esc(item.next_action || '')}</div>
+      <div class="cc-list-meta">${esc(item.reason || '')}</div>
+    </article>`).join('') : `<div class="memory-empty">Nessun focus settimanale calcolato.</div>`;
+  const morningRows = morningMustDo.length ? morningMustDo.map(item => `
+    <article class="cc-list-card compact">
+      <div class="cc-list-title">${esc(item.title || item.task_id || '')}</div>
+      <div class="cc-list-meta">${esc(item.project_id || '')}${item.priority ? ` &middot; ${esc(item.priority)}` : ''}</div>
+      <div class="cc-list-body">${esc(item.next_action || item.reason || '')}</div>
+      <div class="cc-card-actions">${_ccTaskChatButton(item, {project_id: item.project_id || ''})}${_ccTaskStatusButton(item)}</div>
+    </article>`).join('') : `<div class="memory-empty">Nessun must-do calcolato.</div>`;
+  const deferRows = deferSuggestions.length ? deferSuggestions.map(item => `
+    <article class="cc-list-card compact">
+      <div class="cc-list-title">${esc(item.title || item.task_id || '')}</div>
+      <div class="cc-list-meta">${esc(item.project_id || '')}${item.priority ? ` &middot; ${esc(item.priority)}` : ''}</div>
+      <div class="cc-list-body">${esc(item.reason || '')}</div>
+    </article>`).join('') : `<div class="memory-empty">Nessuna task da rimandare proposta.</div>`;
+  const healthRows = projectHealth.length ? projectHealth.map(item => `
+    <article class="cc-list-card compact cc-health-${esc(item.health || 'yellow')}">
+      <div class="cc-list-title">${esc(item.project_name || item.project_id || '')}</div>
+      <div class="cc-list-meta">${esc(item.health || '')} &middot; ${esc(String(item.open_task_count || 0))} task aperte</div>
+      <div class="cc-list-body">${esc(item.reason || '')}</div>
+    </article>`).join('') : `<div class="memory-empty">Nessun health score calcolato.</div>`;
+  const queueRows = queue.length ? queue.map(item => `
+    <article class="cc-list-card compact">
+      <div class="cc-list-title">${esc(item.title || item.next_action || item.task_id || '')}</div>
+      <div class="cc-list-meta">${esc(item.project_name || item.project_id || '')}${item.priority ? ` &middot; ${esc(item.priority)}` : ''}${item.kind ? ` &middot; ${esc(item.kind)}` : ''}</div>
+      <div class="cc-list-body">${esc(item.next_action || '')}</div>
+      <div class="cc-card-actions">
+        ${_ccTaskChatButton(item, {project_id: item.project_id || '', name: item.project_name || ''})}
+        ${_ccTaskStatusButton(item)}
+        ${_ccProjectNextActionButton({project_id: item.project_id || '', name: item.project_name || ''}, item.note_path || '', item.next_action || item.title || '')}
+      </div>
+    </article>`).join('') : `<div class="memory-empty">${esc(t('daily_command_no_action_queue'))}</div>`;
+  const automationRows = automations.length ? automations.map(item => `
+    <article class="cc-list-card compact cc-health-${item.status === 'ready' ? 'green' : item.status === 'missing' ? 'red' : 'yellow'}">
+      <div class="cc-list-title">${esc(item.name || item.id || '')}</div>
+      <div class="cc-list-meta">${esc(item.status || '')}</div>
+      <div class="cc-list-body">${esc(item.summary || '')}</div>
+      <div class="cc-list-body"><strong>Next:</strong> ${esc(item.next_action || '')}</div>
+      <div class="cc-card-actions">${_ccPathButton(item.path || '')}</div>
+    </article>`).join('') : `<div class="memory-empty">Nessuna automazione rilevata.</div>`;
+  const agentRows = agents.length ? agents.map(agent => `
+    <article class="cc-list-card compact">
+      <div class="cc-list-title">${esc(agent.name || '')}</div>
+      <div class="cc-list-meta">${esc(agent.relative_path || '')}</div>
+      <div class="cc-list-body">${esc(agent.role || (Array.isArray(agent.activities) ? agent.activities[0] : '') || '')}</div>
+      <div class="cc-card-actions">${_ccAgentHandoffButton(agent.id || '')}${_ccAgentRunButton(agent.id || '')}${_ccPathButton(agent.path || '')}</div>
+    </article>`).join('') : `<div class="memory-empty">Nessun agente trovato in 06-Agents.</div>`;
+  const routineHeader = routineDays.map(day => `<div class="cc-routine-day-head">${esc(day)}</div>`).join('');
+  const routineRows = routineSlots.length ? routineSlots.map(slot => {
+    const dayMap = slot.days || {};
+    const cells = routineDays.map(day => {
+      const value = dayMap[day] || '';
+      return `<div class="cc-routine-cell ${value ? '' : 'empty'}">${esc(value || 'Da definire')}</div>`;
+    }).join('');
+    return `<div class="cc-routine-row"><div class="cc-routine-slot">${esc(slot.slot || '')}</div>${cells}</div>`;
+  }).join('') : `<div class="memory-empty">Routine settimanale non ancora definita.</div>`;
+  const riskPills = [
+    ['tasks_missing_project', t('daily_command_tasks_missing_project')],
+    ['tasks_missing_next_action', t('daily_command_tasks_missing_next_action')],
+    ['tasks_unknown_project', t('daily_command_tasks_unknown_project')],
+    ['projects_missing_next_action', t('daily_command_projects_missing_next_action')],
+    ['projects_missing_note', t('daily_command_projects_missing_note')],
+  ].map(([key, label]) => `<div class="cc-risk-pill"><span>${esc(String(riskCounts[key] || 0))}</span><label>${esc(label || key)}</label></div>`).join('');
+  const projectRows = projects.length ? projects.map(project => `
+    <article class="cc-list-card">
+      <div class="cc-list-title">${esc(project.name || project.project_id || '')}</div>
+      <div class="cc-list-meta">${esc(project.status || '')}${project.ai_agent ? ` · ${esc(project.ai_agent)}` : ''}</div>
+      <div class="cc-list-body">${esc(project.next_action || project.business_goal || '')}</div>
+      <div class="cc-card-actions">${_ccProjectNextActionButton(project, '', project.next_action || '')}</div>
+    </article>`).join('') : `<div class="memory-empty">${esc(t('daily_command_no_projects'))}</div>`;
+  const backlogRows = backlog.length ? backlog.map(task => `
+    <article class="cc-list-card compact">
+      <div class="cc-list-title">${esc(task.title || task.task_id || '')}</div>
+      <div class="cc-list-meta">${esc(task.project_id || '')} · ${esc(task.priority || '')} · ${esc(task.status || '')}</div>
+      <div class="cc-list-body">${esc(task.next_action || '')}</div>
+      <div class="cc-card-actions">${_ccTaskChatButton(task, {project_id: task.project_id || ''})}${_ccTaskStatusButton(task)}</div>
+    </article>`).join('') : `<div class="memory-empty">${esc(t('daily_command_no_backlog'))}</div>`;
+  const noteRows = notes.length ? notes.map(note => `
+    <article class="cc-list-card">
+      <div class="cc-list-title">${esc(note.title || '')}</div>
+      <div class="cc-list-meta">${esc(note.relative_path || '')}</div>
+      <div class="cc-list-body">${esc(note.next_action || note.status || note.goal || '')}</div>
+      <div class="cc-card-actions">${_ccPathButton(note.path)}</div>
+    </article>`).join('') : `<div class="memory-empty">${esc(t('daily_command_no_notes'))}</div>`;
+  const cockpitRows = cockpit.length ? cockpit.map(item => {
+    const project = item.project || {};
+    const note = item.note || null;
+    const tasks = _ccLimitRows(item.open_tasks, 3);
+    const taskHtml = tasks.length
+      ? `<ul class="cc-cockpit-tasks">${tasks.map(task => `<li><strong>${esc(task.priority || '')}</strong><span title="${esc(task.title || task.task_id || '')}">${esc(task.title || task.task_id || '')}</span>${_ccTaskChatButton(task, project)}${_ccTaskStatusButton(task)}</li>`).join('')}</ul>`
+      : `<div class="cc-cockpit-empty">${esc(t('daily_command_no_project_tasks'))}</div>`;
+    return `<article class="cc-cockpit-card">
+      <div class="cc-cockpit-main">
+        <div class="cc-list-title">${esc(project.name || project.project_id || '')}</div>
+        <div class="cc-list-meta">${esc(project.project_id || '')}${project.ai_agent ? ` Â· ${esc(project.ai_agent)}` : ''}${item.open_task_count ? ` Â· ${esc(String(item.open_task_count))} ${esc(t('daily_command_tasks'))}` : ''}</div>
+        <div class="cc-list-body">${esc(item.next_action || project.business_goal || '')}</div>
+        <div class="cc-card-actions">${_ccProjectNextActionButton(project, note && note.path, item.next_action || project.next_action || '')}</div>
+      </div>
+      <div class="cc-cockpit-side">
+        <div class="cc-cockpit-note">
+          <span>${esc(t('daily_command_note'))}</span>
+          ${note ? `<button type="button" class="cc-link-btn" data-cc-path="${esc(note.path || '')}" onclick="copyControlCenterPath(this.dataset.ccPath||'')">${esc(note.title || note.relative_path || '')}</button>` : `<em>${esc(t('daily_command_no_note_link'))}</em>`}
+        </div>
+        ${taskHtml}
+      </div>
+    </article>`;
+  }).join('') : `<div class="memory-empty">${esc(t('daily_command_no_projects'))}</div>`;
+
+  body.innerHTML = `
+    <div class="main-view-content control-center-view">
+      <div class="memory-detail-mtime">${esc(data.root || '')}${generated ? ` · ${esc(generated)}` : ''}</div>
+      <section class="cc-hero">
+        <div>
+          <div class="cc-eyebrow">${esc(t('daily_command_operating_surface'))}</div>
+          <h2>${esc(t('daily_command_today'))}</h2>
+        </div>
+        <div class="cc-stat-grid">
+          <div class="cc-stat"><span>${esc(String(data.note_count || 0))}</span><label>${esc(t('daily_command_notes'))}</label></div>
+          <div class="cc-stat"><span>${esc(String(data.today_open_count || 0))}</span><label>${esc(t('daily_command_open_today'))}</label></div>
+          <div class="cc-stat"><span>${esc(String(data.backlog_open_count || 0))}</span><label>${esc(t('daily_command_backlog'))}</label></div>
+        </div>
+      </section>
+      <section class="cc-grid">
+        <div class="cc-panel cc-panel-wide">
+          <div class="cc-panel-head"><h3>Jarvis Focus</h3><div class="cc-card-actions">${_ccJarvisChatButton()}</div></div>
+          <div class="cc-jarvis-grid">
+            <div><h4>Weekly focus</h4><div class="cc-list">${weeklyFocusRows}</div></div>
+            <div><h4>Morning brief</h4><div class="cc-list">${morningRows}</div></div>
+            <div><h4>Task da rimandare</h4><div class="cc-list">${deferRows}</div></div>
+            <div><h4>Project health</h4><div class="cc-list">${healthRows}</div></div>
+          </div>
+        </div>
+        <div class="cc-panel primary">
+          <div class="cc-panel-head"><h3>${esc(t('daily_command_next_actions'))}</h3>${_ccPathButton(data.today_path)}</div>
+          <ol class="cc-action-list">${taskRows}</ol>
+        </div>
+        <div class="cc-panel cc-panel-wide">
+          <div class="cc-panel-head"><h3>${esc(t('daily_command_project_cockpit'))}</h3></div>
+          <div class="cc-cockpit-list">${cockpitRows}</div>
+        </div>
+        <div class="cc-panel cc-panel-wide">
+          <div class="cc-panel-head"><h3>Weekly Routine</h3><div class="cc-card-actions">${_ccRoutineChatButton()}${_ccPathButton(routine.path || '')}</div></div>
+          <div class="cc-routine-status">${esc(routine.next_action || routine.status || 'Definisci i blocchi settimanali e poi falli ottimizzare da Hermes.')}</div>
+          <div class="cc-routine-grid" style="--cc-routine-days:${esc(String(Math.max(routineDays.length, 1)))}">
+            ${routineDays.length ? `<div class="cc-routine-head"><div></div>${routineHeader}</div>` : ''}
+            ${routineRows}
+          </div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>${esc(t('daily_command_action_queue'))}</h3></div>
+          <div class="cc-list">${queueRows}</div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>Agent Desk</h3>${_ccPathButton((_controlCenterAgents || {}).agents_dir || '')}</div>
+          <div class="cc-list">${agentRows}</div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>Automations</h3></div>
+          <div class="cc-list">${automationRows}</div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>${esc(t('daily_command_risks'))}</h3></div>
+          <div class="cc-risk-grid">${riskPills}</div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>${esc(t('daily_command_active_projects'))}</h3>${_ccPathButton(data.project_inventory_path)}</div>
+          <div class="cc-list">${projectRows}</div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>${esc(t('daily_command_priority_backlog'))}</h3></div>
+          <div class="cc-list">${backlogRows}</div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>${esc(t('daily_command_project_notes'))}</h3></div>
+          <div class="cc-list">${noteRows}</div>
+        </div>
+      </section>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  if (opts.memory) {
+    _memoryMode = 'read';
+    _setMemoryHeaderButtons('read');
+  }
+}
+
+function _renderControlCenterSummary() {
+  _renderControlCenterSummaryInto('memoryDetailTitle', 'memoryDetailBody', 'memoryDetailEmpty', { memory: true });
+}
+
+async function loadCommandCenter(force) {
+  const body = $('commandDetailBody');
+  const empty = $('commandDetailEmpty');
+  try {
+    if (force || !_controlCenterData) {
+      _controlCenterData = await api('/api/control-center/summary');
+    }
+    if (force || !_controlCenterAgents) {
+      _controlCenterAgents = await api('/api/agents');
+    }
+    _renderControlCenterSummaryInto('commandDetailTitle', 'commandDetailBody', 'commandDetailEmpty');
+  } catch (e) {
+    if (body) {
+      body.innerHTML = `<div class="main-view-content"><div class="detail-form-error" style="display:block">${esc(e && e.message ? e.message : String(e))}</div></div>`;
+      body.style.display = '';
+    }
+    if (empty) empty.style.display = 'none';
+  }
+}
+
+function _workTimeLabel(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  const remainder = total % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
+}
+
+function _syncWorkTimer() {
+  const timer = $('workTimerValue');
+  if (!timer || !_workData || !_workData.active) return;
+  const remaining = Math.max(0, Number(_workData.active.ends_at || 0) - (Date.now() / 1000));
+  timer.textContent = _workTimeLabel(remaining);
+  timer.classList.toggle('expired', remaining <= 0);
+}
+
+function _startWorkTimer() {
+  if (_workTimer) clearInterval(_workTimer);
+  _workTimer = null;
+  if (!_workData || !_workData.active) return;
+  _syncWorkTimer();
+  _workTimer = setInterval(_syncWorkTimer, 1000);
+}
+
+function _workTaskRows(tasks) {
+  const rows = Array.isArray(tasks) ? tasks.slice(0, 3) : [];
+  if (!rows.length) return '<div class="work-empty">Nessuna task aperta per questo progetto.</div>';
+  return rows.map(task => `
+    <article class="work-task">
+      <div>
+        <strong>${esc(task.title || task.task_id || '')}</strong>
+        <span>${esc(task.priority || '')}${task.due_date ? ` &middot; ${esc(task.due_date)}` : ''}</span>
+        <p>${esc(task.next_action || '')}</p>
+      </div>
+      <div class="work-task-actions">
+        ${_ccTaskChatButton(task, {project_id: task.project_id || ''})}
+        ${_ccTaskStatusButton(task)}
+      </div>
+    </article>`).join('');
+}
+
+function _renderWorkMode() {
+  const body = $('workDetailBody');
+  if (!body) return;
+  const data = _workData || {};
+  const active = data.active || null;
+  const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+  const history = Array.isArray(data.history) ? data.history : [];
+  if (active) {
+    const project = active.project || candidates.find(row => row.project_id === active.project_id) || {};
+    body.innerHTML = `
+      <div class="main-view-content work-view work-active">
+        <section class="work-focus-card">
+          <div class="work-focus-head">
+            <div>
+              <div class="work-kicker">Deep Focus attivo</div>
+              <h2>${esc(active.project_name || project.name || active.project_id || '')}</h2>
+              <p>${esc(active.selection_reason || project.reason || '')}</p>
+            </div>
+            <div class="work-timer" id="workTimerValue">60:00</div>
+          </div>
+          <div class="work-focus-goal">${esc(project.next_action || project.business_goal || '')}</div>
+          <div class="work-task-list">${_workTaskRows(project.tasks || [])}</div>
+          <div class="work-actions">
+            <button type="button" class="btn primary" onclick="openWorkFocusChat()">${li('message-square',14)} Apri chat focus</button>
+            <button type="button" class="btn secondary" onclick="finishWorkSession('completed')">Completa ora</button>
+            <button type="button" class="btn secondary" onclick="finishWorkSession('stopped')">Interrompi</button>
+          </div>
+        </section>
+      </div>`;
+    _startWorkTimer();
+    return;
+  }
+  if (_workTimer) clearInterval(_workTimer);
+  _workTimer = null;
+  const bubbles = candidates.length ? candidates.map((project, index) => {
+    const urgency = Number(project.urgent_count || 0);
+    const classes = urgency ? ' urgent' : '';
+    const delay = (index % 6) * -0.8;
+    return `<button type="button" class="work-bubble${classes}" style="--work-delay:${delay}s" onclick="startWorkSession('${esc(project.project_id || '')}')">
+      <strong>${esc(project.name || project.project_id || '')}</strong>
+      <span>${esc(String(project.task_count || 0))} task &middot; ${esc(String(project.recent_minutes || 0))} min/7g</span>
+      <small>${esc(project.reason || '')}</small>
+    </button>`;
+  }).join('') : '<div class="work-empty">Non ci sono progetti con task aperte.</div>';
+  const historyRows = history.length ? history.slice(0, 6).map(row => `
+    <div class="work-history-row">
+      <strong>${esc(row.project_name || row.project_id || '')}</strong>
+      <span>${esc(String(row.minutes || 0))} min &middot; ${esc(row.status || '')}</span>
+    </div>`).join('') : '<div class="work-empty">Nessuna sessione registrata.</div>';
+  body.innerHTML = `
+    <div class="main-view-content work-view">
+      <section class="work-intro">
+        <div>
+          <div class="work-kicker">Modalita operativa</div>
+          <h2>Una cosa sola per un'ora.</h2>
+          <p>Hermes considera prima scadenze e P0, poi ruota i progetti in base al tempo gia dedicato.</p>
+        </div>
+        <button type="button" class="btn primary work-start-btn" onclick="startWorkSession('')">${li('target',16)} Start Deep Focus</button>
+      </section>
+      <section class="work-bubble-field" aria-label="Progetti disponibili">${bubbles}</section>
+      <section class="work-history">
+        <div class="work-section-head"><h3>Ultime sessioni</h3><span>memoria focus</span></div>
+        ${historyRows}
+      </section>
+    </div>`;
+}
+
+async function loadWorkMode(force) {
+  try {
+    if (force || !_workData) _workData = await api('/api/work/state');
+    _renderWorkMode();
+  } catch (e) {
+    const body = $('workDetailBody');
+    if (body) body.innerHTML = `<div class="main-view-content"><div class="detail-form-error" style="display:block">${esc(e && e.message ? e.message : String(e))}</div></div>`;
+  }
+}
+
+async function startWorkSession(projectId) {
+  try {
+    const data = await api('/api/work/start', {
+      method: 'POST',
+      body: JSON.stringify(projectId ? {project_id: projectId} : {}),
+    });
+    _workData = data.work || null;
+    _renderWorkMode();
+    if (typeof showToast === 'function') showToast(data.reused ? 'Deep Focus gia attivo.' : 'Deep Focus avviato: 60 minuti.');
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((t('error_prefix') || 'Error: ') + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function finishWorkSession(status) {
+  const active = _workData && _workData.active;
+  if (!active) return;
+  try {
+    const data = await api('/api/work/finish', {
+      method: 'POST',
+      body: JSON.stringify({session_id: active.session_id, status}),
+    });
+    _workData = data.work || null;
+    _renderWorkMode();
+    if (typeof showToast === 'function') showToast(status === 'completed' ? 'Sessione focus completata.' : 'Sessione focus interrotta.');
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((t('error_prefix') || 'Error: ') + (e && e.message ? e.message : String(e)));
+  }
+}
+
+function _workFocusPrompt(active, project) {
+  const tasks = Array.isArray(project.tasks) ? project.tasks.slice(0, 3) : [];
+  return [
+    'Modalita Deep Focus Hermes.',
+    '',
+    `Progetto: ${active.project_name || project.name || active.project_id || ''}`,
+    `Durata: ${active.duration_minutes || 60} minuti`,
+    `Motivo selezione: ${active.selection_reason || project.reason || ''}`,
+    project.business_goal ? `Obiettivo: ${project.business_goal}` : '',
+    project.next_action ? `Prossima azione progetto: ${project.next_action}` : '',
+    '',
+    'Task di questa sessione:',
+    ...tasks.map(task => `- ${task.priority || ''} ${task.title || task.task_id || ''}: ${task.next_action || ''}`),
+    '',
+    'Durante questa chat mantieni il contesto su questo progetto. Aiutami a eseguire le task una alla volta, evita deviazioni e alla fine riepiloga cosa e stato completato e la prossima azione concreta.',
+  ].filter(Boolean).join('\n');
+}
+
+async function openWorkFocusChat() {
+  const active = _workData && _workData.active;
+  if (!active) return;
+  if (active.chat_session_id && typeof loadSession === 'function') {
+    await switchPanel('chat');
+    await loadSession(active.chat_session_id);
+    return;
+  }
+  const project = active.project || {};
+  try {
+    if (typeof newSession === 'function') await newSession(false, {awaitWorkspaceLoad: false});
+    if (!S || !S.session || !S.session.session_id) throw new Error('Unable to create focus chat');
+    const chatSessionId = S.session.session_id;
+    const title = `Focus - ${active.project_name || active.project_id || 'Work'}`.slice(0, 80);
+    try {
+      await api('/api/session/rename', {
+        method: 'POST',
+        body: JSON.stringify({session_id: chatSessionId, title}),
+      });
+      S.session.title = title;
+      if (typeof syncTopbar === 'function') syncTopbar();
+      if (typeof renderSessionList === 'function') renderSessionList();
+    } catch (_) {}
+    const attached = await api('/api/work/attach-chat', {
+      method: 'POST',
+      body: JSON.stringify({session_id: active.session_id, chat_session_id: chatSessionId}),
+    });
+    _workData = attached.work || _workData;
+    await switchPanel('chat');
+    const msg = $('msg');
+    if (msg) {
+      msg.value = _workFocusPrompt(active, project);
+      msg.dispatchEvent(new Event('input', {bubbles: true}));
+      msg.focus();
+      msg.selectionStart = msg.selectionEnd = msg.value.length;
+    }
+    if (typeof showToast === 'function') showToast('Chat focus preparata. Invia il messaggio per iniziare.');
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((t('error_prefix') || 'Error: ') + (e && e.message ? e.message : String(e)));
+  }
+}
+
 function _renderMemoryDetail(section) {
+  if (section === 'daily_command') {
+    _renderControlCenterSummary();
+    return;
+  }
   if (section === 'external_notes') {
     _renderExternalNotesSources();
     return;
@@ -4168,6 +5027,14 @@ async function openMemorySection(section, el) {
   _currentMemorySection = section;
   document.querySelectorAll('#memoryPanel .side-menu-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
+  if (section === 'daily_command' && !_controlCenterData) {
+    try { _controlCenterData = await api('/api/control-center/summary'); }
+    catch (_) { _controlCenterData = {}; }
+  }
+  if (section === 'daily_command' && !_controlCenterAgents) {
+    try { _controlCenterAgents = await api('/api/agents'); }
+    catch (_) { _controlCenterAgents = {}; }
+  }
   if (section === 'external_notes') {
     await loadNotesSources(false);
   }
@@ -4175,7 +5042,7 @@ async function openMemorySection(section, el) {
 }
 
 function editCurrentMemory() {
-  if (!_currentMemorySection || _currentMemorySection === 'external_notes') return;
+  if (!_currentMemorySection || _currentMemorySection === 'external_notes' || _currentMemorySection === 'daily_command') return;
   _renderMemoryEdit(_currentMemorySection);
 }
 
@@ -4190,6 +5057,7 @@ function closeMemoryEdit() { cancelMemoryEdit(); }
 
 async function submitMemorySave() {
   if (!_currentMemorySection) return;
+  if (_currentMemorySection === 'daily_command') return;
   const ta = $('memEditContent');
   const errEl = $('memEditError');
   if (!ta) return;
@@ -5564,10 +6432,17 @@ async function deleteProfile(name) {
 async function loadMemory(force) {
   const panel = $('memoryPanel');
   try {
-    const data = await api('/api/memory');
+    const [data, controlCenter] = await Promise.all([
+      api('/api/memory'),
+      api('/api/control-center/summary').catch(() => null),
+    ]);
     _memoryData = data;
+    if (controlCenter || force) _controlCenterData = controlCenter || {};
     if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
       _currentMemorySection = null;
+    }
+    if (!_currentMemorySection) {
+      _currentMemorySection = 'daily_command';
     }
     if (_currentMemorySection === 'external_notes') {
       await loadNotesSources(!!force);
@@ -5731,7 +6606,7 @@ function switchSettingsSection(name){
     _currentPanel = 'settings';
     var mainEl = document.querySelector('main.main');
     if (mainEl) {
-      ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(function(p) {
+      ['settings','skills','memory','command','work','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(function(p) {
         mainEl.classList.toggle('showing-' + p, p === 'settings');
       });
     }

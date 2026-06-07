@@ -739,6 +739,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
+  const _streamIdleCancelMs = Math.max(
+    60000,
+    Number(window._streamIdleCancelMs || 10 * 60 * 1000) || 10 * 60 * 1000
+  );
+  let _streamIdleTimer=null;
+  let _streamIdleCancelStarted=false;
   // Thinking tag patterns for streaming display
   const _thinkPairs=[
     {open:'<think>',close:'</think>'},
@@ -848,6 +854,42 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _closeSource(source){
     closeLiveStream(activeSid, streamId, source);
+  }
+  function _clearStreamIdleWatchdog(){
+    if(_streamIdleTimer){
+      clearTimeout(_streamIdleTimer);
+      _streamIdleTimer=null;
+    }
+  }
+  async function _cancelIdleStream(source){
+    if(_streamIdleCancelStarted||_terminalStateReached||_streamFinalized) return;
+    _streamIdleCancelStarted=true;
+    syncInflightAssistantMessage();
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    persistInflightState();
+    if(_isSessionCurrentPane(activeSid)){
+      setComposerStatus('Stream idle too long; stopping and saving partial response...');
+    }
+    try{
+      await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    }catch(_){ }
+    setTimeout(async()=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(await _restoreSettledSession(source)) return;
+      _closeSource(source);
+      if(_isSessionCurrentPane(activeSid)){
+        S.activeStreamId=null;
+        if(S.session) S.session.active_stream_id=null;
+        setBusy(false);
+        setComposerStatus('Stream stopped after inactivity. Partial response is kept locally for recovery.');
+        renderSessionList();
+      }
+    },3000);
+  }
+  function _markStreamActivity(source){
+    if(_terminalStateReached||_streamFinalized||_streamIdleCancelStarted) return;
+    _clearStreamIdleWatchdog();
+    _streamIdleTimer=setTimeout(()=>_cancelIdleStream(source), _streamIdleCancelMs);
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -1656,6 +1698,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
+    _markStreamActivity(source);
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -1673,6 +1716,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // terminal handlers) address it without needing a reset here.
 
     source.addEventListener('token',e=>{
+      _markStreamActivity(source);
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
@@ -1685,6 +1729,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('interim_assistant',e=>{
+      _markStreamActivity(source);
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
@@ -1913,6 +1958,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('done',e=>{
+      _clearStreamIdleWatchdog();
       if(_streamFinalized) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -2111,6 +2157,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('stream_end',async e=>{
+      _clearStreamIdleWatchdog();
       if(_streamFinalized){
         _closeSource(source);
         return;
@@ -2255,6 +2302,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('apperror',e=>{
+      _clearStreamIdleWatchdog();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2330,6 +2378,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
+      _clearStreamIdleWatchdog();
       if(_terminalStateReached || _streamFinalized){
         _closeSource(source);
         return;
@@ -2380,6 +2429,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('cancel',e=>{
+      _clearStreamIdleWatchdog();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2423,7 +2473,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
-      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+      source.addEventListener(_runJournalEventName,e=>{
+        if(!['done','stream_end','apperror','error','cancel'].includes(_runJournalEventName)){
+          _markStreamActivity(source);
+        }
+        _rememberRunJournalCursor(e);
+      });
     }
   }
 
