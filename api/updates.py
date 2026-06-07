@@ -1131,15 +1131,32 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # we use subprocess.Popen() + os._exit() instead.
                 if sys.platform == 'win32':
                     import subprocess
-                    if getattr(sys, "frozen", False):
+                    start_script = Path(REPO_ROOT) / "start.ps1"
+                    if not getattr(sys, "frozen", False) and start_script.is_file():
+                        args = [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-File",
+                            str(start_script),
+                            "-Port",
+                            str(os.environ.get("HERMES_WEBUI_PORT", "8787")),
+                            "-BindHost",
+                            str(os.environ.get("HERMES_WEBUI_HOST", "127.0.0.1")),
+                        ]
+                        restart_cwd = str(REPO_ROOT)
+                    elif getattr(sys, "frozen", False):
                         args = sys.argv
+                        restart_cwd = os.getcwd()
                     else:
                         args = [sys.executable] + sys.argv
+                        restart_cwd = os.getcwd()
                     # Start new process detached, redirect all stdio to
                     # avoid broken-pipe errors when the parent exits.
                     subprocess.Popen(
                         args,
-                        cwd=os.getcwd(),
+                        cwd=restart_cwd,
                         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
                         close_fds=True,
                         stdin=subprocess.DEVNULL,
