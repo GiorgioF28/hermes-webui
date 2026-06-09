@@ -12906,6 +12906,91 @@ def _claude_code_usage_payload(evt):
     }
 
 
+class ClaudeStreamState:
+    def __init__(self):
+        self.live_tool_calls = []
+        self.streamed_answer_parts = []
+        self.current_blocks = {}
+        self.current_tool_input_json = {}
+        self.announced_tool_input = set()
+        self.final_usage = None
+
+
+def _handle_claude_stream_event(inner, state, emit, *, session_id, clean_msg):
+    """Translate one raw Anthropic stream event dict into queue events via emit().
+
+    `emit` is a callable taking a (kind, payload) tuple — e.g. q.put_nowait.
+    Mirrors the legacy stream_event handling in _run_claude_code_streaming.
+    """
+    inner_type = str(inner.get("type") or "")
+    if inner_type == "message_start":
+        model_name = str(((inner.get("message") or {}).get("model")) or "Claude")
+        emit(("reasoning", {"text": f"Primo contatto modello: {model_name}.\n"}))
+        return
+    if inner_type == "content_block_start":
+        idx = str(inner.get("index") if inner.get("index") is not None else uuid.uuid4().hex)
+        block = inner.get("content_block") if isinstance(inner.get("content_block"), dict) else {}
+        state.current_blocks[idx] = block
+        if block.get("type") == "tool_use":
+            tid = str(block.get("id") or idx)
+            name = _claude_code_tool_name(block)
+            args = _claude_code_tool_args(block)
+            preview = _claude_code_tool_preview(name, args)
+            state.live_tool_calls.append({"name": name, "args": args, "done": False, "tid": tid})
+            emit(("tool", {"event_type": "tool.started", "name": name, "preview": preview, "args": args, "tid": tid}))
+        return
+    if inner_type == "content_block_delta":
+        idx = str(inner.get("index") if inner.get("index") is not None else "")
+        delta = inner.get("delta") if isinstance(inner.get("delta"), dict) else {}
+        if delta.get("type") == "text_delta":
+            text = str(delta.get("text") or "")
+            if text:
+                state.streamed_answer_parts.append(text)
+                emit(("token", {"text": text}))
+        elif delta.get("type") == "input_json_delta":
+            block = state.current_blocks.get(idx) or {}
+            if block.get("type") == "tool_use":
+                tid = str(block.get("id") or idx)
+                partial = str(delta.get("partial_json") or "")
+                if partial:
+                    state.current_tool_input_json[idx] = state.current_tool_input_json.get(idx, "") + partial
+                    announce_key = tid or idx
+                    if announce_key not in state.announced_tool_input:
+                        state.announced_tool_input.add(announce_key)
+                        emit(("reasoning", {"text": f"Claude sta preparando input tool `{_claude_code_tool_name(block)}`...\n"}))
+        return
+    if inner_type == "content_block_stop":
+        idx = str(inner.get("index") if inner.get("index") is not None else "")
+        block = state.current_blocks.get(idx) or {}
+        if block.get("type") == "tool_use":
+            tid = str(block.get("id") or idx)
+            name = _claude_code_tool_name(block)
+            args = _claude_code_tool_args(block)
+            raw_tool_input = state.current_tool_input_json.get(idx, "")
+            if raw_tool_input.strip():
+                try:
+                    parsed = json.loads(raw_tool_input)
+                    if isinstance(parsed, dict):
+                        args = parsed
+                except Exception:
+                    args = {"input": raw_tool_input[:2000]}
+            preview = _claude_code_tool_preview(name, args)
+            for live_tc in reversed(state.live_tool_calls):
+                if live_tc.get("tid") == tid:
+                    live_tc["done"] = True
+                    live_tc["args"] = args
+                    live_tc["snippet"] = preview
+                    break
+            emit(("tool_complete", {"event_type": "tool.completed", "name": name, "preview": preview, "args": args, "tid": tid, "is_error": False}))
+        return
+    if inner_type == "message_delta":
+        usage = _claude_code_usage_payload(inner)
+        if usage:
+            state.final_usage = usage
+            emit(("metering", {"session_id": session_id, "usage": usage}))
+        return
+
+
 def _run_claude_code_streaming(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
     """Run a WebUI turn through the local Claude Code CLI session."""
     q = STREAMS.get(stream_id)
