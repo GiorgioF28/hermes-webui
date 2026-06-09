@@ -44,6 +44,18 @@ HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
 
+def persistent_cli_bridge_enabled(cfg=None) -> bool:
+    """Persistent Claude/Codex CLI sessions (no per-turn context re-injection).
+
+    Default ON. Set HERMES_PERSISTENT_CLI_BRIDGE=0/false/no/off to fall back to
+    the legacy one-shot subprocess bridges.
+    """
+    val = os.environ.get("HERMES_PERSISTENT_CLI_BRIDGE")
+    if val is not None:
+        return val.strip().lower() not in ("0", "false", "no", "off")
+    return True
+
+
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read a positive int from the environment, falling back on bad input.
 

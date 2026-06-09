@@ -8,3 +8,7 @@
 # you want server-side Microsoft neural voices:  pip install edge-tts
 pyyaml>=6.0
 cryptography>=42.0
+# Persistent Claude bridge (WebUI -> Claude Code). Uses the Claude Code CLI
+# subscription login; no ANTHROPIC_API_KEY needed. Installed in the agent venv
+# via uv (the venv has no pip): uv pip install --python <venv> claude-agent-sdk
+claude-agent-sdk>=0.2.94
