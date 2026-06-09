@@ -4008,6 +4008,55 @@ def _partial_marker_already_present(messages, candidate: dict, *, before_idx: in
     return False
 
 
+def _persist_live_partial_before_terminal(
+    session,
+    stream_id: str,
+    *,
+    before_idx: int | None = None,
+) -> bool:
+    """Persist already-streamed output before a terminal error marker."""
+    partial_text = str(STREAM_PARTIAL_TEXT.get(stream_id, '') or '')
+    reasoning = str(STREAM_REASONING_TEXT.get(stream_id, '') or '').strip()
+    tool_calls = list(STREAM_LIVE_TOOL_CALLS.get(stream_id, []) or [])
+
+    visible_text = ''
+    if partial_text:
+        visible_text = re.sub(
+            r'<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>',
+            '',
+            partial_text,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+        visible_text = re.sub(
+            r'<think(?:ing)?\b[^>]*>.*',
+            '',
+            visible_text,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+
+    if not (visible_text or reasoning or tool_calls):
+        return False
+
+    partial_message: dict = {
+        'role': 'assistant',
+        'content': visible_text,
+        '_partial': True,
+        'timestamp': int(time.time()),
+    }
+    if reasoning:
+        partial_message['reasoning'] = reasoning
+    if tool_calls:
+        partial_message['_partial_tool_calls'] = tool_calls
+
+    messages = session.messages
+    insert_at = before_idx if isinstance(before_idx, int) else len(messages)
+    insert_at = max(0, min(insert_at, len(messages)))
+    if _partial_marker_already_present(messages, partial_message, before_idx=insert_at):
+        return False
+    messages.insert(insert_at, partial_message)
+    return True
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -6384,6 +6433,7 @@ def _run_agent_streaming(
                         s.pending_user_message = None
                         s.pending_attachments = []
                         s.pending_started_at = None
+                        _persist_live_partial_before_terminal(s, stream_id)
                         _error_message = {
                             'role': 'assistant',
                             'content': f'**{_err_label}:** {_error_payload.get("message") or _err_label}\n\n*{_err_hint}*',
@@ -7333,6 +7383,7 @@ def _run_agent_streaming(
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
+                _persist_live_partial_before_terminal(s, stream_id)
                 _error_message = {
                     'role': 'assistant',
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
@@ -7363,6 +7414,9 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+                _error_payload['session'] = redact_session_data(
+                    s.compact() | {'messages': s.messages, 'tool_calls': s.tool_calls}
+                )
             _error_payload['session_id'] = getattr(s, 'session_id', session_id)
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
