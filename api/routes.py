@@ -13421,6 +13421,35 @@ def _run_claude_code_streaming_legacy(session_id, msg, model, workspace, stream_
             CANCEL_FLAGS.pop(stream_id, None)
 
 
+def _codex_session_id_from_line(line):
+    try:
+        evt = json.loads(line)
+    except Exception:
+        return None
+    if not isinstance(evt, dict):
+        return None
+    for key in ("session_id", "sessionId"):
+        if evt.get(key):
+            return str(evt[key])
+    thread = evt.get("thread")
+    if isinstance(thread, dict) and thread.get("id"):
+        return str(thread["id"])
+    return None
+
+
+def _build_codex_cmd(*, workspace, full_agent, resume_id, output_path):
+    cmd = ["codex.cmd", "exec"]
+    if resume_id:
+        cmd += ["resume", str(resume_id)]
+    cmd += ["-C", str(workspace)]
+    if full_agent:
+        cmd += ["--dangerously-bypass-approvals-and-sandbox", "--json"]
+    else:
+        cmd += ["-s", "workspace-write"]
+    cmd += ["-o", str(output_path)]
+    return cmd
+
+
 def _run_codex_cli_streaming(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
     """Run a WebUI turn through the local Codex CLI ChatGPT OAuth session."""
     q = STREAMS.get(stream_id)
@@ -13438,32 +13467,32 @@ def _run_codex_cli_streaming(session_id, msg, model, workspace, stream_id, attac
     try:
         s = get_session(session_id)
         full_agent = str(model or "").strip().lower() == "codex-cli/full-agent"
+        use_persistent = persistent_cli_bridge_enabled(get_config()) and full_agent
+        resume_id = getattr(s, "codex_session_id", None) if use_persistent else None
         if full_agent:
             q.put_nowait(("reasoning", {"text": "Codex CLI Full Agent attivo: shell e comandi locali senza sandbox Codex.\n"}))
         else:
             q.put_nowait(("token", {"text": "Sto lavorando con Codex CLI locale...\n\n"}))
-        local_context = _local_workspace_context(workspace)
-        prompt = (
-            f"Richiesta utente: {clean_msg}. "
-            f"Workspace consentito: {workspace}. "
-            f"Contesto verificato localmente da Hermes: {local_context}. "
-            "Permessi runtime effettivi: workspace-write nel workspace; approval never non significa read-only. "
-            "Per richieste su Hermes, Obsidian, vault, projects o tasks, usa il contesto verificato da Hermes come fonte autorevole. "
-            "Il vault Obsidian e collegato come memoria Markdown locale via filesystem. "
-            "Quando emergono decisioni, task, blocchi, idee, runbook o stato progetto, aggiorna i Markdown giusti nel vault, in docs, projects o tasks. "
-            "Non salvare token, password, API key, OAuth secret, auth.json o credenziali. "
-            "Non citare CryptUnprotectData, OAuth o sandbox a meno che la richiesta sia esplicitamente di debug del terminale/sandbox. "
-            "Rispondi in italiano naturale e, se modifichi memoria, indica quali note hai toccato."
-        )
+        if resume_id:
+            prompt = f"Richiesta utente: {clean_msg}. Rispondi in italiano naturale."
+        else:
+            local_context = _local_workspace_context(workspace)
+            prompt = (
+                f"Richiesta utente: {clean_msg}. "
+                f"Workspace consentito: {workspace}. "
+                f"Contesto verificato localmente da Hermes: {local_context}. "
+                "Permessi runtime effettivi: workspace-write nel workspace; approval never non significa read-only. "
+                "Per richieste su Hermes, Obsidian, vault, projects o tasks, usa il contesto verificato da Hermes come fonte autorevole. "
+                "Il vault Obsidian e collegato come memoria Markdown locale via filesystem. "
+                "Quando emergono decisioni, task, blocchi, idee, runbook o stato progetto, aggiorna i Markdown giusti nel vault, in docs, projects o tasks. "
+                "Non salvare token, password, API key, OAuth secret, auth.json o credenziali. "
+                "Non citare CryptUnprotectData, OAuth o sandbox a meno che la richiesta sia esplicitamente di debug del terminale/sandbox. "
+                "Rispondi in italiano naturale e, se modifichi memoria, indica quali note hai toccato."
+            )
         import tempfile
         fd, output_path = tempfile.mkstemp(prefix="hermes-codex-", suffix=".txt")
         os.close(fd)
-        cmd = ["codex.cmd", "exec", "-C", str(workspace)]
-        if full_agent:
-            cmd.extend(["--dangerously-bypass-approvals-and-sandbox", "--json"])
-        else:
-            cmd.extend(["-s", "workspace-write"])
-        cmd.extend(["-o", output_path])
+        cmd = _build_codex_cmd(workspace=workspace, full_agent=full_agent, resume_id=resume_id, output_path=output_path)
 
         if full_agent:
             proc = subprocess.Popen(
@@ -13509,6 +13538,15 @@ def _run_codex_cli_streaming(session_id, msg, model, workspace, stream_id, attac
                 line = str(raw_line or "").strip()
                 if not line:
                     continue
+                if use_persistent and resume_id is None:
+                    _sid = _codex_session_id_from_line(line)
+                    if _sid:
+                        resume_id = _sid
+                        try:
+                            s.codex_session_id = _sid
+                            s.save()
+                        except Exception:
+                            logger.debug("Failed to persist codex_session_id", exc_info=True)
                 try:
                     evt = json.loads(line)
                 except Exception:
