@@ -1106,6 +1106,7 @@ from api.config import (
     _save_yaml_config_file,
     reload_config,
     _cfg_lock,
+    persistent_cli_bridge_enabled,
 )
 from api.helpers import (
     require,
@@ -12991,7 +12992,162 @@ def _handle_claude_stream_event(inner, state, emit, *, session_id, clean_msg):
         return
 
 
+_CLAUDE_REGISTRY = None
+_CLAUDE_REGISTRY_LOCK = threading.Lock()
+
+
+def _get_claude_registry():
+    global _CLAUDE_REGISTRY
+    with _CLAUDE_REGISTRY_LOCK:
+        if _CLAUDE_REGISTRY is None:
+            from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
+            from api.persistent_agent_loop import ClaudeSessionRegistry
+            from api.ask_user_tool import build_ask_user_server
+
+            async def _factory(session_id, *, cwd, add_dir, system_prompt):
+                options = ClaudeAgentOptions(
+                    cwd=str(cwd),
+                    add_dirs=[str(add_dir)] if add_dir else [],
+                    system_prompt=system_prompt,
+                    permission_mode="bypassPermissions",
+                    include_partial_messages=True,
+                    model=None,
+                    mcp_servers={"hermes": build_ask_user_server(session_id)},
+                    allowed_tools=["mcp__hermes__ask_user"],
+                )
+                client = ClaudeSDKClient(options=options)
+                await client.connect()
+                return client
+
+            _CLAUDE_REGISTRY = ClaudeSessionRegistry(factory=_factory, idle_ttl=1800.0, max_sessions=12)
+
+            def _sweeper():
+                while True:
+                    time.sleep(300)
+                    try:
+                        _CLAUDE_REGISTRY.sweep_idle()
+                    except Exception:
+                        logger.debug("claude registry sweep failed", exc_info=True)
+            threading.Thread(target=_sweeper, name="claude-registry-sweeper", daemon=True).start()
+        return _CLAUDE_REGISTRY
+
+
+def _claude_session_system_prompt(workspace):
+    local_context = _local_workspace_context(workspace)
+    append = (
+        f"Workspace consentito: {workspace}. "
+        f"Contesto verificato localmente da Hermes: {local_context}. "
+        "Permessi runtime effettivi: workspace-write nel workspace. "
+        "Per domande su Hermes, Obsidian, vault, projects o tasks usa il contesto verificato da Hermes come fonte autorevole. "
+        "Il vault Obsidian e collegato come memoria Markdown locale via filesystem; aggiorna i Markdown giusti quando emergono decisioni, task, blocchi, idee o stato progetto. "
+        "Non citare CryptUnprotectData salvo richiesta esplicita di debug. "
+        "Quando ci sono piu approcci validi e la scelta dipende da una preferenza dell'utente, "
+        "NON decidere da solo: chiama il tool mcp__hermes__ask_user passando la domanda e 2-4 opzioni concise, e aspetta la risposta prima di proseguire. "
+        "Usalo per scelte di design/approccio, non per chiedere permessi. "
+        "Rispondi in italiano naturale."
+    )
+    return {"type": "preset", "preset": "claude_code", "append": append}
+
+
+def _consume_claude_sdk_message(message, state, emit, *, session_id, clean_msg):
+    """Route a Claude Agent SDK message object into queue events.
+
+    StreamEvent.event carries the raw Anthropic streaming dict (reuse the
+    shared parser). ResultMessage carries final usage + text.
+    """
+    ev = getattr(message, "event", None)
+    if isinstance(ev, dict):
+        _handle_claude_stream_event(ev, state, emit, session_id=session_id, clean_msg=clean_msg)
+        return
+    if type(message).__name__ == "ResultMessage":
+        usage = getattr(message, "usage", None)
+        if isinstance(usage, dict):
+            payload = _claude_code_usage_payload({"usage": usage})
+            if payload and any(payload.values()):
+                state.final_usage = payload
+                emit(("metering", {"session_id": session_id, "usage": payload}))
+        res = getattr(message, "result", None)
+        if res and not state.streamed_answer_parts:
+            state.final_result_text = str(res)
+        emit(("reasoning", {"text": "Claude completato.\n"}))
+
+
 def _run_claude_code_streaming(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
+    """Run a WebUI turn through a PERSISTENT Claude Agent SDK session."""
+    if not persistent_cli_bridge_enabled(get_config()):
+        return _run_claude_code_streaming_legacy(session_id, msg, model, workspace, stream_id, attachments, model_provider=model_provider)
+    q = STREAMS.get(stream_id)
+    if q is None:
+        return
+    cancel_event = threading.Event()
+    with STREAMS_LOCK:
+        CANCEL_FLAGS[stream_id] = cancel_event
+    state = ClaudeStreamState()
+    try:
+        s = get_session(session_id)
+        q.put_nowait(("reasoning", {"text": "Claude Code (sessione persistente) attivo: contesto in memoria, nessuna re-iniezione.\n"}))
+        clean_msg = " ".join(str(msg or "").split())
+        registry = _get_claude_registry()
+        registry.get_or_create(
+            session_id,
+            cwd=workspace,
+            add_dir=workspace,
+            system_prompt=_claude_session_system_prompt(workspace),
+        )
+
+        async def _drive(client):
+            await client.query(clean_msg)
+            async for message in client.receive_response():
+                if cancel_event.is_set():
+                    try:
+                        await client.interrupt()
+                    except Exception:
+                        pass
+                    return
+                _consume_claude_sdk_message(message, state, q.put_nowait, session_id=session_id, clean_msg=clean_msg)
+
+        registry.run_turn(session_id, _drive, timeout=1800)
+
+        if cancel_event.is_set():
+            return
+        answer = "".join(state.streamed_answer_parts).strip() or getattr(state, "final_result_text", "")
+        if not answer:
+            answer = "**No response received from Claude Code.**"
+        answer = _sanitize_cli_agent_answer(answer, clean_msg)
+        if not state.streamed_answer_parts:
+            q.put_nowait(("token", {"text": answer}))
+        live_tool_calls = state.live_tool_calls
+        now_ts = time.time()
+        s.messages.append({"role": "user", "content": msg, "_ts": now_ts})
+        s.messages.append({"role": "assistant", "content": answer, "_ts": time.time(), "model": "claude-code", "model_provider": "claude-code"})
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = None
+        s.pending_started_at = None
+        s.model = model or "claude-code/local-session"
+        s.model_provider = "claude-code"
+        if live_tool_calls:
+            s.tool_calls = live_tool_calls
+        memory_path = _append_obsidian_interaction_memory(workspace, session_id, msg, answer, model_provider="claude-code", model=s.model)
+        memory_note = _memory_update_note(workspace, memory_path)
+        if memory_note:
+            q.put_nowait(("token", {"text": memory_note}))
+            answer = f"{answer}{memory_note}"
+            s.messages[-1]["content"] = answer
+        s.save()
+        q.put_nowait(("done", {"session": s.compact() | {"messages": s.messages, "tool_calls": getattr(s, "tool_calls", []), "active_stream_id": getattr(s, "active_stream_id", None), "pending_user_message": getattr(s, "pending_user_message", None), "pending_attachments": getattr(s, "pending_attachments", []), "pending_started_at": getattr(s, "pending_started_at", None)}, "usage": {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}}))
+        q.put_nowait(("stream_end", {"session_id": session_id}))
+    except Exception as exc:
+        logger.exception("Claude Code persistent bridge failed")
+        _finish_cli_bridge_error(q, session_id, model or "claude-code/local-session", "claude-code", "Claude Code bridge failed", "claude_code_bridge_error", str(exc), "Controlla che Claude Code sia loggato (claude.cmd) e che claude-agent-sdk sia installato nel venv.")
+    finally:
+        time.sleep(10)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            CANCEL_FLAGS.pop(stream_id, None)
+
+
+def _run_claude_code_streaming_legacy(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
     """Run a WebUI turn through the local Claude Code CLI session."""
     q = STREAMS.get(stream_id)
     if q is None:
