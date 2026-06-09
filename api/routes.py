@@ -7238,6 +7238,13 @@ def handle_post(handler, parsed) -> bool:
         # Evict cached agent so turn count doesn't leak into a recycled session
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
+        # Close any persistent Claude Agent SDK session for this id. Read the
+        # global directly so we never CREATE the registry just to delete.
+        try:
+            if _CLAUDE_REGISTRY is not None:
+                _CLAUDE_REGISTRY.close(sid)
+        except Exception:
+            logger.debug("Failed to close persistent Claude session for %s", sid, exc_info=True)
         try:
             p = (SESSION_DIR / f"{sid}.json").resolve()
             p.relative_to(SESSION_DIR.resolve())
