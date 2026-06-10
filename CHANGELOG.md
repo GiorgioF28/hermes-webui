@@ -5,6 +5,147 @@
 
 ### Added
 - Added a local `Work` view for 60-minute Deep Focus sessions. It prioritizes urgent P0 work, rotates projects using recent focus time, shows floating project bubbles and project tasks, persists session history in `tasks/work-sessions.json`, and can create or reopen a project-specific chat.
+## [v0.51.341] — 2026-06-09 — Release LE (stale thinking-dot placeholder fix)
+
+### Fixed
+
+- **Legacy thinking placeholders no longer pile up as stale three-dot rows.** Empty pre-stream thinking spinners are now removed when the thinking phase finalizes instead of being mistaken for durable Thinking content. The live-to-final redesign (#3401) made the `thinking-card-row` wrapper class unconditional, which broke `finalizeThinkingCard()`'s dots-only detection (it treated the wrapper class itself as a "has content" signal); the check is now narrowed to the actual `.thinking-card` element so dots-only spinners are removed on finalize while real Worklog Thinking Cards are preserved. (#3869, #3876)
+
+## [v0.51.340] — 2026-06-09 — Release LD (background-task agent wakeup in WebUI)
+
+### Added
+
+- Background tasks started with `terminal(notify_on_complete=true)` now wake the WebUI agent turn server-side, so the wakeup fires even when no browser tab is open. Closed-tab parity with CLI / Telegram / gateway hosts. (#2968)
+- New `bg_task_complete` SSE event with trimmed `{session_id, task_id, completed_at, summary?, event_id}` payload and per-emit `event_id`. The legacy `process_complete` event name is dual-emitted with the same `event_id` for one PR cycle so in-flight WebUI builds keep working, then removed by #2971. (#2968, #2971)
+- WebUI surfaces a small toast on background task completion, suppressed when the user is already focused on the target session. (#2971, #2979)
+- New `GET /api/session/stream` per-session SSE channel for live-view of server-initiated wakeup turns; the browser's chat-stream renderer is reused (no second renderer). (#2968, #2971)
+- New `POST /api/bg-task-complete-ack` diagnostic endpoint accepts `task_id` (canonical) and `process_id` (transitional alias; alias responses include a `Deprecation` header). (#2971, #2979)
+
+### Changed
+
+- WebUI subscribes to `bg_task_complete`; the legacy `process_complete` listener is removed and the browser no longer re-POSTs `wakeup_prompt` (wakeup is server-driven). Dedupe uses a 60s TTL ring buffer keyed `(session_id, event_id)`. (#2971)
+- `POST /api/process-complete-ack` is replaced by `/api/bg-task-complete-ack`; the legacy path returns HTTP 410 with `X-Replaced-By: /api/bg-task-complete-ack`. Wired ahead of the CSRF gate so stale tabs see a discoverable hard error instead of a silent 403/404. (#2968)
+
+### Fixed
+
+- Cross-session `notify_on_complete` wakeup no longer misroutes between concurrent WebUI sessions. Per-turn session identity is bound to a `contextvars.ContextVar` (`gateway.session_context` + `tools.approval`) inside the turn worker thread so concurrent background spawns inherit task/thread-local identity instead of racing on a process-global env slot, with a completion-time owner cross-check as defense-in-depth. (#2968)
+- Fast (sub-teardown) background tasks completing while the WebUI session is technically still in its turn-teardown window now have their wakeup persisted in a deferred-wakeup map and drained at the turn's active→idle transition, so autonomous agent loops no longer lose the wakeup. (#2968)
+- A background-task wakeup is no longer lost when the server-side wakeup turn races a human turn during session teardown. The teardown idle-hook atomically claims the deferred wakeup and discards the pending marker before starting the turn; if that turn then `409`s on a concurrent `/api/chat/start`, the wakeup is re-queued (idempotent per `process_id`) so a later teardown or the next-turn drain redelivers it instead of dropping it. (#2971)
+- Server-initiated wakeup turn now renders live in an open tab by fanning a `server_turn_started` frame onto the per-session live-view channel; no more "needs manual refresh" after a server-driven wakeup. (#2968)
+- SSE handlers now arm a 20s socket write deadline once per connection so a slow/backgrounded tab whose recv window fills no longer pins its HTTP worker thread indefinitely, applied uniformly to the 6 long-lived SSE endpoints (chat-stream, terminal, gateway, approval, clarify, session). (#2968)
+- Focused background-task completion viewers still emit `/api/bg-task-complete-ack` for server cleanup/diagnostics while keeping the focused-session toast suppressed. (#2979)
+- A failed session load (network error / server 4xx/5xx) no longer permanently silences the per-session SSE stream. `loadSession` stops the stream on entry but previously only restarted it on the success path; a mid-load failure left the on-screen session's stream closed, silently dropping `bg_task_complete` events until the user navigated again. The metadata-fetch error path now restarts the stream for the session still on screen, skipping the restart when a newer load is in flight or when the current session 404'd and self-healed away. (#2979)
+
+## [v0.51.338] — 2026-06-09 — Release LB (saved prompts library)
+
+### Added
+- **A saved prompts library in the composer.** A bookmark button in the composer toolbar opens a popup of your saved prompts; click one to drop it into the composer, or save the current input as a new prompt, and delete prompts you no longer want. Prompts persist per Hermes home (`webui/saved_prompts.json`) with server-side caps (8000 chars/prompt, 200 prompts). The affordance is desktop-only — it's hidden on mobile to keep the narrow composer uncluttered. (#3571, @rodboev)
+
+## [v0.51.337] — 2026-06-09 — Release LA (model-picker keyboard nav + mobile new-chat)
+
+### Added
+- **Keyboard navigation in the model picker.** With the model dropdown open, ↑/↓ move a highlight through the filtered models (wrapping at the ends) and Enter selects the highlighted one; Escape closes. The highlight reuses the existing hover styling and is invisible until you use the keyboard. (#2952, #2791, @Sanjays2402)
+- **A "New chat" button in the mobile titlebar.** On narrow screens the app titlebar now shows a `+` button to start a new conversation without opening the sidebar; it shares the existing reload-button styling and mirrors the new-chat in-flight/disabled state. (#3531, @franksong2702)
+
+## [v0.51.336] — 2026-06-08 — Release KZ (fix inline-thinking streaming perf regression)
+
+### Fixed
+- **Long streaming responses no longer slow down as they grow.** A follow-up to v0.51.335: the inline-thinking extractor runs on the full in-progress message on every streamed token, and the v0.51.335 rewrite made that scan re-walk the whole buffer each time (quadratic over a long response — most noticeable on reasoning-model replies with a `<think>` block). It now fast-paths content with no thinking tags and skips already-settled trailing text, keeping per-token work flat. No behavior change — verified identical to the prior release across streaming, reload, persistence, and code-block cases. (#3633 follow-up)
+
+## [v0.51.335] — 2026-06-08 — Release KY (normalize inline thinking extraction)
+
+### Fixed
+- **Inline reasoning traces are extracted consistently across live, reload, and persisted turns.** Inline-thinking providers (MiniMax-M3, Gemma, OpenAI-compat, Ollama Cloud) that emit `<think>…</think>` (or `<|channel>`/`<|turn|>` variants) anywhere in the response now have those traces moved into the Thinking Card uniformly — live, on reload, and in the saved session file — instead of leaving them in the visible answer or bloating the persisted content. Literal thinking tags inside code (inline `` `<think>` ``, fenced blocks, or indented code) stay visible, leading whitespace is preserved when no thinking block is removed, and an unclosed tag only collapses into reasoning when it leads the message. (#3599, #3633, @rodboev)
+
+## [v0.51.334] — 2026-06-08 — Release KX (new-message cue when scrolled up)
+
+### Added
+- **A "New message" cue on the jump-to-bottom button when you've scrolled up.** If you scroll up to read while a turn is still arriving, a new message no longer silently lands off-screen nor yanks you to the bottom — the jump-to-bottom button shows a "New message" cue you can click to catch up. Pinned/at-bottom readers still auto-follow to the latest response as before. (#3545, #3631, @rodboev)
+
+## [v0.51.333] — 2026-06-08 — Release KW (collapse old interim progress notes)
+
+### Added
+- **Long live turns no longer bury the latest progress note under a wall of older ones.** Once more than 3 interim progress notes accumulate during a streaming turn, the older ones collapse behind a "Show N earlier updates" toggle that keeps the most recent notes in view; expanding is sticky (new interim events won't re-hide what you opened). (#3574, @rodboev)
+
+## [v0.51.332] — 2026-06-08 — Release KV (distinguish script cron jobs in Tasks)
+
+### Fixed
+- **Script cron jobs (`no_agent`) in the Tasks panel no longer show an empty Prompt card that looked like missing configuration.** Script jobs now display a 📜 script badge (next to the agent 🤖 badge), a "Script" banner, the script path + working directory, and "Script output" run-history labels distinct from agent jobs. (#3589, @pamnard)
+
+## [v0.51.331] — 2026-06-08 — Release KU (dismissible error toasts)
+
+### Fixed
+- **Error toasts can now be dismissed immediately.** Error toasts default to a 20-second timeout and can sit over workspace controls; they now render an explicit **Dismiss** button (alongside the existing Copy button), and non-error toasts dismiss on click. Both clear the auto-dismiss timer and hide the toast right away. (#3844, @claw-io, fixes #3842)
+
+## [v0.51.330] — 2026-06-08 — Release KT (api docstring backfill)
+
+### Changed
+- **Internal: backfilled docstrings for 51 previously-undocumented functions** in `api/oauth.py` and `api/kanban_bridge.py` (developer-facing documentation only; no behavior change). (#3716, @camr)
+
+## [v0.51.329] — 2026-06-08 — Release KS (session-list + startup latency)
+
+### Fixed
+- **`/api/sessions` no longer does redundant `_index.json` parses per legacy sidecar row.** The stale-metadata refresh reuses the already-parsed index (O(n) instead of O(n²) for installs with many pre-`message_count` sidecars). (#3814, @ai-ag2026)
+- **Startup no longer reads every session's full JSON when there is nothing to recover.** Recovery now only reads sidecars that have a `.json.bak` backup; the reported `scanned` count is unchanged. (#3815, @ai-ag2026)
+
+## [v0.51.328] — 2026-06-08 — Release KR (preserve full compaction summaries)
+
+### Added
+- **New RFC: WebUI pending-intent controls** (`docs/rfcs/webui-pending-intent-controls.md`) — proposed Queue/Steer/Stop-and-send/Interrupt semantics during an active run. Doc-only. (#3061, @franksong2702)
+
+### Fixed
+- **Compaction summaries are no longer truncated at 320 characters.** The full compaction summary text is preserved in the summary card (the prior clip's trailing `…` also broke a long-summary reference-card match). (#3800, @rodboev)
+
+## [v0.51.327] — 2026-06-08 — Release KQ (brick wave: session-cache freshness + compression-tail + interrupt race)
+
+### Fixed
+- **`/api/session` no longer serves a stale cached conversation** that lags disk — recent assistant replies could disappear from a session until the server restarted because the in-process LRU held an older `Session` object after another object persisted new turns. `get_session()` now reloads from disk when the sidecar/index is strictly ahead of the cache. (#3829, @dso2ng)
+- **The latest assistant message no longer vanishes after compression-lineage stitching.** A compression continuation child was applying its own truncation watermark to its already-persisted sidecar tail during WebUI display merge, dropping the tail. (#3828, @dso2ng, follow-up to #3770/#3776)
+- **Interrupt-and-send no longer races a still-unwinding worker.** After Stop/interrupt clears the active stream id, a successor send could reuse the cached agent while the cancelled worker was still landing; `/api/chat/start` now blocks (409) on a same-session active run during the bounded unwind window. (#3822, @franksong2702, #3808)
+
+## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
+
+### Fixed
+- **Mic input prefers configured server-side STT, with a safe fallback.** A page-load capability probe defaults to the Hermes STT provider when one is configured; installs without server STT keep browser dictation, and a failed transcribe reverts to browser SpeechRecognition. (#3618, @dso2ng)
+- **Deleting a conversation now also removes its turn/run journals** (previously the user's messages and full request/response payloads stayed on disk in plaintext after delete). (#3802)
+- **Imported/CLI/agent sessions no longer vanish from the sidebar on minimal `state.db` schemas.** The session-list query now degrades gracefully when the `messages` table is absent or missing columns instead of raising and hiding every row. (#3762)
+- **Help tab buttons stay readable on hover in every theme** (the hover fill no longer renders same-color text). (#3810)
+
+## [v0.51.325] — 2026-06-08 — Release KO (in-app Help tab)
+
+### Added
+- **A Help tab in Settings** with quick links to the documentation (get-hermes.ai) and the GitHub issues page, presented as icon-led resource cards. Translated across all 13 locales. (#3518, @rodboev)
+
+## [v0.51.324] — 2026-06-07 — Release KN (i18n — translate settings + gateway-status labels)
+
+### Added
+- **Settings labels/descriptions and gateway-status strings are now translated across all 13 locales.** Previously-untranslated settings fields (token speed, terminal auto-expand, pinned-conversations limit, and others) and gateway session-count strings now follow the selected UI language. English copy is unchanged (it's the fallback), so there's no visible change for English users. (#3801, @leszek3737)
+
+## [v0.51.323] — 2026-06-07 — Release KM (7-day provider spend chart)
+
+### Added
+- **The Active Provider Quota card now shows a 7-day spend bar chart with a projected monthly pace** (OpenRouter). Daily spend deltas render as a small bar chart with a "Monthly pace" estimate; a graceful "not enough data yet" message shows until two daily snapshots exist. (#3600, @rodboev)
+
+## [v0.51.322] — 2026-06-07 — Release KL (sortable + filterable markdown tables)
+
+### Added
+- **Markdown tables in chat are now sortable and filterable on desktop.** Click any column header to sort (numeric-aware), and tables with 4+ rows get a filter box. Column headers show a faint sort indicator that becomes a solid arrow on the active column. Progressive enhancement only — it doesn't change how tables look until you interact, skips CSV tables, and is suppressed below the 640px mobile breakpoint so phone tables render exactly as before (no added wrapping). (#3728, @rodboev)
+
+## [v0.51.321] — 2026-06-07 — Release KK (Phase 3 light — load renderable transcript tails)
+
+### Fixed
+- **Opening a tool-heavy conversation no longer cold-loads showing just one or two messages.** `GET /api/session?msg_limit=` caps *raw* messages, but the transcript the UI renders filters out tool rows, empty separator turns, and compression markers — so a long tool-heavy tail could load with only one or two visible messages above a large "Load earlier" button. The display window now expands backward until it contains roughly the requested number of *renderable* rows (keeping the raw offset cursor honest), so the initial view is populated as expected. (#3790, @ai-ag2026)
+
+## [v0.51.320] — 2026-06-07 — Release KJ (Phase 2 — Polish (pl) language support)
+
+### Added
+- **Polish (pl) language support.** Adds a complete Polish translation set to the in-app localization, a Polish login-page locale, and resolver coverage for `pl` / `pl-PL` / `pl_PL`, with the locale registered consistently across every key group (appearance skins, approval/clarify prompts, tooltips, cache-usage labels, profile skill counts) and parity tests asserting the new locale is complete and actually translated. (#3781, @leszek3737)
+
+## [v0.51.319] — 2026-06-07 — Release KI (Phase 3 light — refresh stale continuation metadata)
+
+### Fixed
+- **A compression continuation no longer looks like it lost recent messages when `_index.json` is stale.** Complementing the snapshot-side fix, the sidebar now also refreshes a continuation row's sidecar metadata when the row is part of a compression lineage and its sidecar file is newer than the indexed timestamp — so recent turns that landed in the sidecar after the last index write are reflected in the row's count/last-activity instead of showing a stale (lower) message count. The refresh stays scoped to lineage-shaped rows, so ordinary sidebar polls don't hydrate every historical transcript. (#3789, refs #3740, @ai-ag2026)
+
 ## [v0.51.318] — 2026-06-07 — Release KH (Phase 3 light — warm account-usage probe worker pool)
 
 ### Changed

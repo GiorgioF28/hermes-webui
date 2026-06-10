@@ -779,8 +779,8 @@ def test_all_sessions_sidecar_refresh_stays_metadata_only(monkeypatch):
     assert rows[0]["last_message_at"] == 102.0
 
 
-def test_all_sessions_does_not_refresh_lineage_rows_from_sidecars(monkeypatch):
-    """Lineage rows are enriched from state.db; do not read every sidecar per poll."""
+def test_all_sessions_does_not_refresh_fresh_lineage_rows_from_sidecars(monkeypatch):
+    """Fresh lineage rows are enriched from state.db; do not read every sidecar per poll."""
     _write_index_file(
         models.SESSION_INDEX_FILE,
         [
@@ -789,8 +789,8 @@ def test_all_sessions_does_not_refresh_lineage_rows_from_sidecars(monkeypatch):
                 "title": "Lineage Row",
                 "message_count": 7,
                 "created_at": 100.0,
-                "updated_at": 101.0,
-                "last_message_at": 101.0,
+                "updated_at": time.time() + 60.0,
+                "last_message_at": time.time() + 60.0,
                 "pinned": False,
                 "archived": False,
                 "parent_session_id": "parent_sid",
@@ -813,11 +813,115 @@ def test_all_sessions_does_not_refresh_lineage_rows_from_sidecars(monkeypatch):
     )
     monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
 
-    with patch.object(Session, "load_metadata_only", side_effect=AssertionError("lineage rows must not refresh sidecars")):
+    with patch.object(Session, "load_metadata_only", side_effect=AssertionError("fresh lineage rows must not refresh sidecars")):
         rows = models.all_sessions()
 
     assert rows[0]["session_id"] == "lineage_sid"
     assert rows[0]["message_count"] == 7
+
+
+def test_all_sessions_refreshes_stale_visible_continuation_metadata(monkeypatch):
+    """A visible continuation whose sidecar advanced after _index.json must refresh metadata.
+
+    Compression lineage rows can remain the active sidebar representative while
+    their sidecar gains the latest assistant turn. If the index row stays stale,
+    the sidebar/topbar reports an old message count and the UI can look like the
+    newest messages disappeared.
+    """
+    session = Session(
+        session_id="stale_visible_child",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first", "timestamp": 100.0},
+            {"role": "assistant", "content": "second", "timestamp": 101.0},
+            {"role": "user", "content": "latest", "timestamp": 102.0},
+            {"role": "assistant", "content": "latest answer", "timestamp": 103.0},
+        ],
+        parent_session_id="snapshot_parent",
+        updated_at=103.0,
+        last_message_at=103.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "stale_visible_child",
+                "title": "Long Conversation",
+                "message_count": 2,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+                "parent_session_id": "snapshot_parent",
+                "_lineage_root_id": "snapshot_parent",
+                "_compression_segment_count": 2,
+            }
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert rows[0]["session_id"] == "stale_visible_child"
+    assert rows[0]["message_count"] == 4
+    assert rows[0]["last_message_at"] == 103.0
+
+
+def test_all_sessions_does_not_refresh_plain_branch_fork_from_sidecar(monkeypatch):
+    """A plain /branch fork (session_source='fork') must NOT trigger a sidecar refresh.
+
+    Forks carry parent_session_id (#1342) but have no compression sidecar drift
+    to correct. Including them in the continuation refresh gate would call
+    load_metadata_only() on every fork row on every /api/sessions poll (the
+    molasses #3770 guards against). The gate must exclude session_source='fork'
+    so a fork's stale-looking index row is left alone.
+    """
+    session = Session(
+        session_id="plain_fork_child",
+        title="Forked Conversation",
+        messages=[
+            {"role": "user", "content": "a", "timestamp": 100.0},
+            {"role": "assistant", "content": "b", "timestamp": 101.0},
+            {"role": "user", "content": "c", "timestamp": 102.0},
+            {"role": "assistant", "content": "d", "timestamp": 103.0},
+        ],
+        parent_session_id="some_parent",
+        session_source="fork",
+        updated_at=103.0,
+        last_message_at=103.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "plain_fork_child",
+                "title": "Forked Conversation",
+                "message_count": 2,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+                "parent_session_id": "some_parent",
+                "session_source": "fork",
+            }
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    # A fork that has not been hydrated must not be promoted from the (stale)
+    # indexed count — the row stays as the index reports it (no sidecar refresh).
+    def _fail_load(_sid):
+        raise AssertionError("plain fork must not trigger load_metadata_only refresh")
+
+    monkeypatch.setattr(models.Session, "load_metadata_only", staticmethod(_fail_load))
+
+    rows = models.all_sessions()
+    fork_row = next(r for r in rows if r["session_id"] == "plain_fork_child")
+    assert fork_row["message_count"] == 2  # left at the indexed value, not refreshed
 
 
 def test_load_metadata_only_skips_index_read_when_sidecar_has_message_count(monkeypatch):
@@ -838,6 +942,67 @@ def test_load_metadata_only_skips_index_read_when_sidecar_has_message_count(monk
 
     assert meta is not None
     assert meta.compact()["message_count"] == 1
+
+
+
+
+def test_all_sessions_reuses_loaded_index_counts_for_legacy_sidecar_refresh(monkeypatch):
+    """Refreshing multiple legacy lineage rows must not parse _index.json per row."""
+    index_file = models.SESSION_INDEX_FILE
+    rows = []
+    for sid, count in (("legacy_lineage_a", 3), ("legacy_lineage_b", 4)):
+        payload = {
+            "session_id": sid,
+            "title": sid,
+            "workspace": "/tmp",
+            "model": "test",
+            "created_at": 100.0,
+            "updated_at": 200.0,
+            "pinned": False,
+            "archived": False,
+            "parent_session_id": "lineage_parent",
+            "messages": [{"role": "user", "content": "legacy"}],
+            "tool_calls": [],
+        }
+        # Deliberately bypass Session.save(): pre-fix legacy sidecars do not have
+        # a persisted message_count field in their metadata prefix.
+        (models.SESSION_DIR / f"{sid}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        rows.append({
+            "session_id": sid,
+            "title": sid,
+            "workspace": "/tmp",
+            "model": "test",
+            "created_at": 100.0,
+            "updated_at": 100.0,
+            "last_message_at": 100.0,
+            "message_count": count,
+            "pinned": False,
+            "archived": False,
+            "parent_session_id": "lineage_parent",
+        })
+    _write_index_file(index_file, rows)
+
+    original_read_text = Path.read_text
+    index_reads = 0
+
+    def _counting_read_text(self, *args, **kwargs):
+        nonlocal index_reads
+        if self == index_file:
+            index_reads += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _counting_read_text)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    result = models.all_sessions()
+
+    counts = {row["session_id"]: row["message_count"] for row in result}
+    assert counts["legacy_lineage_a"] == 3
+    assert counts["legacy_lineage_b"] == 4
+    assert index_reads == 1
 
 
 def test_session_save_does_not_persist_metadata_message_count_hint():
