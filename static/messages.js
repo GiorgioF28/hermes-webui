@@ -1589,6 +1589,72 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _closeSource(source){
     closeLiveStream(activeSid, streamId, source);
   }
+  function _clearStreamEndRecovery(){
+    if(_streamEndRecoveryTimer){
+      clearTimeout(_streamEndRecoveryTimer);
+      _streamEndRecoveryTimer=null;
+    }
+    _pendingStreamEndRecovery=false;
+    _streamEndRecoveryAttempts=0;
+  }
+  function _liveStreamEndScenePresent(){
+    if(assistantText||assistantRow) return true;
+    if(String(liveReasoningText||reasoningText||'').trim()) return true;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+    if(!_isActiveSession()||typeof document==='undefined') return false;
+    const turn=$('liveAssistantTurn');
+    return !!(turn&&turn.querySelector(
+      '[data-live-assistant="1"],'+
+      '.live-worklog[data-live-worklog-shell="1"],'+
+      '.tool-card-row[data-live-tid],'+
+      '.agent-activity-thinking[data-thinking-active="1"]'
+    ));
+  }
+  function _scheduleStreamEndRecovery(source, delay=180){
+    if(_streamEndRecoveryTimer) clearTimeout(_streamEndRecoveryTimer);
+    _pendingStreamEndRecovery=true;
+    _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
+  }
+  function _finalizeStreamEndFallback(source){
+    _clearStreamEndRecovery();
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+    _terminalStateReached=true;
+    _streamFinalized=true;
+    _cancelAnimationFramePendingStreamRender();
+    _streamFadeCleanupReduceMotionListener();
+    _smdEndParser();
+    if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+    _clearOwnerInflightState();
+    _clearApprovalForOwner();
+    _clearClarifyForOwner('terminal');
+    if(_isActiveSession()){
+      S.activeStreamId=null;
+      clearLiveToolCards();if(!assistantText)removeThinking();
+      renderMessages({preserveScroll:true});
+    }
+    renderSessionList();
+    _setActivePaneIdleIfOwner();
+    _closeSource(source);
+  }
+  async function _runStreamEndRecovery(source){
+    if(_streamFinalized || _terminalStateReached || !_pendingStreamEndRecovery){
+      _clearStreamEndRecovery();
+      return;
+    }
+    _streamEndRecoveryTimer=null;
+    const status=await _restoreSettledSession(source,{status:true});
+    if(status==='restored'){
+      _clearStreamEndRecovery();
+      return;
+    }
+    if(status==='active'&&_streamEndRecoveryAttempts<10){
+      _streamEndRecoveryAttempts+=1;
+      _scheduleStreamEndRecovery(source,200);
+      return;
+    }
+    _finalizeStreamEndFallback(source);
+  }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
     (Array.isArray(snippets)?snippets:[]).forEach(snippet=>{
@@ -1739,6 +1805,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
   let _deferredStreamRecoveryBound=false;
+  let _pendingStreamEndRecovery=false;
+  let _streamEndRecoveryTimer=null;
+  let _streamEndRecoveryAttempts=0;
 
   function _pageHiddenForStreamError(){
     return (typeof document!=='undefined'&&document.visibilityState==='hidden')||
@@ -2911,14 +2980,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed');
+      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
     });
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
+      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
     });
 
     source.addEventListener('state_saved',e=>{
@@ -3042,6 +3111,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
+      _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -3251,7 +3321,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         renderSessionList();
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -3266,27 +3336,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
-      _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
+      if(S.activeStreamId===streamId && _liveStreamEndScenePresent()){
+        _scheduleStreamEndRecovery(source);
+        return;
+      }
       // Some replay/journal paths can deliver stream_end without a preceding
       // done event. In that case closing the EventSource is not enough: the
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      if(await _restoreSettledSession(source)){
+      const status=await _restoreSettledSession(source,{status:true});
+      if(status==='restored'){
         return;
       }
-      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
-      _streamFinalized=true;
-      _cancelAnimationFramePendingStreamRender();
-      _streamFadeCleanupReduceMotionListener();
-      _smdEndParser();
-      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      _closeSource(source);
+      if(status==='active'&&S.activeStreamId===streamId){
+        _scheduleStreamEndRecovery(source,200);
+        return;
+      }
+      _finalizeStreamEndFallback(source);
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
@@ -3398,6 +3471,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -3494,6 +3568,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      // #3885: if a stream_end recovery is in flight, don't start a competing
+      // reconnect — recovery polls server state and owns the terminal decision
+      // (else its exhaustion could mute a freshly reconnected stream). Opus stage-LK.
+      if(_pendingStreamEndRecovery){
+        _closeSource(source);
+        return;
+      }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       source.close();
       if(_deferStreamErrorIfOffline()) return;
@@ -3541,6 +3622,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -3631,19 +3713,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
   }
 
-  async function _restoreSettledSession(source){
+  async function _restoreSettledSession(source, options=null){
+    const returnStatus=!!(options&&options.status);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
-      return false;
+      return returnStatus?'stale':false;
     }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
-      if(_streamFinalized) return true;
+      if(_streamFinalized) return returnStatus?'restored':true;
       const session=data&&data.session;
-      if(!session) return false;
-      if(session.active_stream_id||session.pending_user_message) return false;
+      if(!session) return returnStatus?'missing':false;
+      if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
@@ -3701,9 +3784,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
       _setActivePaneIdleIfOwner();
-      return true;
+      return returnStatus?'restored':true;
     }catch(_){
-      return false;
+      return returnStatus?'error':false;
     }
   }
 
@@ -3712,6 +3795,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _closeSource(source);
       return;
     }
+    _clearStreamEndRecovery();
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -4946,16 +5030,59 @@ function playAttentionSound(key){
   }catch(e){console.warn('Attention sound failed:',e);}
 }
 
-function sendBrowserNotification(title,body){
-  if(!window._notificationsEnabled||!document.hidden) return;
-  if(!('Notification' in window)) return;
+function _notificationOptions(body,options={}){
+  const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
+  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:false,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+}
+function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
+  const opts=_notificationOptions(body,options);
+  const direct=()=>new Notification(title||botName,opts);
+  // Prefer the service worker (the only path that works in a standalone PWA,
+  // notably iOS). Use getRegistration() + a short timeout race rather than
+  // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
+  // registration ever activates for the scope (e.g. a reverse proxy serving
+  // sw.js with the wrong MIME type, or SW disabled in the browser) — which
+  // would silently drop every notification instead of falling back.
+  if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration){
+    const reg$=Promise.race([
+      navigator.serviceWorker.getRegistration().catch(()=>null),
+      new Promise(res=>setTimeout(()=>res(null),2000))
+    ]);
+    return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
+      ? reg.showNotification(title||botName,opts)
+      : direct());
+  }
+  return Promise.resolve(direct());
+}
+function requestNotificationPermission(){
+  if(!('Notification' in window)){
+    if(typeof showToast==='function') showToast(t('notifications_unsupported'),3000,'error');
+    return Promise.resolve('unsupported');
+  }
+  if(Notification.permission==='granted') return Promise.resolve('granted');
+  if(Notification.permission==='denied'){
+    if(typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    return Promise.resolve('denied');
+  }
+  return Notification.requestPermission().then(p=>{
+    if(typeof showToast==='function') showToast(p==='granted'?t('notifications_enabled_toast'):t('notifications_denied'),3000,p==='granted'?undefined:'error');
+    if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
+    return p;
+  });
+}
+function sendBrowserNotification(title,body,options={}){
+  const force=!!(options&&options.force);
+  if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
+  if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
-    new Notification(title||botName,{body:body});
-  }else if(Notification.permission!=='denied'){
-    Notification.requestPermission().then(p=>{
-      if(p==='granted') new Notification(title||botName,{body:body});
-    });
+    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+  }else if(Notification.permission==='denied'){
+    // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
+    if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+  }else{
+    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
   }
 }
 

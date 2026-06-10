@@ -5,6 +5,57 @@
 
 ### Added
 - Added a local `Work` view for 60-minute Deep Focus sessions. It prioritizes urgent P0 work, rotates projects using recent focus time, shows floating project bubbles and project tasks, persists session history in `tasks/work-sessions.json`, and can create or reopen a project-specific chat.
+
+## [v0.51.347] — 2026-06-09 — Release LK (streaming & render reliability cluster)
+
+### Fixed
+
+- **Mid-stream content no longer flickers (disappears and reappears) during a live turn.** When `renderMessages()` rebuilt the transcript while a session was actively streaming (e.g. a clarify-response echo or a CLI-import refresh), the `inner.innerHTML=''` wipe detached the live assistant turn node that the streaming markdown parser keeps writing into, so the streamed text vanished until the next stream event. The live turn's DOM node is now preserved across the rebuild and re-attached so the parser target stays connected and the text never blanks. (#3877)
+- **Recovered turns with empty visible content no longer render a blank transcript.** A run-journal-recovered assistant anchor (empty content + a `reasoning` payload + recovery marker) extracted no inline thinking text and rendered nothing, so a session made of such rows painted as only date separators. Two fixes: the backend now reuses one empty recovered anchor per stream instead of appending a fresh empty row on every lazy recovery retry (which previously bloated sessions with thousands of content-less rows), and the renderer surfaces the message's reasoning payload as a Thinking card for empty-content turns so the turn is never blank. (#3875)
+- **`stream_end` no longer finalizes a turn prematurely when the server is still active.** When a `stream_end` event arrived while the session was still streaming server-side, the client could settle to a partial state. It now polls the persisted session and retries settlement (bounded) until the server reports the stream complete, and the SSE error path defers to an in-flight recovery instead of starting a competing reconnect. (#3885)
+- **Markdown list markers and indentation are preserved around LaTeX blocks.** Continuation lines, nested indentation, and KaTeX-placeholder lines inside list items no longer break the list into fragments or lose their markers. (#3830)
+
+### Changed
+
+- **Worklog details settings now align with the live-to-final model.** The old "Activity expanded by default" setting is renamed to **Worklog details** (default folded), the legacy "Compact tool activity" preference is deprecated, and the Worklog renderer stays enabled for older installs that had saved `simplified_tool_calling=false`. (#3400, #3820)
+
+## [v0.51.346] — 2026-06-09 — Release LJ (PWA notification controls)
+
+### Added
+
+- **PWA notifications now use the service worker for reliable delivery, with explicit controls in Settings.** Browser notifications prefer `ServiceWorkerRegistration.showNotification()` (falling back to a direct `Notification` when no service worker is registered), which is the only notification path that works in an installed standalone PWA — notably iOS, where `new Notification()` is unavailable. Notification payloads now carry the originating session's deep link, icon, badge, and a stable per-session tag, and clicking a notification focuses an already-open tab for that session (or opens a new window) instead of yanking an unrelated tab away from what you were reading. Settings → Preferences gains **Enable notifications**, **Send test**, and a live permission-status readout. (#3196, #3229)
+
+## [v0.51.345] — 2026-06-09 — Release LI (model override picker for scheduled jobs)
+
+### Added
+
+- **Scheduled jobs can now set a per-job model override from the WebUI.** The Tasks → scheduled-jobs create/edit form has a new **Model Override** dropdown, populated from the configured `/api/models` catalog and grouped by provider (with provider context preserved so duplicate model IDs across providers stay distinguishable). The default option keeps the existing profile/system-default behavior; selections persist across edit and duplicate, can be cleared back to default, and the picker is disabled in no-agent mode. This surfaces the per-job model/provider override that hermes-agent's scheduler already supported, bringing the WebUI Tasks panel to parity with the CLI. (#3809)
+
+## [v0.51.344] — 2026-06-09 — Release LH (sidebar fork-lineage grouping)
+
+### Fixed
+
+- **Manual forks are no longer mis-grouped under compression-continuation lineage in the sidebar.** The sidebar's snapshot-grouping path walked through manual forks as if they were compression continuations, so a forked session could be collapsed under the wrong lineage root. Explicit manual forks (the marker `/api/session/branch` stamps) are now treated as lineage boundaries, while enriched child-session rows that attach under hidden compression segments stay independently visible until the later attachment pass. The background full-index rebuild thread now also pins its target `(SESSION_DIR, SESSION_INDEX_FILE)` and re-checks it under `_SESSION_INDEX_REBUILD_LOCK` before writing, so a concurrent active-session-dir switch can't make a rebuild write the wrong directory's index. (#3799, #3884)
+
+## [v0.51.343] — 2026-06-09 — Release LG (Phase-1 batch: sidebar stale-row refresh, workspace refresh cache, ja locale)
+
+### Fixed
+
+- **Sidebar no longer hides a messageful session that carries a stale `message_count: 0` index row.** When a stream was interrupted before the final index write, a titled session could keep a stale zero count and get filtered out of the sidebar even though `state.db` still had its messages. The read-side refresh now also fires for a row whose indexed `message_count` is 0 while `user_message_count > 0` (and whose sidecar mtime is newer than the index), self-healing the count from the sidecar — generalizing the earlier compression-lineage-only refresh to the ordinary interrupted-stream case without reintroducing the per-poll hydration cost (the `user_message_count` gate keeps empty Untitled drafts cheap). (#3740, #3883)
+- **Workspace file tree now shows files created in expanded subdirectories after a manual refresh.** The refresh button only reloaded the current directory level and left cached expanded child directories untouched, so background writes (cron jobs, CLI agents, external tools) into those descendants stayed invisible until a full reload. A manual refresh now clears the directory cache and re-fetches expanded descendants without losing tree state. (#3833, #3878)
+
+### Changed
+
+- **Japanese locale:** translated the 11 remaining English strings in the `ja` locale (Settings → Help panel labels/links, the cron-sessions setting, and the compression-queue composer placeholder). (#3880)
+
+## [v0.51.342] — 2026-06-09 — Release LF (transcript + sidebar reliability: blank-transcript, missing-index stall, stale watermark)
+
+### Fixed
+
+- **Chat transcript no longer renders as just a stack of date separators with no messages (#3875).** The live-to-final / Worklog redesign (#3401) folds intermediate assistant segments into a collapsed Worklog card and hides the source segment. When a turn's *only* content was folded into a collapsed Worklog (e.g. an autonomous or interrupted run whose final assistant message is empty, or a reload where the session's tool-call metadata did not hydrate), every segment was hidden and the turn painted as nothing — leaving the transcript a bare column of `SUNDAY` / `SATURDAY` / date dividers. `renderMessages()` now enforces a fail-safe invariant: a settled assistant turn never renders with zero visible content. When a turn has no visible segment, its folded Worklog group is expanded (or, as a last resort, its hidden segments are un-hidden) so the content is never silently swallowed. Turns that already show a visible answer are untouched, so the intended collapsed-Worklog UX is preserved. (#3875)
+- **Sidebar no longer stalls for seconds on a state.db that is missing the agent's message index.** The CLI-session scan orders candidate sessions by a correlated `MAX(timestamp)` subquery over `messages`, which collapses to a full per-session table scan when `idx_messages_session ON messages(session_id, timestamp)` is absent — stalling `/api/sessions` for several seconds on every refresh (the 5s cache TTL never settles, so repeated "Slow WebUI request still running" warnings appear). A normally-migrated hermes-agent state.db has this index, but a db that lost its migrations (older hermes-agent, or a hand-rebuilt/reimported db) does not. WebUI now primes the index with `CREATE INDEX IF NOT EXISTS` before the scan — a no-op when it already exists, and a ~20ms self-heal otherwise (measured 13.3s → 0.009s on a no-index 8k-session db). Best-effort: degrades silently on a read-only db, a locked db, or a minimal schema without a `timestamp` column. (#3887)
+- **A stale truncation watermark no longer hides messages sent after a retry/undo/edit.** `retry`, `undo`, and the Edit-truncate handler set a `truncation_watermark` to suppress the *replaced* tail from the append-only state.db merge, but nothing cleared it when the user then sent a genuinely new turn — so it froze at the old edit boundary. A frozen watermark then dropped the post-edit turns whenever the sidecar was later reconstructed empty (recovery/reconcile), permanently losing them from the WebUI transcript even though state.db still had the full data. WebUI now retires the watermark once the new turn is durably committed to `session.messages` — at the agent-result merge, the eager user-message checkpoint, or the cold-load recovery commit (the edit boundary is historical once a real turn lands). Cleared to `None`, distinct from the `0.0` truncate-to-empty sentinel, so the #2914 "don't replay a deleted transcript" behavior is unchanged. (#3831)
+
 ## [v0.51.341] — 2026-06-09 — Release LE (stale thinking-dot placeholder fix)
 
 ### Fixed
