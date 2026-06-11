@@ -84,6 +84,9 @@
 '.cb-dot{width:9px;height:9px;border-radius:50%;background:var(--cb-accent);box-shadow:0 0 10px var(--cb-accent);flex:0 0 auto;}',
 '.cb-chat-name{font-family:var(--cb-disp);font-weight:700;letter-spacing:.14em;font-size:13px;text-transform:uppercase;}',
 '.cb-chat-role{font-family:var(--cb-mono);font-size:10px;color:var(--cb-muted);letter-spacing:.08em;margin-top:1px;}',
+'.cb-voicetoggle{background:transparent;border:1px solid var(--cb-line);color:var(--cb-faint);border-radius:8px;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;transition:.15s;}',
+'.cb-voicetoggle:hover{color:var(--cb-text);}',
+'.cb-voicetoggle.cb-on{color:var(--cb-accent);border-color:var(--cb-accent-dim);}',
 '.cb-chat-log{flex:1;min-height:0;overflow-y:auto;padding:18px 20px;display:flex;flex-direction:column;gap:14px;}',
 '.cb-msg{max-width:92%;font-size:13.5px;line-height:1.5;}',
 '.cb-msg .cb-who{font-family:var(--cb-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--cb-faint);margin-bottom:4px;}',
@@ -99,6 +102,10 @@
 '.cb-chat-input input:focus{border-color:var(--cb-accent);box-shadow:0 0 0 3px rgba(255,106,0,.12);}',
 '.cb-send{background:var(--cb-accent);border:none;color:#1a0c00;font-weight:700;border-radius:10px;width:42px;cursor:pointer;',
 '  font-family:var(--cb-disp);display:flex;align-items:center;justify-content:center;transition:filter .15s;}',
+'.cb-mic{background:rgba(255,255,255,.05);border:1px solid var(--cb-line);color:var(--cb-muted);border-radius:10px;width:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;}',
+'.cb-mic:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
+'.cb-mic.cb-on{color:#1a0c00;background:var(--cb-accent);border-color:var(--cb-accent);animation:cb-micpulse 1.1s ease-in-out infinite;}',
+'@keyframes cb-micpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,106,0,.5);}50%{box-shadow:0 0 0 6px rgba(255,106,0,0);}}',
 '.cb-send:hover{filter:brightness(1.12);}',
 /* center stage */
 '.cb-stage{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;overflow:hidden;}',
@@ -176,12 +183,17 @@
       '<div class="cb-stars" aria-hidden="true"></div>' +
       '<div class="cb-hero" id="cbHero">' +
         '<aside class="cb-chat" id="cbChat">' +
-          '<div class="cb-chat-head"><span class="cb-dot"></span><div>' +
+          '<div class="cb-chat-head"><span class="cb-dot"></span><div style="flex:1;min-width:0">' +
             '<div class="cb-chat-name">Hermes Prime</div>' +
-            '<div class="cb-chat-role">chief of staff · briefing mode</div>' +
-          '</div></div>' +
+            '<div class="cb-chat-role">chief of staff · voce attiva</div>' +
+          '</div>' +
+            '<button type="button" class="cb-voicetoggle cb-on" id="cbVoice" aria-label="Voce on/off" title="Voce on/off">' +
+              '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg></button>' +
+          '</div>' +
           '<div class="cb-chat-log" id="cbLog"></div>' +
           '<form class="cb-chat-input" id="cbForm" autocomplete="off">' +
+            '<button type="button" class="cb-mic" id="cbMic" aria-label="Parla a voce" title="Parla a voce">' +
+              '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg></button>' +
             '<input id="cbInput" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime">' +
             '<button class="cb-send" type="submit" aria-label="Invia">&#8594;</button>' +
           '</form>' +
@@ -209,27 +221,104 @@
     if (toggle && hero) toggle.addEventListener('click', function () { hero.classList.toggle('cb-collapsed'); });
     var form = $('cbForm');
     if (form) form.addEventListener('submit', onPrimeSubmit);
-    primeSay('prime', 'Plancia online. Ti dò il quadro quando vuoi — chiedimi "cosa serve oggi?" e ti briffo. Voce e deleghe arrivano a breve.');
+    var mic = $('cbMic');
+    if (mic) mic.addEventListener('click', toggleListen);
+    var vb = $('cbVoice');
+    if (vb) vb.addEventListener('click', function () { userEngaged = true; toggleVoice(); });
+    primeSay('prime', 'Plancia online. Ti dò il quadro quando vuoi — chiedimi "cosa serve oggi?" e ti briffo. Premi il microfono per parlarmi a voce.');
     BUILT = true;
     return true;
   }
 
-  /* ── Hermes Prime (Phase 3 preview — full agent wiring lands in Phase 6) ── */
+  /* ── Hermes Prime + Voice (Phase 5). Real Claude/Codex delegation: Phase 6. ── */
+  var voiceOn = true, userEngaged = false, _ctx = null, _an = null, _raf = null, _cur = null, _rec = null;
+
+  function setOrb(state, amp) {
+    if (!window.cbPlanet) return;
+    if (state != null) window.cbPlanet.setState(state);
+    if (amp != null) window.cbPlanet.setAmplitude(amp);
+  }
+  function _ensureCtx() {
+    if (!_ctx) {
+      var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null;
+      _ctx = new AC(); _an = _ctx.createAnalyser(); _an.fftSize = 512; _an.connect(_ctx.destination);
+    }
+    return _ctx;
+  }
+  function speak(text) {
+    text = String(text || '').trim(); if (!text || !voiceOn) return;
+    try { if (_cur) { _cur.pause(); _cur = null; } } catch (e) {}
+    setOrb('thinking', 0);
+    var cfg = window.__HERMES_CONFIG__ || {};
+    fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: JSON.stringify({ text: text.slice(0, 4800), voice: 'it-IT-ElsaNeural' })
+    }).then(function (r) { if (!r.ok) throw new Error('tts ' + r.status); return r.blob(); })
+      .then(function (blob) {
+        var ctx = _ensureCtx(); var url = URL.createObjectURL(blob);
+        var audio = new Audio(url); _cur = audio;
+        if (ctx) {
+          try { ctx.resume(); } catch (e) {}
+          var src = ctx.createMediaElementSource(audio); src.connect(_an);
+          var buf = new Uint8Array(_an.frequencyBinCount);
+          (function pump() {
+            if (_cur !== audio) return;
+            _an.getByteTimeDomainData(buf);
+            var s = 0; for (var i = 0; i < buf.length; i++) { var v = (buf[i] - 128) / 128; s += v * v; }
+            setOrb('speaking', Math.min(1, Math.sqrt(s / buf.length) * 2.3));
+            _raf = requestAnimationFrame(pump);
+          })();
+        }
+        setOrb('speaking', 0);
+        audio.onended = function () { cancelAnimationFrame(_raf); setOrb('idle', 0); URL.revokeObjectURL(url); if (_cur === audio) _cur = null; };
+        return audio.play();
+      }).catch(function () { setOrb('idle', 0); }); // TTS unavailable (edge-tts not installed) -> silent
+  }
+  function toggleListen() {
+    userEngaged = true;
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var mic = $('cbMic');
+    if (!SR) { if (mic) mic.title = 'Riconoscimento vocale non supportato dal browser'; return; }
+    if (_rec) { try { _rec.stop(); } catch (e) {} _rec = null; return; }
+    var rec = new SR(); _rec = rec; rec.lang = 'it-IT'; rec.interimResults = false; rec.maxAlternatives = 1;
+    if (mic) mic.classList.add('cb-on');
+    setOrb('listening', 0.25);
+    rec.onresult = function (e) {
+      var t = e.results[0][0].transcript; var inp = $('cbInput');
+      if (inp) inp.value = t;
+      var form = $('cbForm');
+      if (form && form.requestSubmit) form.requestSubmit(); else onPrimeSubmit({ preventDefault: function () {} });
+    };
+    var done = function () { if (mic) mic.classList.remove('cb-on'); if (_rec === rec) { setOrb('idle', 0); _rec = null; } };
+    rec.onend = done; rec.onerror = done;
+    try { rec.start(); } catch (e) { done(); }
+  }
+  function toggleVoice() {
+    voiceOn = !voiceOn;
+    var b = $('cbVoice'); if (b) b.classList.toggle('cb-on', voiceOn);
+    var role = document.querySelector('.cb-chat-role'); if (role) role.textContent = 'chief of staff · ' + (voiceOn ? 'voce attiva' : 'voce muta');
+    if (!voiceOn) { try { if (_cur) { _cur.pause(); _cur = null; } } catch (e) {} cancelAnimationFrame(_raf); setOrb('idle', 0); }
+  }
+
   function primeSay(who, text) {
     var log = $('cbLog'); if (!log) return;
     var m = el('div', 'cb-msg ' + (who === 'user' ? 'cb-from-user' : 'cb-from-prime'));
     m.innerHTML = '<div class="cb-who">' + (who === 'user' ? 'tu' : 'hermes prime') + '</div><div class="cb-bubble">' + esc(text) + '</div>';
     log.appendChild(m); log.scrollTop = log.scrollHeight;
+    if (who === 'prime' && userEngaged) speak(text);
   }
   function onPrimeSubmit(e) {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
+    userEngaged = true;
     var inp = $('cbInput'); if (!inp) return;
     var v = inp.value.trim(); if (!v) return;
     inp.value = '';
     primeSay('user', v);
+    setOrb('thinking', 0);
     setTimeout(function () {
-      primeSay('prime', 'Ricevuto. La voce e le deleghe vere (Claude/Codex) arrivano nella prossima fase — per ora questo è il preview della plancia.');
-    }, 360);
+      primeSay('prime', 'Ricevuto. Nella prossima fase collego davvero Claude e Codex e inizio a delegare ai sotto-agenti. Per ora ti parlo e il core del pianeta pulsa con la mia voce.');
+    }, 450);
   }
 
   /* ── data render ───────────────────────────────────────────────────────── */

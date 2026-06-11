@@ -190,13 +190,31 @@ window.cbInitPlanet = function (container, graph) {
   }
   try { new ResizeObserver(resize).observe(container); } catch (e) { window.addEventListener('resize', resize); }
 
+  // ── orb control (Voice Orb, Phase 5): the core IS the orb ──────────────
+  const orb = { amp: 0, mode: 'idle' };
+  const CW = new THREE.Color(0xffffff), CCOOL = new THREE.Color(0x7fd0ff);
+  window.cbPlanet = {
+    setAmplitude: function (a) { orb.amp = Math.max(0, Math.min(1, a || 0)); },
+    setState: function (s) { orb.mode = s || 'idle'; }
+  };
+
   let running = true;
   const clock = new THREE.Clock();
   function animate() {
     if (!running) return;
     requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
-    core.scale.setScalar(R * (1.06 + Math.sin(t * 1.2) * 0.04));
+    const a = orb.amp;
+    let scale = 1.06 + Math.sin(t * 1.2) * 0.04, bright = 1, cool = false;
+    if (orb.mode === 'speaking') { scale = 1.05 + a * 0.7; bright = 1 + a * 0.85; }
+    else if (orb.mode === 'listening') { scale = 1.04 + a * 0.35 + Math.sin(t * 4) * 0.02; bright = 1.05; cool = true; }
+    else if (orb.mode === 'thinking') { scale = 1.02 + Math.sin(t * 2.2) * 0.02; bright = 0.62; }
+    core.scale.setScalar(R * scale);
+    core.material.opacity = Math.min(1, 0.8 * bright + a * 0.3);
+    coreDot.scale.setScalar(1 + a * 1.3);
+    const target = cool ? CCOOL : CW;
+    coreDot.material.color.lerp(target, 0.08);
+    core.material.color.lerp(target, 0.05);
     controls.update();
     renderer.render(scene, camera);
   }

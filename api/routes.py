@@ -9874,7 +9874,8 @@ def _handle_tts(handler, parsed):
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural"
+        "en-US-AriaNeural", "en-US-GuyNeural",
+        "it-IT-DiegoNeural", "it-IT-IsabellaNeural", "it-IT-ElsaNeural", "it-IT-GiuseppeNeural",
     }
     if voice not in allowed:
         from api.helpers import bad as _bad
