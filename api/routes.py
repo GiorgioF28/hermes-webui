@@ -7925,6 +7925,9 @@ def handle_post(handler, parsed) -> bool:
         return _handle_approval_respond(handler, body)
 
     # ── Clarify (POST) ──
+    if parsed.path == "/api/bridge/prime":
+        return _handle_bridge_prime(handler, body)
+
     if parsed.path == "/api/clarify/respond":
         return _handle_clarify_respond(handler, body)
 
@@ -10714,6 +10717,65 @@ def _handle_projects_overview(handler, parsed):
         logger.exception("projects overview build failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
     return j(handler, data) or True
+
+
+def _hermes_prime_system_prompt(workspace):
+    """Chief-of-staff persona (prompts/hermes-prime.md) + read-only vault context."""
+    persona = ""
+    try:
+        pf = Path(__file__).resolve().parent.parent / "prompts" / "hermes-prime.md"
+        if pf.is_file():
+            persona = pf.read_text(encoding="utf-8")
+    except Exception:
+        persona = ""
+    local_context = _local_workspace_context(workspace)
+    append = (
+        persona
+        + "\n\n--- Contesto vault verificato (sola lettura) ---\n" + local_context
+        + "\n\nRispondi breve (2-4 frasi), in italiano, da capo di stato maggiore."
+    )
+    return {"type": "preset", "preset": "claude_code", "append": append}
+
+
+def _hermes_prime_reply(message, workspace):
+    """One persistent Hermes Prime turn via the Claude Agent SDK registry."""
+    reg = _get_claude_registry()
+    reg.get_or_create(
+        "hermes-prime", cwd=workspace, add_dir=workspace,
+        system_prompt=_hermes_prime_system_prompt(workspace),
+    )
+    parts = []
+    final = {"text": ""}
+
+    async def _drive(client):
+        await client.query(" ".join(str(message or "").split()))
+        async for m in client.receive_response():
+            ev = getattr(m, "event", None)
+            if isinstance(ev, dict) and ev.get("type") == "content_block_delta":
+                d = ev.get("delta") or {}
+                if d.get("type") == "text_delta":
+                    parts.append(d.get("text", ""))
+            elif type(m).__name__ == "ResultMessage":
+                r = getattr(m, "result", None)
+                if r:
+                    final["text"] = str(r)
+
+    reg.run_turn("hermes-prime", _drive, timeout=180)
+    return ("".join(parts).strip() or final["text"].strip())
+
+
+def _handle_bridge_prime(handler, body):
+    """POST /api/bridge/prime — Hermes Prime (chief) replies via real Claude."""
+    msg = str((body or {}).get("message") or "").strip()
+    if not msg:
+        return bad(handler, "message is required")
+    workspace = Path(str(DEFAULT_WORKSPACE))
+    try:
+        reply = _hermes_prime_reply(msg, workspace)
+    except Exception as exc:
+        logger.exception("hermes prime reply failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    return j(handler, {"ok": True, "reply": reply or "Ricevuto."}) or True
 
 
 def _handle_clarify_pending(handler, parsed):

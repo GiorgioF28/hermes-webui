@@ -337,9 +337,17 @@
     inp.value = '';
     primeSay('user', v);
     setOrb('thinking', 0);
-    setTimeout(function () {
-      primeSay('prime', 'Ricevuto. Nella prossima fase collego davvero Claude e Codex e inizio a delegare ai sotto-agenti. Per ora ti parlo e il core del pianeta pulsa con la mia voce.');
-    }, 450);
+    var cfg = window.__HERMES_CONFIG__ || {};
+    fetch(new URL('api/bridge/prime', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: JSON.stringify({ message: v })
+    }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.reply) primeSay('prime', d.reply);
+        else { sysNote((d && d.error) ? ('Hermes Prime: ' + d.error) : 'Nessuna risposta.'); setOrb('idle', 0); }
+      })
+      .catch(function () { sysNote('Non riesco a contattare Hermes Prime (bridge). Riprova tra poco.'); setOrb('idle', 0); });
   }
 
   /* ── data render ───────────────────────────────────────────────────────── */
