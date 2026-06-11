@@ -238,6 +238,12 @@
     if (state != null) window.cbPlanet.setState(state);
     if (amp != null) window.cbPlanet.setAmplitude(amp);
   }
+  function sysNote(text) {
+    var log = $('cbLog'); if (!log) return;
+    var m = el('div', 'cb-msg cb-from-prime');
+    m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
+    log.appendChild(m); log.scrollTop = log.scrollHeight;
+  }
   function _ensureCtx() {
     if (!_ctx) {
       var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null;
@@ -279,20 +285,35 @@
     userEngaged = true;
     var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     var mic = $('cbMic');
-    if (!SR) { if (mic) mic.title = 'Riconoscimento vocale non supportato dal browser'; return; }
+    if (!SR) { sysNote('Il browser non supporta il riconoscimento vocale (usa Chrome o Edge). Scrivimi pure nel campo.'); return; }
     if (_rec) { try { _rec.stop(); } catch (e) {} _rec = null; return; }
-    var rec = new SR(); _rec = rec; rec.lang = 'it-IT'; rec.interimResults = false; rec.maxAlternatives = 1;
+    var rec = new SR(); _rec = rec; rec.lang = 'it-IT'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
     if (mic) mic.classList.add('cb-on');
     setOrb('listening', 0.25);
+    var finalText = '';
     rec.onresult = function (e) {
-      var t = e.results[0][0].transcript; var inp = $('cbInput');
-      if (inp) inp.value = t;
-      var form = $('cbForm');
-      if (form && form.requestSubmit) form.requestSubmit(); else onPrimeSubmit({ preventDefault: function () {} });
+      for (var i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+      }
+      var inp = $('cbInput'); if (inp && finalText) inp.value = finalText;
     };
     var done = function () { if (mic) mic.classList.remove('cb-on'); if (_rec === rec) { setOrb('idle', 0); _rec = null; } };
-    rec.onend = done; rec.onerror = done;
-    try { rec.start(); } catch (e) { done(); }
+    rec.onend = function () {
+      done();
+      if (finalText.trim()) { var form = $('cbForm'); if (form && form.requestSubmit) form.requestSubmit(); else onPrimeSubmit({ preventDefault: function () {} }); }
+    };
+    rec.onerror = function (ev) {
+      var map = {
+        'not-allowed': 'permesso microfono negato dal browser',
+        'service-not-allowed': 'STT bloccato: la pagina deve essere su localhost o https',
+        'network': 'il riconoscimento vocale di Chrome usa il cloud Google → serve una connessione internet attiva',
+        'no-speech': 'non ho sentito nulla, riprova',
+        'audio-capture': 'nessun microfono rilevato'
+      };
+      sysNote('Microfono: ' + (map[ev.error] || ('errore "' + ev.error + '"')) + '.');
+      done();
+    };
+    try { rec.start(); } catch (e) { sysNote('Microfono: impossibile avviare (' + (e && e.message) + ').'); done(); }
   }
   function toggleVoice() {
     voiceOn = !voiceOn;
