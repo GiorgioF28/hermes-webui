@@ -244,6 +244,16 @@
     m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
     log.appendChild(m); log.scrollTop = log.scrollHeight;
   }
+  function delegationCard(dele) {
+    var log = $('cbLog'); if (!log || !dele) return;
+    var ok = dele.status === 'ok';
+    var c = el('div', 'cb-deleg');
+    c.innerHTML = '<b>&#9883; ' + esc(dele.agent || 'agente') + '</b> &middot; ' + esc(dele.task_type || '') +
+      ' <span style="float:right">' + (ok ? '&#10003;' : '&#10007;') + '</span>' +
+      '<div style="margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px">' + esc((dele.task || '').slice(0, 120)) + '</div>' +
+      '<div style="margin-top:6px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.45">' + esc((dele.output || '').slice(0, 500)) + '</div>';
+    log.appendChild(c); log.scrollTop = log.scrollHeight;
+  }
   function _ensureCtx() {
     if (!_ctx) {
       var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null;
@@ -344,6 +354,7 @@
       body: JSON.stringify({ message: v })
     }).then(function (r) { return r.json(); })
       .then(function (d) {
+        if (d && d.delegations && d.delegations.length) d.delegations.forEach(delegationCard);
         if (d && d.reply) primeSay('prime', d.reply);
         else { sysNote((d && d.error) ? ('Hermes Prime: ' + d.error) : 'Nessuna risposta.'); setOrb('idle', 0); }
       })

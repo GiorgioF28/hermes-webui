@@ -10738,7 +10738,9 @@ def _hermes_prime_system_prompt(workspace):
 
 
 def _hermes_prime_reply(message, workspace):
-    """One persistent Hermes Prime turn via the Claude Agent SDK registry."""
+    """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
+    from api.prime_delegation import get_and_clear_delegations
+    get_and_clear_delegations("hermes-prime")  # reset deleghe del turno
     reg = _get_claude_registry()
     reg.get_or_create(
         "hermes-prime", cwd=workspace, add_dir=workspace,
@@ -10760,22 +10762,23 @@ def _hermes_prime_reply(message, workspace):
                 if r:
                     final["text"] = str(r)
 
-    reg.run_turn("hermes-prime", _drive, timeout=180)
-    return ("".join(parts).strip() or final["text"].strip())
+    reg.run_turn("hermes-prime", _drive, timeout=300)
+    reply = ("".join(parts).strip() or final["text"].strip())
+    return {"reply": reply, "delegations": get_and_clear_delegations("hermes-prime")}
 
 
 def _handle_bridge_prime(handler, body):
-    """POST /api/bridge/prime — Hermes Prime (chief) replies via real Claude."""
+    """POST /api/bridge/prime — Hermes Prime (chief) replies via real Claude, può delegare."""
     msg = str((body or {}).get("message") or "").strip()
     if not msg:
         return bad(handler, "message is required")
     workspace = Path(str(DEFAULT_WORKSPACE))
     try:
-        reply = _hermes_prime_reply(msg, workspace)
+        result = _hermes_prime_reply(msg, workspace)
     except Exception as exc:
         logger.exception("hermes prime reply failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
-    return j(handler, {"ok": True, "reply": reply or "Ricevuto."}) or True
+    return j(handler, {"ok": True, "reply": result["reply"] or "Ricevuto.", "delegations": result.get("delegations", [])}) or True
 
 
 def _handle_clarify_pending(handler, parsed):
@@ -13555,6 +13558,12 @@ def _get_claude_registry():
                     _add_dirs.append(str(_att))
                 except Exception:
                     pass
+                _mcp = {"hermes": build_ask_user_server(session_id)}
+                _allowed = ["mcp__hermes__ask_user"]
+                if session_id == "hermes-prime":
+                    from api.prime_delegation import build_prime_delegation_server
+                    _mcp["team"] = build_prime_delegation_server(session_id, str(cwd))
+                    _allowed.append("mcp__team__delega")
                 options = ClaudeAgentOptions(
                     cwd=str(cwd),
                     add_dirs=_add_dirs,
@@ -13562,8 +13571,8 @@ def _get_claude_registry():
                     permission_mode="bypassPermissions",
                     include_partial_messages=True,
                     model="claude-opus-4-8",
-                    mcp_servers={"hermes": build_ask_user_server(session_id)},
-                    allowed_tools=["mcp__hermes__ask_user"],
+                    mcp_servers=_mcp,
+                    allowed_tools=_allowed,
                     # Isolate the bridge from the user's global Claude Code config:
                     # don't load user/project settings, plugins, or filesystem MCP
                     # servers. A hanging plugin SessionStart hook (e.g. claude-mem)
