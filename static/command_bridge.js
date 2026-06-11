@@ -46,6 +46,8 @@
     if ($('cb-styles')) return;
     var css = [
 '#mainBridge{padding:0!important;}',
+/* the bridge is a full-bleed stage: hide the (empty) 300px sidebar panel */
+'.layout:has(main.main.showing-bridge) .sidebar{width:0!important;min-width:0!important;opacity:0!important;pointer-events:none;border:none!important;overflow:hidden;}',
 '.cb-root{',
 '  --cb-bg:#06070b; --cb-bg2:#0a0c12; --cb-core:#ffffff;',
 '  --cb-accent:#ff6a00; --cb-accent-2:#ff9248; --cb-accent-dim:rgba(255,106,0,.22);',
@@ -71,12 +73,13 @@
 '  radial-gradient(1.5px 1.5px at 33% 12%,rgba(255,170,110,.5),transparent);',
 '  background-repeat:no-repeat;}',
 /* hero */
-'.cb-hero{position:relative;min-height:100%;display:grid;grid-template-columns:minmax(300px,30%) 1fr;}',
-'.cb-hero.cb-collapsed{grid-template-columns:0 1fr;}',
-/* left: Hermes Prime */
-'.cb-chat{position:relative;display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--cb-line);',
-'  background:linear-gradient(180deg,rgba(255,255,255,.015),transparent 40%);backdrop-filter:blur(2px);}',
-'.cb-collapsed .cb-chat{opacity:0;pointer-events:none;}',
+'.cb-hero{position:relative;min-height:100%;display:flex;align-items:center;justify-content:center;padding:24px;}',
+/* Hermes Prime = centered glass console; the planet glows on both sides of it */
+'.cb-chat{position:relative;z-index:3;display:flex;flex-direction:column;width:min(540px,94vw);height:min(76vh,760px);',
+'  min-width:0;border:1px solid var(--cb-line);border-radius:18px;overflow:hidden;',
+'  background:linear-gradient(180deg,rgba(8,9,14,.68),rgba(6,7,11,.88));backdrop-filter:blur(11px);',
+'  box-shadow:0 30px 90px -30px rgba(0,0,0,.9),inset 0 0 0 1px rgba(255,255,255,.02);}',
+'.cb-hero.cb-collapsed .cb-chat{opacity:0;pointer-events:none;transform:scale(.98);}',
 '.cb-chat-head{display:flex;align-items:center;gap:10px;padding:18px 20px 14px;border-bottom:1px solid var(--cb-line2);}',
 '.cb-dot{width:9px;height:9px;border-radius:50%;background:var(--cb-accent);box-shadow:0 0 10px var(--cb-accent);flex:0 0 auto;}',
 '.cb-chat-name{font-family:var(--cb-disp);font-weight:700;letter-spacing:.14em;font-size:13px;text-transform:uppercase;}',
@@ -98,15 +101,15 @@
 '  font-family:var(--cb-disp);display:flex;align-items:center;justify-content:center;transition:filter .15s;}',
 '.cb-send:hover{filter:brightness(1.12);}',
 /* center stage */
-'.cb-stage{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:0;overflow:hidden;}',
+'.cb-stage{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;overflow:hidden;}',
 '.cb-stage-toggle{position:absolute;top:16px;left:16px;z-index:5;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);',
 '  color:var(--cb-muted);width:34px;height:34px;border-radius:9px;cursor:pointer;display:flex;align-items:center;justify-content:center;}',
 '.cb-stage-toggle:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
 /* the core / orb placeholder */
-'.cb-core{position:relative;width:min(46vh,420px);height:min(46vh,420px);display:flex;align-items:center;justify-content:center;}',
+'.cb-core{position:relative;width:min(78vh,720px);height:min(78vh,720px);display:flex;align-items:center;justify-content:center;}',
 '.cb-core-glow{position:absolute;inset:0;border-radius:50%;',
-'  background:radial-gradient(circle at 50% 50%,#fff 0%,#ffe9d5 9%,var(--cb-accent-2) 26%,var(--cb-accent) 42%,rgba(255,106,0,.25) 60%,transparent 75%);',
-'  filter:blur(2px);animation:cb-breathe 5.2s ease-in-out infinite;}',
+'  background:radial-gradient(circle at 50% 50%,rgba(255,255,255,.92) 0%,rgba(255,246,200,.58) 10%,rgba(255,224,70,.36) 27%,rgba(255,202,20,.20) 45%,rgba(255,196,20,.07) 63%,transparent 75%);',
+'  filter:blur(3px);animation:cb-breathe 5.2s ease-in-out infinite;}',
 '.cb-core-ring{position:absolute;inset:0;border-radius:50%;border:1px solid rgba(255,170,110,.18);',
 '  box-shadow:inset 0 0 60px rgba(255,106,0,.12);}',
 '.cb-core-ring.r2{inset:-9%;border-color:rgba(255,255,255,.05);}',
@@ -131,7 +134,7 @@
 '.cb-sec-title::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--cb-line),transparent);}',
 '.cb-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;}',
 '@media(max-width:1100px){.cb-grid{grid-template-columns:repeat(2,1fr);}}',
-'@media(max-width:680px){.cb-grid{grid-template-columns:1fr;}.cb-hero{grid-template-columns:1fr;}.cb-chat{display:none;}}',
+'@media(max-width:680px){.cb-grid{grid-template-columns:1fr;}.cb-chat{width:94vw;height:64vh;}}',
 '.cb-card{position:relative;border:1px solid var(--cb-line);border-radius:14px;padding:18px 18px 16px;cursor:pointer;',
 '  background:linear-gradient(180deg,rgba(255,255,255,.022),rgba(255,255,255,.006));overflow:hidden;',
 '  transition:border-color .2s,transform .2s,box-shadow .2s;}',
@@ -152,6 +155,8 @@
 '.cb-task .box{width:13px;height:13px;border:1.4px solid var(--cb-accent);border-radius:3px;flex:0 0 auto;margin-top:2px;}',
 '.cb-empty{font-family:var(--cb-mono);font-size:11px;color:var(--cb-faint);font-style:italic;}',
 '.cb-loading{padding:60px;text-align:center;font-family:var(--cb-mono);color:var(--cb-muted);letter-spacing:.1em;}',
+/* white -> fluo-orange gradient on display titles (the accent the user wanted on TEXT) */
+'.cb-chat-name,.cb-sec-title,.cb-card-name{background:linear-gradient(180deg,#ffffff 0%,#ffe0c2 52%,var(--cb-accent) 120%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
 (reduceMotion ? '.cb-core-glow{animation:none!important;}' : '')
     ].join('\n');
     var s = el('style'); s.id = 'cb-styles'; s.textContent = css;
@@ -186,7 +191,6 @@
           '<div class="cb-core">' +
             '<div class="cb-core-ring r3"></div><div class="cb-core-ring r2"></div><div class="cb-core-ring"></div>' +
             '<div class="cb-core-glow"></div>' +
-            '<div class="cb-core-label"><div class="cb-h">Hermes</div><div class="cb-s" id="cbCoreSub">core online</div></div>' +
           '</div>' +
           '<div class="cb-stats" id="cbStats"></div>' +
         '</section>' +
