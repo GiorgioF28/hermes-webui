@@ -84,7 +84,7 @@ Funzioni (cerca per nome nel file):
 | `toggleListen()` | **STT**: `webkitSpeechRecognition` lang `it-IT`. `interimResults` mostra il testo mentre parli; a `onend` se c'è testo finale fa submit. `onerror` → `sysNote()` col motivo. | il mic che "si stacca" è quasi sempre `error: network` (Chrome STT usa il **cloud Google**, serve internet). Per STT affidabile offline → **Whisper lato server** (da fare). |
 | `toggleVoice()` | Muta/riattiva la voce (`voiceOn`), aggiorna il tasto altoparlante e il testo "voce attiva/muta". | — |
 | `primeSay(who, text)` | Aggiunge un messaggio in chat; se `who==='prime'` e `userEngaged` → `speak(text)`. | qui passa ogni risposta di Hermes |
-| `onPrimeSubmit(e)` | Invio messaggio utente: `primeSay('user')`, `setOrb('thinking')`, poi (ORA) **risposta STUB** dopo 450ms. | **QUI va agganciata la risposta vera** di Hermes (Phase 6): sostituire lo stub con una chiamata reale (vedi §6). |
+| `onPrimeSubmit(e)` | Invio: `primeSay('user')`, `setOrb('thinking')`, poi **fetch `POST api/bridge/prime` `{message}`** → `primeSay('prime', reply)` (che la legge a voce). | per la **delega** (step 2): tool/handling qui o nel backend `_hermes_prime_reply`. |
 
 UI relativa (dentro `build()` → la stringa HTML): header chat con `#cbVoice`
 (tasto altoparlante), input row con `#cbMic` (mic) + `#cbInput` + `.cb-send`.
@@ -104,7 +104,7 @@ Pianeta/orb (`static/command_planet.js`): `window.cbPlanet.setState(s)` accetta
 - **Phase 3 ✅** shell 3 zone + Projects Strip.
 - **Phase 4 ✅** Vault Planet 3D (three.js) funzionante: sfera, albero radiale, nodi, edge, orbit controls, core.
 - **Phase 5 ✅** Voice Orb: TTS Elsa → pulsazione core, STT mic it-IT, 4 stati, tasto mute. **TTS verificato funzionante** (endpoint dà audio/mpeg). STT dipende da Chrome+internet.
-- **Phase 6 ⏳ DA FARE** — Hermes Prime che **risponde davvero** e **delega ai sotto-agenti** (Claude/Codex). Ora le risposte sono **stub**.
+- **Phase 6 — STEP 1 ✅** Hermes Prime **risponde davvero** via `POST /api/bridge/prime` (sessione Claude persistente id `hermes-prime`, persona `prompts/hermes-prime.md`, legge il vault). **DA FARE (step 2):** **delega ai sotto-agenti** (Claude/Codex) + **card evento** in chat.
 - **Phase 4-bis ⏳** rifiniture pianeta: hover/click nodo → card dettaglio + camera dolly, **label LOD**, click su card progetto → vola al nodo, distinzione visiva progetti vs agenti.
 - **Phase 7 ⏳** polish (mobile/bottom-sheet, reduced-motion, perf 2k nodi, rendere il bridge la landing di default).
 
@@ -122,7 +122,8 @@ Pianeta/orb (`static/command_planet.js`): `window.cbPlanet.setState(s)` accetta
 - **Agenti IBRIDI**: chief + agenti principali **persistenti** (sessione viva + propri MD di memoria nel vault), task secondari/una-tantum **usa-e-getta**.
 - **Routing modelli: AUTOMATICO per tipo di task** adesso (codice→Codex, ragionamento→Opus, semplice→Sonnet). In futuro **modello fisso per agente** configurabile (l'utente vuole poter mettere modelli locali su GPU).
 - Le **deleghe** devono comparire in chat come **card evento** (agente, task, stato) — la voce resta alto livello, lo schermo porta il dettaglio.
-- **Come agganciare la risposta vera**: in `onPrimeSubmit()` sostituire lo stub. Hermes ha già un **bridge persistente** Claude/Codex (vedi `docs/GUIDA-BRIDGE-HERMES.md`): `_run_claude_code_streaming` / `_run_codex_cli_streaming` in `api/routes.py`, e l'avvio turno via `/api/chat/start` + SSE `/api/chat/stream`. Hermes Prime dovrebbe avere una **sessione dedicata** con un **system prompt da chief-of-staff** (file persona da creare, es. `prompts/hermes-prime.md`) e dei tool per: leggere vault/progetti (read-only) e **creare un task per un sotto-agente** (che diventa una sessione Claude/Codex via bridge).
+- **Risposta vera: GIÀ FATTA (step 1).** Backend in `api/routes.py`: `_handle_bridge_prime` (route `POST /api/bridge/prime`), `_hermes_prime_reply` (turno via `_get_claude_registry()`, sessione persistente `"hermes-prime"`), `_hermes_prime_system_prompt` (carica `prompts/hermes-prime.md` + `_local_workspace_context`). Frontend: `onPrimeSubmit()` in `command_bridge.js` fa la fetch.
+- **STEP 2 (delega) — da fare:** dare a Hermes Prime un **tool** per creare un task/sessione **sotto-agente** (Claude/Codex via bridge persistente: `_run_claude_code_streaming` / `_run_codex_cli_streaming` o il registry) e far comparire una **card evento** (agente, task, stato) nella chat. Routing modello: automatico per tipo di task (vedi sotto). Vedi `docs/GUIDA-BRIDGE-HERMES.md` per il bridge.
 
 **Nota memoria persistente agenti:** ogni agente avrà bisogno di MD specifici del
 vault come contesto/memoria — va passato come system prompt/contesto alla sua
