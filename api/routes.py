@@ -6075,6 +6075,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/vault/graph":
         return _handle_vault_graph(handler, parsed)
 
+    if parsed.path == "/api/projects/overview":
+        return _handle_projects_overview(handler, parsed)
+
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
         # Default: filter to the active profile. ?all_profiles=1 returns the
@@ -10697,6 +10700,19 @@ def _handle_vault_graph(handler, parsed):
         logger.exception("vault graph build failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
     return j(handler, graph) or True
+
+
+def _handle_projects_overview(handler, parsed):
+    """GET /api/projects/overview — per-project cards (latest changes + up-next)."""
+    from api import projects_overview
+
+    vault = Path(str(DEFAULT_WORKSPACE)) / "obsidian-vault"
+    try:
+        data = projects_overview.get_projects_overview(vault)
+    except Exception as exc:
+        logger.exception("projects overview build failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    return j(handler, data) or True
 
 
 def _handle_clarify_pending(handler, parsed):
