@@ -104,7 +104,7 @@ Pianeta/orb (`static/command_planet.js`): `window.cbPlanet.setState(s)` accetta
 - **Phase 3 ✅** shell 3 zone + Projects Strip.
 - **Phase 4 ✅** Vault Planet 3D (three.js) funzionante: sfera, albero radiale, nodi, edge, orbit controls, core.
 - **Phase 5 ✅** Voice Orb: TTS Elsa → pulsazione core, STT mic it-IT, 4 stati, tasto mute. **TTS verificato funzionante** (endpoint dà audio/mpeg). STT dipende da Chrome+internet.
-- **Phase 6 — STEP 1 ✅** Hermes Prime **risponde davvero** via `POST /api/bridge/prime` (sessione Claude persistente id `hermes-prime`, persona `prompts/hermes-prime.md`, legge il vault). **DA FARE (step 2):** **delega ai sotto-agenti** (Claude/Codex) + **card evento** in chat.
+- **Phase 6 — STEP 1 ✅ + STEP 2 v1 ✅** Hermes Prime risponde via `POST /api/bridge/prime` (sessione persistente `hermes-prime`, persona, legge il vault) **e delega** ai sotto-agenti col tool `delega(task_type, task)` (`api/prime_delegation.py`): routing modello per tipo, sotto-agenti **usa-e-getta**, **card evento** in chat. Testato end-to-end. **DA FARE:** routing a **Codex** per `codice`, sotto-agenti **persistenti** per i principali (ibrido), **Discord** (agenti che chattano).
 - **Phase 4-bis ⏳** rifiniture pianeta: hover/click nodo → card dettaglio + camera dolly, **label LOD**, click su card progetto → vola al nodo, distinzione visiva progetti vs agenti.
 - **Phase 7 ⏳** polish (mobile/bottom-sheet, reduced-motion, perf 2k nodi, rendere il bridge la landing di default).
 
@@ -123,7 +123,12 @@ Pianeta/orb (`static/command_planet.js`): `window.cbPlanet.setState(s)` accetta
 - **Routing modelli: AUTOMATICO per tipo di task** adesso (codice→Codex, ragionamento→Opus, semplice→Sonnet). In futuro **modello fisso per agente** configurabile (l'utente vuole poter mettere modelli locali su GPU).
 - Le **deleghe** devono comparire in chat come **card evento** (agente, task, stato) — la voce resta alto livello, lo schermo porta il dettaglio.
 - **Risposta vera: GIÀ FATTA (step 1).** Backend in `api/routes.py`: `_handle_bridge_prime` (route `POST /api/bridge/prime`), `_hermes_prime_reply` (turno via `_get_claude_registry()`, sessione persistente `"hermes-prime"`), `_hermes_prime_system_prompt` (carica `prompts/hermes-prime.md` + `_local_workspace_context`). Frontend: `onPrimeSubmit()` in `command_bridge.js` fa la fetch.
-- **STEP 2 (delega) — da fare:** dare a Hermes Prime un **tool** per creare un task/sessione **sotto-agente** (Claude/Codex via bridge persistente: `_run_claude_code_streaming` / `_run_codex_cli_streaming` o il registry) e far comparire una **card evento** (agente, task, stato) nella chat. Routing modello: automatico per tipo di task (vedi sotto). Vedi `docs/GUIDA-BRIDGE-HERMES.md` per il bridge.
+- **STEP 2 (delega) — v1 FATTO.** `api/prime_delegation.py`: tool `delega(task_type, task)` agganciato alla sessione `hermes-prime` nel factory di `_get_claude_registry()` (in `api/routes.py`, cerca `if session_id == "hermes-prime"`). Spawna un sotto-agente **effimero** (`_run_worker`) con modello da `_model_for(task_type)` (`semplice`→Sonnet, altro→Opus); registra la delega in `_DELEGATIONS`; `_hermes_prime_reply` la ritorna come `delegations[]`; frontend `delegationCard()` mostra la card (CSS `.cb-deleg`).
+- **STEP 2 — DA FINIRE (Codex):**
+  1. `task_type=='codice'` → instradare a **Codex CLI** (subprocess `codex.cmd exec --dangerously-bypass-approvals-and-sandbox -C <ws> "<task>"`, catturare l'output) invece di Opus. Punto: `_model_for()` + `_run_worker()` in `api/prime_delegation.py`.
+  2. **Sotto-agenti persistenti** per i principali (ibrido): usare il registry con un **id stabile per agente** invece di client effimero in `_run_worker`. Attenzione: `run_turn` blocca il loop → dentro il tool (già async sul loop) usare `await` diretto, non `run_turn`.
+  3. Agenti **legati a progetti** con MD di memoria da `06-Agents/` passati nel system prompt del worker.
+  4. **Discord**: bot + canale; instradare messaggi agente↔canale. Hermes ha già un **gateway messaggi** e supporto canali (CLI/Telegram/Discord/Slack — vedi impostazioni "external sessions" e `api/gateway_chat.py`). L'utente imposta il bot Discord; lato codice serve collegare le sessioni agente al canale.
 
 **Nota memoria persistente agenti:** ogni agente avrà bisogno di MD specifici del
 vault come contesto/memoria — va passato come system prompt/contesto alla sua
@@ -141,5 +146,6 @@ sessione bridge (come già fa il bridge Claude col contesto Obsidian, vedi
 - `feat(command-bridge): Phase 5 — Voice Orb (Elsa TTS, mic STT, core pulse, states)`
 - `fix(command-bridge): STT shows interim text + reports error reason`
 
-Vedi anche: `docs/COMMAND-BRIDGE-PLAN.md` (piano completo) e
-`docs/GUIDA-BRIDGE-HERMES.md` (bridge Claude/Codex, UTF-8, update, troubleshooting).
+Vedi anche: `docs/COMMAND-BRIDGE-PLAN.md` (piano completo),
+`docs/GUIDA-BRIDGE-HERMES.md` (bridge Claude/Codex, UTF-8, update, troubleshooting),
+`docs/OBSIDIAN-WIKI-MEMORY-PLAN.md` (secondo cervello Obsidian con obsidian-wiki).
