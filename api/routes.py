@@ -6072,6 +6072,9 @@ def handle_get(handler, parsed) -> bool:
         finally:
             diag.finish()
 
+    if parsed.path == "/api/vault/graph":
+        return _handle_vault_graph(handler, parsed)
+
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
         # Default: filter to the active profile. ?all_profiles=1 returns the
@@ -10676,6 +10679,26 @@ def _handle_approval_inject(handler, parsed):
     return j(handler, {"error": "session_id required"}, status=400)
 
 
+def _handle_vault_graph(handler, parsed):
+    """GET /api/vault/graph — nodes/edges of the Obsidian vault for the planet.
+
+    Reads the default workspace's obsidian-vault directly (no MCP). Cached with
+    mtime/TTL invalidation in api.vault_graph. ?wikilinks=0 skips link edges.
+    """
+    from urllib.parse import parse_qs
+    from api import vault_graph
+
+    qs = parse_qs(parsed.query)
+    include_links = qs.get("wikilinks", ["1"])[0].strip().lower() not in ("0", "false", "no")
+    vault = Path(str(DEFAULT_WORKSPACE)) / "obsidian-vault"
+    try:
+        graph = vault_graph.get_vault_graph(vault, include_wikilinks=include_links)
+    except Exception as exc:
+        logger.exception("vault graph build failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    return j(handler, graph) or True
+
+
 def _handle_clarify_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     pending = get_clarify_pending(sid)
@@ -13443,17 +13466,32 @@ def _get_claude_registry():
             from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
             from api.persistent_agent_loop import ClaudeSessionRegistry
             from api.ask_user_tool import build_ask_user_server
+            from api.upload import _session_attachment_dir
 
             async def _factory(session_id, *, cwd, add_dir, system_prompt):
+                _add_dirs = [str(add_dir)] if add_dir else []
+                try:
+                    _att = _session_attachment_dir(session_id)
+                    _att.mkdir(parents=True, exist_ok=True)
+                    _add_dirs.append(str(_att))
+                except Exception:
+                    pass
                 options = ClaudeAgentOptions(
                     cwd=str(cwd),
-                    add_dirs=[str(add_dir)] if add_dir else [],
+                    add_dirs=_add_dirs,
                     system_prompt=system_prompt,
                     permission_mode="bypassPermissions",
                     include_partial_messages=True,
-                    model=None,
+                    model="claude-opus-4-8",
                     mcp_servers={"hermes": build_ask_user_server(session_id)},
                     allowed_tools=["mcp__hermes__ask_user"],
+                    # Isolate the bridge from the user's global Claude Code config:
+                    # don't load user/project settings, plugins, or filesystem MCP
+                    # servers. A hanging plugin SessionStart hook (e.g. claude-mem)
+                    # otherwise freezes `claude` startup -> SDK initialize timeout.
+                    setting_sources=[],
+                    plugins=[],
+                    strict_mcp_config=True,
                 )
                 client = ClaudeSDKClient(options=options)
                 await client.connect()
@@ -13512,6 +13550,40 @@ def _consume_claude_sdk_message(message, state, emit, *, session_id, clean_msg):
         emit(("reasoning", {"text": "Claude completato.\n"}))
 
 
+def _claude_attachment_note(session_id, attachments):
+    """Build a prompt suffix listing attached files so Claude reads them.
+
+    Chat attachments are saved outside the workspace (STATE_DIR/attachments), so
+    the session attachment dir is also added to the client's add_dirs (factory).
+    Claude Code's Read tool handles text, code, images and PDFs.
+    """
+    if not attachments:
+        return ""
+    try:
+        from api.upload import _session_attachment_dir
+        att_dir = _session_attachment_dir(session_id)
+    except Exception:
+        att_dir = None
+    paths = []
+    for a in attachments:
+        if not isinstance(a, dict):
+            continue
+        p = str(a.get("path") or "").strip()
+        if not (p and os.path.isabs(p) and os.path.exists(p)) and att_dir is not None:
+            name = str(a.get("name") or "").strip()
+            if name and (att_dir / name).exists():
+                p = str(att_dir / name)
+        if p:
+            paths.append(p)
+    if not paths:
+        return ""
+    lines = "\n".join(f"- {p}" for p in paths)
+    return (
+        "\n\nL'utente ha allegato questi file per questo messaggio. "
+        "Leggili con il tool Read se rilevanti per la richiesta:\n" + lines
+    )
+
+
 def _run_claude_code_streaming(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
     """Run a WebUI turn through a PERSISTENT Claude Agent SDK session."""
     if not persistent_cli_bridge_enabled(get_config()):
@@ -13527,6 +13599,7 @@ def _run_claude_code_streaming(session_id, msg, model, workspace, stream_id, att
         s = get_session(session_id)
         q.put_nowait(("reasoning", {"text": "Claude Code (sessione persistente) attivo: contesto in memoria, nessuna re-iniezione.\n"}))
         clean_msg = " ".join(str(msg or "").split())
+        att_note = _claude_attachment_note(session_id, attachments)
         registry = _get_claude_registry()
         registry.get_or_create(
             session_id,
@@ -13536,7 +13609,7 @@ def _run_claude_code_streaming(session_id, msg, model, workspace, stream_id, att
         )
 
         async def _drive(client):
-            await client.query(clean_msg)
+            await client.query(clean_msg + att_note)
             async for message in client.receive_response():
                 if cancel_event.is_set():
                     try:

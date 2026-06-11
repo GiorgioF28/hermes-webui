@@ -220,7 +220,16 @@ try {
     # parameter, because the existing tracked use case is the launcher running
     # server.py with the env-var-driven config — no pass-through args are needed.
     # If pass-through becomes a requirement later, add a [Parameter(ValueFromRemainingArguments=$true)] [string[]]$ServerArgs and splat that.
-    & $Python $serverPath
+    #
+    # Force Python UTF-8 mode (-X utf8 + PYTHONUTF8). On native Windows the locale
+    # default is cp1252, so any subprocess read in text mode (the Claude Agent SDK's
+    # initialize handshake with the `claude` CLI, `git status -z` of UTF-8 filenames,
+    # etc.) decodes as cp1252 and a single non-cp1252 byte (0x81 from emoji/accented
+    # filenames in the workspace) crashes the subprocess reader thread — which breaks
+    # the SDK connect/initialize and git_status. UTF-8 mode makes those reads robust.
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
+    & $Python -X utf8 $serverPath
     $script:serverExitCode = $LASTEXITCODE
 } finally {
     Pop-Location
