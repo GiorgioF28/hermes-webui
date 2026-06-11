@@ -3742,11 +3742,12 @@ main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-command):not(.showing-work):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-command):not(.showing-bridge):not(.showing-work):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
 main.main.showing-command > #mainCommand{display:flex;}
+main.main.showing-bridge > #mainBridge{display:flex;}
 main.main.showing-work > #mainWork{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
 main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}

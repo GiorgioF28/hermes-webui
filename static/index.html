@@ -156,6 +156,7 @@
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
     <button class="rail-btn nav-tab active has-tooltip" data-panel="chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="bridge" onclick="switchPanel('bridge',{fromRailClick:true})" data-tooltip="Command Bridge" aria-label="Command Bridge"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.4"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="command" onclick="switchPanel('command',{fromRailClick:true})" data-tooltip="Command" data-i18n-title="tab_command" aria-label="Command"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/><path d="M14 14h4"/><path d="M14 18h4"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="work" onclick="switchPanel('work',{fromRailClick:true})" data-tooltip="Work" aria-label="Work"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/><path d="M8 2h8"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
@@ -209,6 +210,7 @@
       <div class="session-list" id="sessionList"></div>
     </div>
     <!-- Command panel -->
+    <div class="panel-view" id="panelBridge"></div>
     <div class="panel-view" id="panelCommand">
       <div class="panel-head">
         <span data-i18n="tab_command">Command</span>
@@ -791,6 +793,7 @@
         <div class="main-view-empty-sub" data-i18n="daily_command_empty">Hermes Control Center data is not available in this workspace yet.</div>
       </div>
     </div>
+    <div id="mainBridge" class="main-view"></div>
     <div id="mainWork" class="main-view">
       <div class="main-view-header">
         <div class="main-view-title">Work</div>
@@ -1548,6 +1551,7 @@
 <script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/command_bridge.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>

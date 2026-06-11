@@ -245,12 +245,13 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','command','work','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+    ['settings','skills','memory','command','bridge','work','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
   if (nextPanel === 'command') await loadCommandCenter();
+  if (nextPanel === 'bridge' && typeof loadCommandBridge === 'function') await loadCommandBridge();
   if (nextPanel === 'work') await loadWorkMode();
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
