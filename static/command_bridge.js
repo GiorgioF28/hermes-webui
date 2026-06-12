@@ -244,16 +244,39 @@
     m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
     log.appendChild(m); log.scrollTop = log.scrollHeight;
   }
-  function delegationCard(dele) {
-    var log = $('cbLog'); if (!log || !dele) return;
-    var ok = dele.status === 'ok';
-    var c = el('div', 'cb-deleg');
-    c.innerHTML = '<b>&#9883; ' + esc(dele.agent || 'agente') + '</b> &middot; ' + esc(dele.task_type || '') +
-      ' <span style="float:right">' + (ok ? '&#10003;' : '&#10007;') + '</span>' +
-      '<div style="margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px">' + esc((dele.task || '').slice(0, 120)) + '</div>' +
-      '<div style="margin-top:6px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.45">' + esc((dele.output || '').slice(0, 500)) + '</div>';
-    log.appendChild(c); log.scrollTop = log.scrollHeight;
+  // delegation cards: update-in-place by id (in_corso -> ok/errore), background-aware
+  var _cbTasks = {};
+  function renderTask(t) {
+    if (!t || !t.id) return;
+    var log = $('cbLog'); if (!log) return;
+    var prev = _cbTasks[t.id];
+    var sl = t.status === 'in_corso' ? '&#8230;' : (t.status === 'ok' ? '&#10003;' : '&#10007;');
+    var body = t.status === 'in_corso'
+      ? '<span style="color:var(--cb-muted);font-style:italic">il sotto-agente sta lavorando&#8230;</span>'
+      : '<div style="color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.45">' + esc((t.output || '').slice(0, 600)) + '</div>';
+    var html = '<b>&#9883; ' + esc(t.agent || 'agente') + '</b> &middot; ' + esc(t.task_type || '') +
+      ' <span style="float:right">' + sl + '</span>' +
+      '<div style="margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px">' + esc((t.task || '').slice(0, 120)) + '</div>' +
+      '<div style="margin-top:6px">' + body + '</div>';
+    if (prev && prev.el) { prev.el.innerHTML = html; }
+    else {
+      var c = el('div', 'cb-deleg'); c.innerHTML = html;
+      log.appendChild(c); log.scrollTop = log.scrollHeight;
+      _cbTasks[t.id] = { el: c, status: t.status };
+    }
+    if (prev && prev.status === 'in_corso' && t.status !== 'in_corso') {
+      sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + (t.status === 'ok' ? 'finito' : 'fallito') + ' il task.');
+      if (t.status === 'ok' && userEngaged && voiceOn) speak((t.agent || 'Il sotto-agente') + ' ha finito.');
+    }
+    _cbTasks[t.id].status = t.status;
   }
+  var _cbPollTimer = null;
+  function pollTasks() {
+    api('api/bridge/tasks').then(function (d) {
+      if (d && d.tasks) d.tasks.forEach(renderTask);
+    }).catch(function () {});
+  }
+  function startTaskPolling() { if (!_cbPollTimer) _cbPollTimer = setInterval(pollTasks, 3000); }
   // Strip markdown so the TTS doesn't read "asterisco asterisco" etc.
   function cleanForSpeech(t) {
     return String(t || '')
@@ -379,7 +402,7 @@
     }).then(function (r) { return r.json(); })
       .then(function (d) {
         rm();
-        if (d && d.delegations && d.delegations.length) d.delegations.forEach(delegationCard);
+        if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
         if (d && d.reply) primeSay('prime', d.reply);
         else { sysNote((d && d.error) ? ('Hermes Prime: ' + d.error) : 'Nessuna risposta.'); setOrb('idle', 0); }
       })
@@ -478,6 +501,7 @@
   window.loadCommandBridge = function () {
     if (!BUILT) { if (!build()) return Promise.resolve(); }
     refresh();
+    startTaskPolling();
     return Promise.resolve();
   };
 })();

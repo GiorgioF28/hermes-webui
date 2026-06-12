@@ -6075,6 +6075,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/vault/graph":
         return _handle_vault_graph(handler, parsed)
 
+    if parsed.path == "/api/bridge/tasks":
+        return _handle_bridge_tasks(handler, parsed)
+
     if parsed.path == "/api/projects/overview":
         return _handle_projects_overview(handler, parsed)
 
@@ -10706,6 +10709,17 @@ def _handle_vault_graph(handler, parsed):
     return j(handler, graph) or True
 
 
+def _handle_bridge_tasks(handler, parsed):
+    """GET /api/bridge/tasks — stato deleghe in background (polling UI)."""
+    try:
+        from api.prime_delegation import get_background_tasks
+        tasks = get_background_tasks()
+    except Exception as exc:
+        logger.exception("bridge tasks failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    return j(handler, {"ok": True, "tasks": tasks}) or True
+
+
 def _handle_projects_overview(handler, parsed):
     """GET /api/projects/overview — per-project cards (latest changes + up-next)."""
     from api import projects_overview
@@ -10739,8 +10753,7 @@ def _hermes_prime_system_prompt(workspace):
 
 def _hermes_prime_reply(message, workspace):
     """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
-    from api.prime_delegation import get_and_clear_delegations
-    get_and_clear_delegations("hermes-prime")  # reset deleghe del turno
+    from api.prime_delegation import get_background_tasks
     reg = _get_claude_registry()
     reg.get_or_create(
         "hermes-prime", cwd=workspace, add_dir=workspace,
@@ -10762,9 +10775,9 @@ def _hermes_prime_reply(message, workspace):
                 if r:
                     final["text"] = str(r)
 
-    reg.run_turn("hermes-prime", _drive, timeout=300)
+    reg.run_turn("hermes-prime", _drive, timeout=120)
     reply = ("".join(parts).strip() or final["text"].strip())
-    return {"reply": reply, "delegations": get_and_clear_delegations("hermes-prime")}
+    return {"reply": reply, "delegations": get_background_tasks()}
 
 
 def _handle_bridge_prime(handler, body):
