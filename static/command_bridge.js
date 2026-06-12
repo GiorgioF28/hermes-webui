@@ -254,6 +254,28 @@
       '<div style="margin-top:6px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.45">' + esc((dele.output || '').slice(0, 500)) + '</div>';
     log.appendChild(c); log.scrollTop = log.scrollHeight;
   }
+  // Strip markdown so the TTS doesn't read "asterisco asterisco" etc.
+  function cleanForSpeech(t) {
+    return String(t || '')
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/(^|\s)_([^_]+)_(\s|$)/g, '$1$2$3')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+      .replace(/^\s*[-*+]\s+/gm, '')
+      .replace(/[*_`#>~|]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  function pendingBubble() {
+    var log = $('cbLog'); if (!log) return null;
+    var m = el('div', 'cb-msg cb-from-prime');
+    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div>';
+    log.appendChild(m); log.scrollTop = log.scrollHeight; return m;
+  }
   function _ensureCtx() {
     if (!_ctx) {
       var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null;
@@ -269,7 +291,7 @@
     fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
-      body: JSON.stringify({ text: text.slice(0, 4800), voice: 'it-IT-ElsaNeural' })
+      body: JSON.stringify({ text: cleanForSpeech(text).slice(0, 4800), voice: 'it-IT-ElsaNeural' })
     }).then(function (r) { if (!r.ok) throw new Error('tts ' + r.status); return r.blob(); })
       .then(function (blob) {
         var ctx = _ensureCtx(); var url = URL.createObjectURL(blob);
@@ -347,6 +369,8 @@
     inp.value = '';
     primeSay('user', v);
     setOrb('thinking', 0);
+    var ph = pendingBubble();
+    var rm = function () { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); ph = null; };
     var cfg = window.__HERMES_CONFIG__ || {};
     fetch(new URL('api/bridge/prime', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin',
@@ -354,11 +378,12 @@
       body: JSON.stringify({ message: v })
     }).then(function (r) { return r.json(); })
       .then(function (d) {
+        rm();
         if (d && d.delegations && d.delegations.length) d.delegations.forEach(delegationCard);
         if (d && d.reply) primeSay('prime', d.reply);
         else { sysNote((d && d.error) ? ('Hermes Prime: ' + d.error) : 'Nessuna risposta.'); setOrb('idle', 0); }
       })
-      .catch(function () { sysNote('Non riesco a contattare Hermes Prime (bridge). Riprova tra poco.'); setOrb('idle', 0); });
+      .catch(function () { rm(); sysNote('Non riesco a contattare Hermes Prime (bridge). Riprova tra poco.'); setOrb('idle', 0); });
   }
 
   /* ── data render ───────────────────────────────────────────────────────── */
