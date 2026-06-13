@@ -7928,6 +7928,9 @@ def handle_post(handler, parsed) -> bool:
         return _handle_approval_respond(handler, body)
 
     # ── Clarify (POST) ──
+    if parsed.path == "/api/bridge/prime/brief":
+        return _handle_bridge_prime_brief(handler, body)
+
     if parsed.path == "/api/bridge/prime":
         return _handle_bridge_prime(handler, body)
 
@@ -10751,7 +10754,7 @@ def _hermes_prime_system_prompt(workspace):
     return {"type": "preset", "preset": "claude_code", "append": append}
 
 
-def _hermes_prime_reply(message, workspace):
+def _hermes_prime_reply(message, workspace, on_token=None):
     """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
     from api.prime_delegation import get_background_tasks
     reg = _get_claude_registry()
@@ -10769,29 +10772,118 @@ def _hermes_prime_reply(message, workspace):
             if isinstance(ev, dict) and ev.get("type") == "content_block_delta":
                 d = ev.get("delta") or {}
                 if d.get("type") == "text_delta":
-                    parts.append(d.get("text", ""))
+                    text = str(d.get("text", "") or "")
+                    if text:
+                        parts.append(text)
+                        if on_token is not None:
+                            on_token(text)
             elif type(m).__name__ == "ResultMessage":
                 r = getattr(m, "result", None)
                 if r:
                     final["text"] = str(r)
 
-    reg.run_turn("hermes-prime", _drive, timeout=120)
+    # Il timeout del turno NON deve sfuggire come TimeoutError: in Python 3.11
+    # TimeoutError == concurrent.futures.TimeoutError, che è dentro
+    # _CLIENT_DISCONNECT_ERRORS. Se sfuggisse, _handle_bridge_prime lo
+    # scambierebbe per un client disconnesso e chiuderebbe lo stream senza
+    # 'done', facendo apparire "risposta interrotta" lato UI. Qui lo gestiamo
+    # e restituiamo comunque ciò che è già stato prodotto.
+    import concurrent.futures as _futures
+    timed_out = False
+    try:
+        reg.run_turn("hermes-prime", _drive, timeout=120)
+    except (TimeoutError, _futures.TimeoutError):
+        timed_out = True
     reply = ("".join(parts).strip() or final["text"].strip())
+    if timed_out and not reply:
+        reply = (
+            "Ci sto mettendo più del previsto su questa. Dammi un attimo e "
+            "richiedimi il brief, oppure spezziamo la richiesta in due."
+        )
+    if reply and not parts and on_token is not None:
+        on_token(reply)
     return {"reply": reply, "delegations": get_background_tasks()}
 
 
 def _handle_bridge_prime(handler, body):
-    """POST /api/bridge/prime — Hermes Prime (chief) replies via real Claude, può delegare."""
+    """POST /api/bridge/prime — stream Hermes Prime tokens, then delegations."""
     msg = str((body or {}).get("message") or "").strip()
     if not msg:
         return bad(handler, "message is required")
     workspace = Path(str(DEFAULT_WORKSPACE))
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    _sse_set_write_deadline(handler)
+
+    from api.streaming import _sse
+
     try:
-        result = _hermes_prime_reply(msg, workspace)
+        result = _hermes_prime_reply(
+            msg,
+            workspace,
+            on_token=lambda text: _sse(handler, "token", {"text": text}),
+        )
+        _sse(
+            handler,
+            "done",
+            {
+                "reply": result["reply"] or "Ricevuto.",
+                "delegations": result.get("delegations", []),
+            },
+        )
+    except _CLIENT_DISCONNECT_ERRORS:
+        # Può essere il browser che se ne va (non possiamo farci nulla) oppure il
+        # bridge/sottoprocesso che chiude la pipe mentre il client è ancora lì.
+        # Proviamo comunque a chiudere lo stream con un evento terminale: se il
+        # socket è davvero morto la write fallisce e la ignoriamo. Così l'utente
+        # non resta col generico "risposta interrotta".
+        try:
+            _sse(handler, "error", {"error": "La sessione di Hermes Prime si è interrotta. Riprova tra poco."})
+        except _CLIENT_DISCONNECT_ERRORS:
+            pass
     except Exception as exc:
         logger.exception("hermes prime reply failed")
-        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
-    return j(handler, {"ok": True, "reply": result["reply"] or "Ricevuto.", "delegations": result.get("delegations", [])}) or True
+        try:
+            _sse(handler, "error", {"error": _sanitize_error(exc)})
+        except _CLIENT_DISCONNECT_ERRORS:
+            pass
+    return True
+
+
+def _handle_bridge_prime_brief(handler, body):
+    """POST /api/bridge/prime/brief — a delega finita, Prime fa un brief all'utente.
+
+    Il frontend lo chiama quando una card passa a ok/errore: ri-invoca la sessione
+    persistente di Prime (che ricorda di aver delegato) con il risultato e gli chiede
+    1-2 frasi di sintesi. NON deve delegare di nuovo (vietato nel messaggio)."""
+    task_id = str((body or {}).get("task_id") or "").strip()
+    if not task_id:
+        return bad(handler, "task_id is required")
+    from api.prime_delegation import get_background_task
+    t = get_background_task(task_id)
+    if not t or t.get("status") == "in_corso":
+        return j(handler, {"reply": ""})
+    esito = "completato" if t.get("status") == "ok" else "fallito"
+    brief_msg = (
+        "[BRIEF AUTOMATICO] Il sotto-agente " + str(t.get("agent") or "operativo") +
+        " ha " + esito + " un task che gli avevi delegato.\n"
+        "Task: " + str(t.get("task") or "") + "\n"
+        "Esito (" + str(t.get("status") or "") + "): " + str(t.get("output") or "") + "\n\n"
+        "Fai un brief all'utente in 1-2 frasi: cosa e' stato prodotto e l'eventuale "
+        "prossimo passo. NON delegare di nuovo, NON usare il tool delega: rispondi solo "
+        "all'utente a parole."
+    )
+    workspace = Path(str(DEFAULT_WORKSPACE))
+    try:
+        result = _hermes_prime_reply(brief_msg, workspace)
+        return j(handler, {"reply": result.get("reply") or ""})
+    except Exception as exc:
+        logger.exception("hermes prime brief failed")
+        return j(handler, {"reply": "", "error": _sanitize_error(exc)})
 
 
 def _handle_clarify_pending(handler, parsed):
