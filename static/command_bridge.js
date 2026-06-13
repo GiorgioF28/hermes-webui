@@ -231,7 +231,9 @@
   }
 
   /* ── Hermes Prime + Voice (Phase 5). Real Claude/Codex delegation: Phase 6. ── */
-  var voiceOn = true, userEngaged = false, _ctx = null, _an = null, _raf = null, _cur = null, _rec = null;
+  var voiceOn = true, userEngaged = false, _ctx = null, _an = null, _raf = null, _cur = null, _rec = null, _ttsActive = false;
+  var _listening = false, _micTimer = null;
+  var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
 
   function setOrb(state, amp) {
     if (!window.cbPlanet) return;
@@ -266,9 +268,35 @@
     }
     if (prev && prev.status === 'in_corso' && t.status !== 'in_corso') {
       sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + (t.status === 'ok' ? 'finito' : 'fallito') + ' il task.');
-      if (t.status === 'ok' && userEngaged && voiceOn) speak((t.agent || 'Il sotto-agente') + ' ha finito.');
     }
     _cbTasks[t.id].status = t.status;
+    // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
+    if ((t.status === 'ok' || t.status === 'errore') && !_cbTasks[t.id].briefed) {
+      _cbTasks[t.id].briefed = true;
+      requestBrief(t);
+    }
+  }
+  function requestBrief(t) {
+    setOrb('thinking', 0);
+    var ph = pendingBubble(); // riusa la bolla "sto ragionando…" di Hermes Prime
+    var cfg = window.__HERMES_CONFIG__ || {};
+    fetch(new URL('api/bridge/prime/brief', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: JSON.stringify({ task_id: t.id })
+    }).then(function (r) { return r.json(); })
+      .then(function (d) {
+        var reply = String((d && d.reply) || '').trim();
+        if (ph && ph.parentNode) {
+          if (reply) {
+            var bub = ph.querySelector('.cb-bubble');
+            if (bub) { bub.removeAttribute('style'); bub.textContent = reply; }
+            if (userEngaged) speak(reply);
+          } else { ph.parentNode.removeChild(ph); }
+        }
+        setOrb('idle', 0);
+      })
+      .catch(function () { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); setOrb('idle', 0); });
   }
   var _cbPollTimer = null;
   function pollTasks() {
@@ -299,6 +327,40 @@
     m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div>';
     log.appendChild(m); log.scrollTop = log.scrollHeight; return m;
   }
+  function streamPrimeResponse(response, handlers) {
+    if (!response.ok) throw new Error('bridge ' + response.status);
+    var contentType = response.headers.get('content-type') || '';
+    if (contentType.indexOf('text/event-stream') === -1 || !response.body) {
+      throw new Error('bridge did not return an SSE stream');
+    }
+    var reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = '';
+    function dispatch(frame) {
+      var event = 'message', data = '';
+      frame.split(/\r?\n/).forEach(function (line) {
+        if (line.indexOf('event:') === 0) event = line.slice(6).trim();
+        else if (line.indexOf('data:') === 0) data += line.slice(5).trimStart();
+      });
+      if (!data) return;
+      var payload = JSON.parse(data);
+      if (handlers[event]) handlers[event](payload);
+    }
+    function pump() {
+      return reader.read().then(function (chunk) {
+        buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+        var frames = buffer.split(/\r?\n\r?\n/);
+        buffer = frames.pop() || '';
+        frames.forEach(dispatch);
+        if (chunk.done) {
+          if (buffer.trim()) dispatch(buffer);
+          return;
+        }
+        return pump();
+      });
+    }
+    return pump();
+  }
   function _ensureCtx() {
     if (!_ctx) {
       var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null;
@@ -306,17 +368,42 @@
     }
     return _ctx;
   }
+  // Coda vocale sequenziale: Hermes Prime puo' iniziare a leggere la prima frase
+  // appena e' pronta (durante lo streaming) e accodare le successive senza
+  // tagliarsi. _ttsActive resta vero per tutta la coda, cosi' l'anti-eco del
+  // microfono tiene in pausa la registrazione finche' la voce non finisce.
+  var _speakQueue = [];
+  function stopSpeak() {
+    _speakQueue = [];
+    try { if (_cur) { _cur.pause(); _cur = null; } } catch (e) {}
+    cancelAnimationFrame(_raf);
+    _ttsActive = false;
+  }
+  function enqueueSpeak(text) {
+    text = cleanForSpeech(text); if (!text || !voiceOn) return;
+    _speakQueue.push(text);
+    if (!_ttsActive) { _ttsActive = true; _drainSpeak(); }
+  }
+  function _drainSpeak() {
+    if (!voiceOn || !_speakQueue.length) { _ttsActive = false; setOrb('idle', 0); return; }
+    _playClip(_speakQueue.shift(), _drainSpeak);
+  }
+  // Avvio one-shot (risposte non in streaming): azzera la coda e parla subito.
   function speak(text) {
     text = String(text || '').trim(); if (!text || !voiceOn) return;
-    try { if (_cur) { _cur.pause(); _cur = null; } } catch (e) {}
+    stopSpeak();
+    enqueueSpeak(text);
+  }
+  function _playClip(text, onDone) {
     setOrb('thinking', 0);
     var cfg = window.__HERMES_CONFIG__ || {};
     fetch(new URL('api/tts', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
-      body: JSON.stringify({ text: cleanForSpeech(text).slice(0, 4800), voice: 'it-IT-ElsaNeural' })
+      body: JSON.stringify({ text: String(text).slice(0, 4800), voice: 'it-IT-ElsaNeural' })
     }).then(function (r) { if (!r.ok) throw new Error('tts ' + r.status); return r.blob(); })
       .then(function (blob) {
+        if (!voiceOn) { onDone(); return; }
         var ctx = _ensureCtx(); var url = URL.createObjectURL(blob);
         var audio = new Audio(url); _cur = audio;
         if (ctx) {
@@ -332,49 +419,140 @@
           })();
         }
         setOrb('speaking', 0);
-        audio.onended = function () { cancelAnimationFrame(_raf); setOrb('idle', 0); URL.revokeObjectURL(url); if (_cur === audio) _cur = null; };
+        audio.onended = function () { cancelAnimationFrame(_raf); URL.revokeObjectURL(url); if (_cur === audio) _cur = null; onDone(); };
         return audio.play();
-      }).catch(function () { setOrb('idle', 0); }); // TTS unavailable (edge-tts not installed) -> silent
+      }).catch(function () { if (_cur) { try { _cur.pause(); } catch (e) {} _cur = null; } onDone(); }); // TTS non disponibile -> passa oltre in silenzio
   }
+  // Estrae dal testo accumulato le frasi gia' complete (fino all'ultima
+  // punteggiatura di chiusura), cosi' la voce parte appena c'e' una frase pronta
+  // invece di aspettare la risposta intera. spokenLen avanza per non ripetere.
+  function flushSpokenSentences(full, state, force) {
+    if (!userEngaged || !voiceOn) { state.spokenLen = full.length; return; }
+    var pending = full.slice(state.spokenLen);
+    if (force) {
+      var tail = pending.trim();
+      if (tail) enqueueSpeak(tail);
+      state.spokenLen = full.length;
+      return;
+    }
+    var re = /[.!?…](["')\]]?)(\s|$)|\n/g, lastEnd = -1, m;
+    while ((m = re.exec(pending)) !== null) lastEnd = re.lastIndex;
+    if (lastEnd <= 0) return;
+    var chunk = pending.slice(0, lastEnd).trim();
+    if (chunk) enqueueSpeak(chunk);
+    state.spokenLen += lastEnd;
+  }
+  // Microfono di Hermes Prime: registra con MediaRecorder e trascrive con il motore
+  // STT locale della WebUI (POST api/transcribe). Niente cloud Google: funziona in
+  // Brave/Chromium. Modalita' dialogo continuo: il mic resta acceso, un analyser
+  // segmenta le frasi sulla pausa, ogni segmento viene trascritto e inviato, poi
+  // si riparte ad ascoltare. Durante il TTS la registrazione e' in pausa (anti-eco).
   function toggleListen() {
     userEngaged = true;
-    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    var mic = $('cbMic');
-    if (!SR) { sysNote('Il browser non supporta il riconoscimento vocale (usa Chrome o Edge). Scrivimi pure nel campo.'); return; }
-    if (_rec) { try { _rec.stop(); } catch (e) {} _rec = null; return; }
-    var rec = new SR(); _rec = rec; rec.lang = 'it-IT'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
-    if (mic) mic.classList.add('cb-on');
+    if (_listening) { stopListen(); return; }
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)) {
+      sysNote('Microfono non disponibile in questo browser.'); return;
+    }
+    _listening = true;
+    var mic = $('cbMic'); if (mic) mic.classList.add('cb-on');
     setOrb('listening', 0.25);
-    var finalText = '';
-    rec.onresult = function (e) {
-      for (var i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+    startMic();
+  }
+  function stopListen() {
+    _listening = false;
+    if (_micVadRaf) { cancelAnimationFrame(_micVadRaf); _micVadRaf = null; }
+    if (_micRec && _micRec.state !== 'inactive') { try { _micRec.onstop = null; _micRec.stop(); } catch (e) {} }
+    _micRec = null; _micChunks = [];
+    if (_micStream) { try { _micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} _micStream = null; }
+    var mic = $('cbMic'); if (mic) mic.classList.remove('cb-on');
+    setOrb('idle', 0);
+  }
+  function startMic() {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      if (!_listening) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+      _micStream = stream;
+      var ctx = _ensureCtx();
+      var analyser = null, data = null;
+      if (ctx) {
+        try { ctx.resume(); } catch (e) {}
+        analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+        ctx.createMediaStreamSource(stream).connect(analyser); // non collegato a destination: niente feedback
+        data = new Uint8Array(analyser.frequencyBinCount);
       }
-      var inp = $('cbInput'); if (inp && finalText) inp.value = finalText;
-    };
-    var done = function () { if (mic) mic.classList.remove('cb-on'); if (_rec === rec) { setOrb('idle', 0); _rec = null; } };
-    rec.onend = function () {
-      done();
-      if (finalText.trim()) { var form = $('cbForm'); if (form && form.requestSubmit) form.requestSubmit(); else onPrimeSubmit({ preventDefault: function () {} }); }
-    };
-    rec.onerror = function (ev) {
-      var map = {
-        'not-allowed': 'permesso microfono negato dal browser',
-        'service-not-allowed': 'STT bloccato: la pagina deve essere su localhost o https',
-        'network': 'il riconoscimento vocale di Chrome usa il cloud Google → serve una connessione internet attiva',
-        'no-speech': 'non ho sentito nulla, riprova',
-        'audio-capture': 'nessun microfono rilevato'
+      var SPEAK = 0.018, SILENCE_MS = 1500, MIN_SPEAK_MS = 350;
+      var spoke = false, speakStart = 0, silenceStart = 0;
+      var newRecorder = function () {
+        var types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'];
+        var mime = types.filter(function (t) { return window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(t); })[0] || '';
+        var rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+        _micChunks = [];
+        rec.ondataavailable = function (e) { if (e.data && e.data.size) _micChunks.push(e.data); };
+        rec.onstop = function () {
+          var blob = new Blob(_micChunks, { type: (_micChunks[0] && _micChunks[0].type) || 'audio/webm' });
+          _micChunks = [];
+          if (spoke && blob.size > 1200) transcribeAndSubmit(blob);
+          spoke = false;
+          if (_listening) { _micRec = newRecorder(); _micRec.start(); }
+        };
+        return rec;
       };
-      sysNote('Microfono: ' + (map[ev.error] || ('errore "' + ev.error + '"')) + '.');
-      done();
-    };
-    try { rec.start(); } catch (e) { sysNote('Microfono: impossibile avviare (' + (e && e.message) + ').'); done(); }
+      _micRec = newRecorder(); _micRec.start();
+      var loop = function () {
+        if (!_listening) return;
+        _micVadRaf = requestAnimationFrame(loop);
+        // Durante il TTS (anche tra una frase e l'altra della coda) metti in pausa
+        // e azzera, cosi' Hermes non trascrive se stesso
+        if (_cur || _ttsActive) {
+          if (_micRec && _micRec.state === 'recording') { try { _micRec.pause(); } catch (e) {} }
+          spoke = false; silenceStart = 0; return;
+        }
+        if (_micRec && _micRec.state === 'paused') { try { _micRec.resume(); } catch (e) {} }
+        if (!analyser) return;
+        analyser.getByteTimeDomainData(data);
+        var s = 0; for (var i = 0; i < data.length; i++) { var v = (data[i] - 128) / 128; s += v * v; }
+        var rms = Math.sqrt(s / data.length);
+        var now = Date.now();
+        if (rms > SPEAK) {
+          if (!spoke) { spoke = true; speakStart = now; }
+          silenceStart = 0;
+          setOrb('listening', Math.min(0.6, rms * 4));
+        } else if (spoke && now - speakStart > MIN_SPEAK_MS) {
+          if (!silenceStart) silenceStart = now;
+          else if (now - silenceStart > SILENCE_MS && _micRec && _micRec.state === 'recording') {
+            try { _micRec.stop(); } catch (e) {} // chiude il segmento -> onstop trascrive
+          }
+        }
+      };
+      _micVadRaf = requestAnimationFrame(loop);
+    }).catch(function (err) {
+      _listening = false;
+      var mic = $('cbMic'); if (mic) mic.classList.remove('cb-on');
+      setOrb('idle', 0);
+      var name = err && err.name;
+      sysNote('Microfono: ' + (name === 'NotAllowedError' ? 'permesso negato dal browser' : (name === 'NotFoundError' ? 'nessun microfono rilevato' : 'impossibile avviare')) + '.');
+    });
+  }
+  function transcribeAndSubmit(blob) {
+    if (_micBusy) return; _micBusy = true;
+    var ext = (blob.type && blob.type.indexOf('ogg') >= 0) ? 'ogg' : 'webm';
+    var form = new FormData();
+    form.append('file', new File([blob], 'voice-input.' + ext, { type: blob.type || ('audio/' + ext) }));
+    fetch(new URL('api/transcribe', document.baseURI || location.href).href, { method: 'POST', credentials: 'same-origin', body: form })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (!res.ok) { sysNote('Trascrizione: ' + (res.d.error || 'errore lato server') + '.'); return; }
+        var text = (res.d.transcript || '').trim(); if (!text) return;
+        var inp = $('cbInput'); if (inp) inp.value = text;
+        var f = $('cbForm'); if (f && f.requestSubmit) f.requestSubmit(); else onPrimeSubmit({ preventDefault: function () {} });
+      })
+      .catch(function () { sysNote('Trascrizione non riuscita (motore STT locale raggiungibile?).'); })
+      .then(function () { _micBusy = false; });
   }
   function toggleVoice() {
     voiceOn = !voiceOn;
     var b = $('cbVoice'); if (b) b.classList.toggle('cb-on', voiceOn);
     var role = document.querySelector('.cb-chat-role'); if (role) role.textContent = 'chief of staff · ' + (voiceOn ? 'voce attiva' : 'voce muta');
-    if (!voiceOn) { try { if (_cur) { _cur.pause(); _cur = null; } } catch (e) {} cancelAnimationFrame(_raf); setOrb('idle', 0); }
+    if (!voiceOn) { stopSpeak(); setOrb('idle', 0); }
   }
 
   function primeSay(who, text) {
@@ -391,22 +569,56 @@
     var v = inp.value.trim(); if (!v) return;
     inp.value = '';
     primeSay('user', v);
+    stopSpeak(); // un nuovo turno interrompe la voce precedente
     setOrb('thinking', 0);
     var ph = pendingBubble();
-    var rm = function () { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); ph = null; };
+    var bubble = ph ? ph.querySelector('.cb-bubble') : null;
+    var reply = '', settled = false, speech = { spokenLen: 0 };
+    var showToken = function (text) {
+      text = String(text || ''); if (!text) return;
+      reply += text;
+      if (bubble) {
+        bubble.removeAttribute('style');
+        bubble.textContent = reply;
+      }
+      flushSpokenSentences(reply, speech, false); // legge le frasi gia' complete
+      var log = $('cbLog'); if (log) log.scrollTop = log.scrollHeight;
+    };
+    var fail = function (text) {
+      if (settled) return;
+      settled = true;
+      if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
+      ph = null; bubble = null;
+      sysNote(text);
+      setOrb('idle', 0);
+    };
     var cfg = window.__HERMES_CONFIG__ || {};
     fetch(new URL('api/bridge/prime', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
       body: JSON.stringify({ message: v })
-    }).then(function (r) { return r.json(); })
-      .then(function (d) {
-        rm();
-        if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
-        if (d && d.reply) primeSay('prime', d.reply);
-        else { sysNote((d && d.error) ? ('Hermes Prime: ' + d.error) : 'Nessuna risposta.'); setOrb('idle', 0); }
-      })
-      .catch(function () { rm(); sysNote('Non riesco a contattare Hermes Prime (bridge). Riprova tra poco.'); setOrb('idle', 0); });
+    }).then(function (r) {
+      return streamPrimeResponse(r, {
+        token: function (d) { showToken(d && d.text); },
+        done: function (d) {
+          settled = true;
+          if (!reply && d && d.reply) showToken(d.reply);
+          if (!reply) showToken('Ricevuto.');
+          ph = null; bubble = null;
+          flushSpokenSentences(reply, speech, true); // legge l'ultima frase rimasta
+          if (!_ttsActive) setOrb('idle', 0); // niente voce in coda -> torna a riposo
+          if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
+        },
+        error: function (d) {
+          fail((d && d.error) ? ('Hermes Prime: ' + d.error) : 'Hermes Prime non ha completato la risposta.');
+        }
+      });
+    }).then(function () {
+      if (!settled) fail('La risposta di Hermes Prime si è interrotta prima del completamento.');
+    })
+      .catch(function () {
+        fail('Non riesco a contattare Hermes Prime (bridge). Riprova tra poco.');
+      });
   }
 
   /* ── data render ───────────────────────────────────────────────────────── */
