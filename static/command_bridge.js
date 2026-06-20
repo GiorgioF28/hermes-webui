@@ -31,6 +31,17 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c];
     });
   }
+  // Scroll to bottom only if the user is already near it, so reading older
+  // messages isn't interrupted while Prime keeps writing.
+  function nearBottom(log) { return !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 64; }
+  // Render Prime text as markdown (reuses the main chat renderer); plain fallback.
+  function renderRich(node, text) {
+    if (!node) return;
+    if (typeof window.renderMd === 'function') {
+      try { node.innerHTML = window.renderMd(String(text || '')); return; } catch (e) {}
+    }
+    node.textContent = String(text || '');
+  }
 
   /* ── fonts + scoped styles ─────────────────────────────────────────────── */
   function injectFonts() {
@@ -93,13 +104,16 @@
 '.cb-msg.cb-from-prime{align-self:flex-start;}',
 '.cb-msg.cb-from-user{align-self:flex-end;text-align:right;color:#fff;}',
 '.cb-msg.cb-from-prime .cb-bubble{color:var(--cb-text);}',
+'.cb-prime-status{margin-top:5px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.06em;color:var(--cb-faint);}',
 '.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:2px solid var(--cb-accent);',
 '  border-radius:8px;padding:9px 12px;background:rgba(255,106,0,.05);font-family:var(--cb-mono);font-size:11px;}',
 '.cb-deleg b{color:var(--cb-accent-2);font-weight:600;}',
-'.cb-chat-input{display:flex;gap:8px;padding:14px 16px;border-top:1px solid var(--cb-line2);}',
-'.cb-chat-input input{flex:1;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:10px;',
-'  color:var(--cb-text);font-family:var(--cb-sans);font-size:13.5px;padding:11px 14px;outline:none;}',
-'.cb-chat-input input:focus{border-color:var(--cb-accent);box-shadow:0 0 0 3px rgba(255,106,0,.12);}',
+'.cb-chat-input{display:flex;gap:8px;padding:14px 16px;border-top:1px solid var(--cb-line2);align-items:flex-end;}',
+'.cb-chat-input input,.cb-chat-input textarea{flex:1;min-width:0;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:10px;',
+'  color:var(--cb-text);font-family:var(--cb-sans);font-size:13.5px;line-height:1.45;padding:10px 14px;outline:none;}',
+'.cb-chat-input textarea{resize:none;display:block;min-height:42px;max-height:40vh;overflow-y:auto;}',
+'.cb-chat-input .cb-send,.cb-chat-input .cb-mic,.cb-chat-input .cb-attach{height:42px;flex:0 0 auto;}',
+'.cb-chat-input input:focus,.cb-chat-input textarea:focus{border-color:var(--cb-accent);box-shadow:0 0 0 3px rgba(255,106,0,.12);}',
 '.cb-send{background:var(--cb-accent);border:none;color:#1a0c00;font-weight:700;border-radius:10px;width:42px;cursor:pointer;',
 '  font-family:var(--cb-disp);display:flex;align-items:center;justify-content:center;transition:filter .15s;}',
 '.cb-mic{background:rgba(255,255,255,.05);border:1px solid var(--cb-line);color:var(--cb-muted);border-radius:10px;width:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;}',
@@ -107,6 +121,19 @@
 '.cb-mic.cb-on{color:#1a0c00;background:var(--cb-accent);border-color:var(--cb-accent);animation:cb-micpulse 1.1s ease-in-out infinite;}',
 '@keyframes cb-micpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,106,0,.5);}50%{box-shadow:0 0 0 6px rgba(255,106,0,0);}}',
 '.cb-send:hover{filter:brightness(1.12);}',
+'.cb-attach{background:rgba(255,255,255,.05);border:1px solid var(--cb-line);color:var(--cb-muted);border-radius:10px;width:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;}',
+'.cb-attach:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
+'.cb-attbar{display:flex;flex-wrap:wrap;gap:8px;padding:0 16px;}',
+'.cb-attbar:not(:empty){padding-top:12px;}',
+'.cb-chip{position:relative;display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.05);border:1px solid var(--cb-line);border-radius:8px;padding:4px 7px 4px 5px;max-width:190px;}',
+'.cb-chip img{width:32px;height:32px;object-fit:cover;border-radius:5px;display:block;flex:0 0 auto;}',
+'.cb-chip-info{display:flex;flex-direction:column;min-width:0;line-height:1.25;}',
+'.cb-chip-name{font-family:var(--cb-mono);font-size:10px;color:var(--cb-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-chip-type{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-chip.cb-chip-up .cb-chip-type{font-style:italic;}',
+'.cb-chip button{background:none;border:none;color:var(--cb-faint);cursor:pointer;font-size:13px;line-height:1;padding:0 2px;flex:0 0 auto;}',
+'.cb-chip button:hover{color:var(--cb-accent);}',
+'.cb-msg.cb-from-user .cb-bubble img{max-width:160px;border-radius:8px;margin-top:6px;display:inline-block;}',
 /* center stage */
 '.cb-stage{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;overflow:hidden;}',
 '.cb-planet{position:absolute;inset:0;z-index:1;}',
@@ -191,10 +218,14 @@
               '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg></button>' +
           '</div>' +
           '<div class="cb-chat-log" id="cbLog"></div>' +
+          '<div class="cb-attbar" id="cbAtt"></div>' +
           '<form class="cb-chat-input" id="cbForm" autocomplete="off">' +
             '<button type="button" class="cb-mic" id="cbMic" aria-label="Parla a voce" title="Parla a voce">' +
               '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg></button>' +
-            '<input id="cbInput" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime">' +
+            '<button type="button" class="cb-attach" id="cbAttachBtn" aria-label="Allega foto" title="Allega foto">' +
+              '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>' +
+            '<input id="cbFile" type="file" accept="image/*" multiple style="display:none">' +
+            '<textarea id="cbInput" rows="1" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime"></textarea>' +
             '<button class="cb-send" type="submit" aria-label="Invia">&#8594;</button>' +
           '</form>' +
         '</aside>' +
@@ -221,8 +252,33 @@
     if (toggle && hero) toggle.addEventListener('click', function () { hero.classList.toggle('cb-collapsed'); });
     var form = $('cbForm');
     if (form) form.addEventListener('submit', onPrimeSubmit);
+    // Textarea che cresce mentre scrivi e torna piccola all'invio; Invio manda,
+    // Shift+Invio va a capo. Risolve anche il cursore che tornava all'inizio.
+    var ta = $('cbInput');
+    if (ta) {
+      var autoGrow = function () {
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.4)) + 'px';
+      };
+      ta.addEventListener('input', autoGrow);
+      ta.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); onPrimeSubmit(ev); }
+      });
+      window.__cbAutoGrow = autoGrow;
+    }
     var mic = $('cbMic');
     if (mic) mic.addEventListener('click', toggleListen);
+    var attachBtn = $('cbAttachBtn'), fileInput = $('cbFile');
+    if (attachBtn && fileInput) {
+      attachBtn.addEventListener('click', function () { fileInput.click(); });
+      fileInput.addEventListener('change', function () {
+        var list = fileInput.files ? Array.prototype.slice.call(fileInput.files) : [];
+        list.forEach(uploadAttachment);
+        fileInput.value = ''; // permette di riselezionare lo stesso file
+      });
+    }
+    var pasteInput = $('cbInput');
+    if (pasteInput) pasteInput.addEventListener('paste', onPrimePaste);
     var vb = $('cbVoice');
     if (vb) vb.addEventListener('click', function () { userEngaged = true; toggleVoice(); });
     primeSay('prime', 'Plancia online. Ti dò il quadro quando vuoi — chiedimi "cosa serve oggi?" e ti briffo. Premi il microfono per parlarmi a voce.');
@@ -244,7 +300,7 @@
     var log = $('cbLog'); if (!log) return;
     var m = el('div', 'cb-msg cb-from-prime');
     m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
-    log.appendChild(m); log.scrollTop = log.scrollHeight;
+    var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
   }
   // delegation cards: update-in-place by id (in_corso -> ok/errore), background-aware
   var _cbTasks = {};
@@ -263,7 +319,7 @@
     if (prev && prev.el) { prev.el.innerHTML = html; }
     else {
       var c = el('div', 'cb-deleg'); c.innerHTML = html;
-      log.appendChild(c); log.scrollTop = log.scrollHeight;
+      var _sb = nearBottom(log); log.appendChild(c); if (_sb) log.scrollTop = log.scrollHeight;
       _cbTasks[t.id] = { el: c, status: t.status };
     }
     if (prev && prev.status === 'in_corso' && t.status !== 'in_corso') {
@@ -290,7 +346,7 @@
         if (ph && ph.parentNode) {
           if (reply) {
             var bub = ph.querySelector('.cb-bubble');
-            if (bub) { bub.removeAttribute('style'); bub.textContent = reply; }
+            if (bub) { bub.removeAttribute('style'); renderRich(bub, reply); }
             if (userEngaged) speak(reply);
           } else { ph.parentNode.removeChild(ph); }
         }
@@ -317,6 +373,9 @@
       .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
       .replace(/^\s{0,3}#{1,6}\s+/gm, '')
       .replace(/^\s*[-*+]\s+/gm, '')
+      .replace(/^\s*\d+[.)]\s+/gm, '')
+      .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}]/gu, ' ')
+      .replace(/[•‣◦▪·–—→↑↓←»«]+/g, ' ')
       .replace(/[*_`#>~|]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
@@ -324,8 +383,8 @@
   function pendingBubble() {
     var log = $('cbLog'); if (!log) return null;
     var m = el('div', 'cb-msg cb-from-prime');
-    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div>';
-    log.appendChild(m); log.scrollTop = log.scrollHeight; return m;
+    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status">in corso</div>';
+    var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight; return m;
   }
   function streamPrimeResponse(response, handlers) {
     if (!response.ok) throw new Error('bridge ' + response.status);
@@ -542,7 +601,7 @@
       .then(function (res) {
         if (!res.ok) { sysNote('Trascrizione: ' + (res.d.error || 'errore lato server') + '.'); return; }
         var text = (res.d.transcript || '').trim(); if (!text) return;
-        var inp = $('cbInput'); if (inp) inp.value = text;
+        var inp = $('cbInput'); if (inp) { inp.value = text; if (window.__cbAutoGrow) window.__cbAutoGrow(); }
         var f = $('cbForm'); if (f && f.requestSubmit) f.requestSubmit(); else onPrimeSubmit({ preventDefault: function () {} });
       })
       .catch(function () { sysNote('Trascrizione non riuscita (motore STT locale raggiungibile?).'); })
@@ -555,40 +614,189 @@
     if (!voiceOn) { stopSpeak(); setOrb('idle', 0); }
   }
 
-  function primeSay(who, text) {
+  function primeSay(who, text, thumbs) {
     var log = $('cbLog'); if (!log) return;
     var m = el('div', 'cb-msg ' + (who === 'user' ? 'cb-from-user' : 'cb-from-prime'));
-    m.innerHTML = '<div class="cb-who">' + (who === 'user' ? 'tu' : 'hermes prime') + '</div><div class="cb-bubble">' + esc(text) + '</div>';
-    log.appendChild(m); log.scrollTop = log.scrollHeight;
+    var imgs = '';
+    if (thumbs && thumbs.length) {
+      imgs = thumbs.map(function (u) { return '<img src="' + u + '" alt="">'; }).join('');
+    }
+    var label;
+    if (text && text.trim()) {
+      label = (who === 'prime' && typeof window.renderMd === 'function') ? window.renderMd(text) : esc(text);
+    } else {
+      label = imgs ? '<em style="opacity:.6">foto allegata</em>' : '';
+    }
+    m.innerHTML = '<div class="cb-who">' + (who === 'user' ? 'tu' : 'hermes prime') + '</div>' +
+      '<div class="cb-bubble">' + label + imgs + '</div>';
+    var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
     if (who === 'prime' && userEngaged) speak(text);
   }
+  /* ── Allegati foto per Hermes Prime ─────────────────────────────────────── */
+  var pendingAttachments = []; // { name, path, url, type, size }
+
+  function humanSize(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+  function typeLabel(a) {
+    if (!a.path) return 'caricamento…';
+    var sub = String(a.type || '').split('/')[1] || 'immagine';
+    var label = sub.toUpperCase();
+    if (a.size) label += ' · ' + humanSize(a.size);
+    return label;
+  }
+
+  function renderAttachments() {
+    var bar = $('cbAtt'); if (!bar) return;
+    bar.innerHTML = '';
+    pendingAttachments.forEach(function (a, i) {
+      var chip = el('div', 'cb-chip' + (a.path ? '' : ' cb-chip-up'));
+      var thumb = a.url ? '<img src="' + a.url + '" alt="">' : '';
+      chip.innerHTML = thumb +
+        '<div class="cb-chip-info">' +
+          '<span class="cb-chip-name">' + esc(a.name) + '</span>' +
+          '<span class="cb-chip-type">' + esc(typeLabel(a)) + '</span>' +
+        '</div>' +
+        '<button type="button" aria-label="Rimuovi">×</button>';
+      chip.querySelector('button').addEventListener('click', function () {
+        pendingAttachments.splice(i, 1);
+        renderAttachments();
+      });
+      bar.appendChild(chip);
+    });
+  }
+
+  function uploadAttachment(file) {
+    if (!file || !/^image\//.test(file.type || '')) {
+      sysNote('Posso allegare solo immagini.');
+      return;
+    }
+    // Le immagini incollate (Ctrl+V) spesso arrivano senza nome/estensione: il
+    // server deduce il MIME dall'estensione, quindi gliene diamo una sensata.
+    var name = file.name || '';
+    if (!/\.[a-z0-9]{2,5}$/i.test(name)) {
+      var ext = (String(file.type || '').split('/')[1] || 'png').replace('jpeg', 'jpg');
+      name = (name || ('incolla-' + Date.now())) + '.' + ext;
+    }
+    var entry = { name: name, path: null, url: null, type: file.type || '', size: file.size || 0 };
+    try { entry.url = URL.createObjectURL(file); } catch (_e) {}
+    pendingAttachments.push(entry);
+    renderAttachments();
+    var form = new FormData();
+    form.append('file', file, name);
+    var cfg = window.__HERMES_CONFIG__ || {};
+    fetch(new URL('api/bridge/prime/upload', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: form
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.d || !res.d.path) {
+          var idx = pendingAttachments.indexOf(entry);
+          if (idx >= 0) pendingAttachments.splice(idx, 1);
+          renderAttachments();
+          sysNote((res.d && res.d.error) ? ('Allegato: ' + res.d.error) : 'Non sono riuscito a caricare l’immagine.');
+          return;
+        }
+        entry.path = res.d.path;
+        entry.name = res.d.filename || entry.name;
+        entry.type = res.d.mime || entry.type;
+        if (res.d.size) entry.size = res.d.size;
+        renderAttachments();
+      })
+      .catch(function () {
+        var idx = pendingAttachments.indexOf(entry);
+        if (idx >= 0) pendingAttachments.splice(idx, 1);
+        renderAttachments();
+        sysNote('Non sono riuscito a caricare l’immagine.');
+      });
+  }
+
+  function onPrimePaste(e) {
+    var dt = e && e.clipboardData;
+    if (!dt) return;
+    var items = dt.items ? Array.prototype.slice.call(dt.items) : [];
+    var imgs = items.filter(function (it) { return it.kind === 'file' && /^image\//.test(it.type || ''); });
+    // Fallback: alcuni browser espongono direttamente dt.files
+    if (!imgs.length && dt.files && dt.files.length) {
+      var files = Array.prototype.slice.call(dt.files).filter(function (f) { return /^image\//.test(f.type || ''); });
+      if (files.length) { e.preventDefault(); files.forEach(uploadAttachment); }
+      return;
+    }
+    if (!imgs.length) return; // nessuna immagine: lascia incollare il testo
+    e.preventDefault();
+    imgs.forEach(function (it) {
+      var f = it.getAsFile();
+      if (f) uploadAttachment(f);
+    });
+  }
+
   function onPrimeSubmit(e) {
     if (e && e.preventDefault) e.preventDefault();
     userEngaged = true;
     var inp = $('cbInput'); if (!inp) return;
-    var v = inp.value.trim(); if (!v) return;
+    var v = inp.value.trim();
+    var ready = pendingAttachments.filter(function (a) { return !!a.path; });
+    var stillUp = pendingAttachments.some(function (a) { return !a.path; });
+    if (!v && !ready.length) {
+      if (stillUp) sysNote('Aspetta che l’immagine finisca di caricare…');
+      return;
+    }
+    if (stillUp) { sysNote('Aspetta che l’immagine finisca di caricare…'); return; }
     inp.value = '';
-    primeSay('user', v);
+    inp.style.height = 'auto';
+    if (window.__cbAutoGrow) window.__cbAutoGrow();
+    var attachments = ready.map(function (a) { return { name: a.name, path: a.path }; });
+    var thumbs = ready.map(function (a) { return a.url; }).filter(Boolean);
+    pendingAttachments = [];
+    renderAttachments();
+    primeSay('user', v, thumbs);
     stopSpeak(); // un nuovo turno interrompe la voce precedente
     setOrb('thinking', 0);
     var ph = pendingBubble();
     var bubble = ph ? ph.querySelector('.cb-bubble') : null;
+    var statusLine = ph ? ph.querySelector('.cb-prime-status') : null;
     var reply = '', settled = false, speech = { spokenLen: 0 };
+    var showStatus = function (state, tool) {
+      var labels = {
+        queued: 'in coda\u2026',
+        reasoning: 'sto ragionando\u2026',
+        tool: 'uso lo strumento ' + (tool || '') + '\u2026',
+        responding: 'sta scrivendo\u2026',
+        done: '\u2713 completato'
+      };
+      var label = labels[state]; if (!label) return;
+      if (statusLine) statusLine.textContent = label;
+      if (!reply && bubble) bubble.textContent = label;
+      if (state === 'done' && bubble && !reply) bubble.textContent = 'Ricevuto.';
+    };
+    var finish = function (label) {
+      if (settled) return;
+      settled = true;
+      if (statusLine) statusLine.textContent = label || '\u2713 completato';
+      if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
+      flushSpokenSentences(reply, speech, true);
+      if (!_ttsActive) setOrb('idle', 0);
+    };
     var showToken = function (text) {
       text = String(text || ''); if (!text) return;
+      var log = $('cbLog'); var _sb = nearBottom(log);
       reply += text;
       if (bubble) {
         bubble.removeAttribute('style');
         bubble.textContent = reply;
       }
       flushSpokenSentences(reply, speech, false); // legge le frasi gia' complete
-      var log = $('cbLog'); if (log) log.scrollTop = log.scrollHeight;
+      if (_sb && log) log.scrollTop = log.scrollHeight;
     };
     var fail = function (text) {
       if (settled) return;
       settled = true;
       if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
-      ph = null; bubble = null;
+      ph = null; bubble = null; statusLine = null;
       sysNote(text);
       setOrb('idle', 0);
     };
@@ -596,17 +804,15 @@
     fetch(new URL('api/bridge/prime', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
-      body: JSON.stringify({ message: v })
+      body: JSON.stringify({ message: v, attachments: attachments })
     }).then(function (r) {
       return streamPrimeResponse(r, {
+        status: function (d) { showStatus(d && d.state, d && d.tool); },
         token: function (d) { showToken(d && d.text); },
         done: function (d) {
-          settled = true;
           if (!reply && d && d.reply) showToken(d.reply);
           if (!reply) showToken('Ricevuto.');
-          ph = null; bubble = null;
-          flushSpokenSentences(reply, speech, true); // legge l'ultima frase rimasta
-          if (!_ttsActive) setOrb('idle', 0); // niente voce in coda -> torna a riposo
+          finish('\u2713 completato');
           if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
         },
         error: function (d) {
@@ -614,7 +820,8 @@
         }
       });
     }).then(function () {
-      if (!settled) fail('La risposta di Hermes Prime si è interrotta prima del completamento.');
+      if (!settled && reply) finish('\u2713 risposta ricevuta');
+      else if (!settled) fail('La risposta di Hermes Prime si è interrotta prima del completamento.');
     })
       .catch(function () {
         fail('Non riesco a contattare Hermes Prime (bridge). Riprova tra poco.');
