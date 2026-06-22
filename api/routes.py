@@ -6082,6 +6082,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/agents":
         return _handle_bridge_agents(handler, parsed)
 
+    if parsed.path == "/api/bridge/worklog":
+        return _handle_bridge_worklog(handler, parsed)
+
     if parsed.path == "/api/projects/overview":
         return _handle_projects_overview(handler, parsed)
 
@@ -10738,6 +10741,21 @@ def _handle_bridge_agents(handler, parsed):
         data = agent_registry.get_agent_registry(Path(str(DEFAULT_WORKSPACE)))
     except Exception as exc:
         logger.exception("bridge agents failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    return j(handler, data) or True
+
+
+def _handle_bridge_worklog(handler, parsed):
+    """GET /api/bridge/worklog?days=14 — recent work wins for the flex panel."""
+    try:
+        from api import worklog
+
+        qs = parse_qs(parsed.query)
+        days = worklog.clamp_days(qs.get("days", [14])[0])
+        webui_repo = Path(__file__).resolve().parent.parent
+        data = worklog.get_worklog(Path(str(DEFAULT_WORKSPACE)), webui_repo, days=days)
+    except Exception as exc:
+        logger.exception("bridge worklog failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
     return j(handler, data) or True
 

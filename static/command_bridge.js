@@ -189,6 +189,23 @@
 '.cb-agent-name{font-family:var(--cb-disp);font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
 '.cb-agent-role{font-size:11px;line-height:1.35;color:var(--cb-muted);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
 '.cb-agent-meta{font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-faint);text-align:right;white-space:nowrap;}',
+'.cb-flex{border-bottom:1px solid var(--cb-line2);padding:12px 14px;background:rgba(255,255,255,.014);}',
+'.cb-flex-top{display:grid;grid-template-columns:minmax(82px,.9fr) minmax(0,1.4fr);gap:12px;align-items:center;}',
+'.cb-flex-num{font-family:var(--cb-disp);font-size:42px;font-weight:750;line-height:.9;color:#fff;}',
+'.cb-flex-label{font-family:var(--cb-mono);font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--cb-muted);margin-top:6px;}',
+'.cb-flex-delta{font-family:var(--cb-mono);font-size:10px;color:var(--cb-faint);margin-top:4px;}',
+'.cb-flex-badges{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;}',
+'.cb-flex-badge{border:1px solid var(--cb-line2);border-radius:999px;padding:4px 7px;font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-muted);background:rgba(0,0,0,.16);white-space:nowrap;}',
+'.cb-flex-badge.hot{color:#fff;border-color:rgba(255,138,61,.45);box-shadow:0 0 18px -12px var(--cb-accent);}',
+'.cb-flex-projects{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px;}',
+'.cb-flex-proj{border:1px solid var(--cb-line2);border-radius:8px;padding:7px;background:rgba(0,0,0,.16);min-width:0;}',
+'.cb-flex-proj .n{font-family:var(--cb-disp);font-size:15px;color:#fff;line-height:1;}',
+'.cb-flex-proj .l{font-family:var(--cb-mono);font-size:8.5px;text-transform:uppercase;color:var(--cb-faint);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-flex-recent{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:118px;overflow:auto;}',
+'.cb-flex-day{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);letter-spacing:.1em;text-transform:uppercase;margin-top:3px;}',
+'.cb-flex-item{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px;align-items:start;font-size:11px;color:var(--cb-text);line-height:1.28;}',
+'.cb-flex-tag{font-family:var(--cb-mono);font-size:8.5px;color:var(--cb-accent-2);border:1px solid var(--cb-line2);border-radius:6px;padding:2px 4px;white-space:nowrap;}',
+'.cb-flex-summary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
 '.cb-planet{position:relative;flex:1;min-height:0;}',
 '.cb-planet canvas{display:block;}',
 '@media(max-width:980px){.cb-mem{display:none;}.cb-petals{left:0;right:0;}}',
@@ -293,6 +310,9 @@
               '<summary><span>Agenti</span><span class="cb-agents-count" id="cbAgentsCount">--</span></summary>' +
               '<div class="cb-agent-list" id="cbAgentList"><div class="cb-empty">caricamento agenti</div></div>' +
             '</details>' +
+            '<section class="cb-flex" id="cbFlex">' +
+              '<div class="cb-empty">caricamento work log</div>' +
+            '</section>' +
             '<div class="cb-planet" id="cbPlanet"></div>' +
             '<div class="cb-stats" id="cbStats"></div>' +
           '</div>' +
@@ -435,6 +455,11 @@
     api('api/bridge/agents').then(renderAgents).catch(function () {});
   }
   function startAgentsPolling() { if (!_cbAgentsTimer) _cbAgentsTimer = setInterval(pollAgents, 30000); }
+  var _cbWorklogTimer = null;
+  function pollWorklog() {
+    api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {});
+  }
+  function startWorklogPolling() { if (!_cbWorklogTimer) _cbWorklogTimer = setInterval(pollWorklog, 60000); }
   // Strip markdown so the TTS doesn't read "asterisco asterisco" etc.
   function cleanForSpeech(t) {
     return String(t || '')
@@ -1019,6 +1044,54 @@
     }).join('');
   }
 
+  function renderWorklog(data) {
+    var box = $('cbFlex');
+    if (!box) return;
+    if (!data || data.ok === false) {
+      box.innerHTML = '<div class="cb-empty">work log non disponibile</div>';
+      return;
+    }
+    var today = Number(data.today_count || 0);
+    var yesterday = Number(data.yesterday_count || 0);
+    var record = Number(data.record_count || 0);
+    var streak = Number(data.streak_days || 0);
+    var totals = data.totals_by_project || {};
+    var isRecord = record > 0 && today >= record;
+    var projects = ['Hermes', 'VisionBuilts', 'Rap'];
+    var recent = (data.recent || []).slice(0, 8);
+    var lastDate = '';
+    var recentHtml = recent.length ? recent.map(function (r) {
+      var day = r.date || '';
+      var head = day !== lastDate ? '<div class="cb-flex-day">' + esc(day) + '</div>' : '';
+      lastDate = day;
+      return head +
+        '<div class="cb-flex-item">' +
+          '<span class="cb-flex-tag">' + esc(r.project || 'Altro') + '</span>' +
+          '<span class="cb-flex-summary">' + esc(r.summary || r.type || '') + '</span>' +
+        '</div>';
+    }).join('') : '<div class="cb-empty">nessun evento recente</div>';
+    box.innerHTML =
+      '<div class="cb-flex-top">' +
+        '<div>' +
+          '<div class="cb-flex-num">' + today + '</div>' +
+          '<div class="cb-flex-label">oggi</div>' +
+          '<div class="cb-flex-delta">ieri ' + yesterday + ' &rarr; oggi ' + today + '</div>' +
+        '</div>' +
+        '<div>' +
+          '<div class="cb-flex-badges">' +
+            '<span class="cb-flex-badge ' + (isRecord ? 'hot' : '') + '">' + (isRecord ? '&#128293; ' : '') + 'record ' + record + '</span>' +
+            '<span class="cb-flex-badge">streak ' + streak + 'g</span>' +
+          '</div>' +
+          '<div class="cb-flex-projects">' +
+            projects.map(function (p) {
+              return '<div class="cb-flex-proj"><div class="n">' + Number(totals[p] || 0) + '</div><div class="l">' + esc(p) + '</div></div>';
+            }).join('') +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="cb-flex-recent">' + recentHtml + '</div>';
+  }
+
   // Phase 4 will fly the planet camera here; for now scroll to the stage and pulse.
   function focusProject(id, path) {
     try { document.dispatchEvent(new CustomEvent('cb:focus-project', { detail: { id: id, path: path } })); } catch (e) {}
@@ -1047,6 +1120,9 @@
     });
     api('api/bridge/agents').then(renderAgents).catch(function () {
       var list = $('cbAgentList'); if (list) list.innerHTML = '<div class="cb-empty">agenti non disponibili</div>';
+    });
+    api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {
+      var box = $('cbFlex'); if (box) box.innerHTML = '<div class="cb-empty">work log non disponibile</div>';
     });
   }
 
@@ -1228,6 +1304,7 @@
     refresh();
     startTaskPolling();
     startAgentsPolling();
+    startWorklogPolling();
     return Promise.resolve();
   };
 })();
