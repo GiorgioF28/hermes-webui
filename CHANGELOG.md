@@ -4,6 +4,7 @@
 ## [Unreleased]
 
 ### Added
+- Added Hermes Night Shift offline utilities: a deterministic briefing packet builder, safe `tasks/today.md` archive-before-write plan writer, daily worklog detail archive, PowerShell runner with `-DryRun`, and Task Scheduler command output for a 05:00 local schedule.
 - Added a local `Work` view for 60-minute Deep Focus sessions. It prioritizes urgent P0 work, rotates projects using recent focus time, shows floating project bubbles and project tasks, persists session history in `tasks/work-sessions.json`, and can create or reopen a project-specific chat.
 - Added a Command Bridge agent registry backed by `obsidian-vault/06-Agents` and a best-effort `tasks/agent-usage.jsonl` ledger, showing live/dormant agents, model, role, and last use.
 - Added a Command Bridge Work Log flex panel backed by `/api/bridge/worklog`, aggregating recent git commits and completed markdown tasks into daily wins, project tallies, records, streaks, and concise recent activity.
