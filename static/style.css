@@ -1574,7 +1574,11 @@
   .cc-cluster-name{font-weight:700;font-size:13px;letter-spacing:.02em;}
   .cc-cluster-meta{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
   .cc-cluster-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
-  .cc-cockpit-card{display:grid;grid-template-columns:minmax(0,1fr) minmax(190px,.82fr);gap:12px;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);padding:12px;min-width:0;}
+  .cc-cockpit-card{position:relative;display:grid;grid-template-columns:minmax(0,1fr) minmax(190px,.82fr);gap:12px;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);padding:12px 12px 12px 26px;min-width:0;}
+  .cc-drag-handle{position:absolute;left:4px;top:10px;bottom:10px;width:16px;padding:0;border:0;border-radius:5px;background:transparent;color:var(--muted);cursor:grab;opacity:.4;background-image:radial-gradient(currentColor 1.1px,transparent 1.4px);background-size:6px 6px;background-position:center;transition:opacity .12s ease,background-color .12s ease;}
+  .cc-drag-handle:hover{opacity:.85;background-color:var(--border);}
+  .cc-drag-handle:active{cursor:grabbing;}
+  .cc-cockpit-card.cc-dragging{opacity:.55;outline:1px dashed var(--accent,#6c8cff);}
   .cc-cockpit-main,.cc-cockpit-side{min-width:0;}
   .cc-cockpit-side{border-left:1px solid var(--border);padding-left:12px;}
   .cc-cockpit-note{display:flex;align-items:baseline;gap:6px;min-width:0;font-size:11px;color:var(--muted);line-height:1.35;margin-bottom:8px;}

@@ -4676,6 +4676,69 @@ async function prepareJarvisBriefChat() {
   if (typeof showToast === 'function') showToast('Jarvis brief portato in chat.');
 }
 
+const CC_COCKPIT_ORDER_KEY = 'cc_cockpit_order_v1';
+function _ccLoadCockpitOrder() {
+  try { return JSON.parse(localStorage.getItem(CC_COCKPIT_ORDER_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+function _ccPersistCockpitOrder(root) {
+  if (!root) return;
+  let map;
+  try { map = JSON.parse(localStorage.getItem(CC_COCKPIT_ORDER_KEY) || '{}') || {}; }
+  catch (e) { map = {}; }
+  root.querySelectorAll('.cc-cluster').forEach(section => {
+    const cid = section.getAttribute('data-cluster');
+    if (!cid) return;
+    const ids = [...section.querySelectorAll('.cc-cockpit-card')]
+      .map(card => card.getAttribute('data-project-id'))
+      .filter(Boolean);
+    if (ids.length) map[cid] = ids;
+  });
+  try { localStorage.setItem(CC_COCKPIT_ORDER_KEY, JSON.stringify(map)); } catch (e) {}
+}
+function _ccDragAfterCard(container, y) {
+  const cards = [...container.querySelectorAll('.cc-cockpit-card:not(.cc-dragging)')];
+  let closest = null;
+  let closestOffset = Number.NEGATIVE_INFINITY;
+  cards.forEach(card => {
+    const box = card.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closestOffset) { closestOffset = offset; closest = card; }
+  });
+  return closest;
+}
+function _ccAttachCockpitDnd(root) {
+  if (!root) return;
+  root.querySelectorAll('.cc-cluster-cards').forEach(container => {
+    container.querySelectorAll('.cc-cockpit-card').forEach(card => {
+      // Only allow drag when the gesture starts on the handle, so buttons keep working.
+      card.addEventListener('mousedown', e => {
+        card.draggable = !!(e.target && e.target.closest && e.target.closest('.cc-drag-handle'));
+      });
+      card.addEventListener('dragstart', e => {
+        card.classList.add('cc-dragging');
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', card.getAttribute('data-project-id') || ''); } catch (_) {}
+        }
+      });
+      card.addEventListener('dragend', () => {
+        card.classList.remove('cc-dragging');
+        card.draggable = false;
+        _ccPersistCockpitOrder(root);
+      });
+    });
+    container.addEventListener('dragover', e => {
+      const dragging = container.querySelector('.cc-dragging');
+      if (!dragging) return; // ignore cards dragged from another cluster
+      e.preventDefault();
+      const after = _ccDragAfterCard(container, e.clientY);
+      if (after == null) container.appendChild(dragging);
+      else container.insertBefore(dragging, after);
+    });
+  });
+}
+
 function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
   const title = $(titleId);
   const body = $(bodyId);
@@ -4803,14 +4866,15 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
       <div class="cc-list-body">${esc(note.next_action || note.status || note.goal || '')}</div>
       <div class="cc-card-actions">${_ccPathButton(note.path)}</div>
     </article>`).join('') : `<div class="memory-empty">${esc(t('daily_command_no_notes'))}</div>`;
-  const _ccRenderCockpitCard = (item) => {
+  const _ccRenderCockpitCard = (item, clusterId) => {
     const project = item.project || {};
     const note = item.note || null;
     const tasks = _ccLimitRows(item.open_tasks, 3);
     const taskHtml = tasks.length
       ? `<ul class="cc-cockpit-tasks">${tasks.map(task => `<li><strong>${esc(task.priority || '')}</strong><span title="${esc(task.title || task.task_id || '')}">${esc(task.title || task.task_id || '')}</span>${_ccTaskChatButton(task, project)}${_ccTaskStatusButton(task)}</li>`).join('')}</ul>`
       : `<div class="cc-cockpit-empty">${esc(t('daily_command_no_project_tasks'))}</div>`;
-    return `<article class="cc-cockpit-card">
+    return `<article class="cc-cockpit-card" data-project-id="${esc(String(project.project_id || ''))}" data-cluster="${esc(String(clusterId || ''))}">
+      <button type="button" class="cc-drag-handle" title="Trascina per riordinare" aria-label="Riordina"></button>
       <div class="cc-cockpit-main">
         <div class="cc-list-title">${esc(project.name || project.project_id || '')}</div>
         <div class="cc-list-meta">${esc(project.project_id || '')}${project.ai_agent ? ` Â· ${esc(project.ai_agent)}` : ''}${item.open_task_count ? ` Â· ${esc(String(item.open_task_count))} ${esc(t('daily_command_tasks'))}` : ''}</div>
@@ -4837,6 +4901,13 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
     const projects = members.length === 1 ? '1 progetto' : `${members.length} progetti`;
     return tasks ? `${projects} (${tasks} task)` : projects;
   };
+  const _ccOrderMap = _ccLoadCockpitOrder();
+  const _ccApplyOrder = (members, clusterId) => {
+    const saved = _ccOrderMap[clusterId];
+    if (!Array.isArray(saved) || !saved.length) return members;
+    const rank = (id) => { const i = saved.indexOf(id); return i === -1 ? saved.length + 1 : i; };
+    return [...members].sort((a, b) => rank(String((a.project || {}).project_id || '')) - rank(String((b.project || {}).project_id || '')));
+  };
   let cockpitRows;
   if (cockpit.length) {
     const visible = cockpit.filter(item => !CC_PROJECT_HIDDEN.has(String((item.project || {}).project_id || '')));
@@ -4846,11 +4917,13 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
       const members = visible.filter(item => cluster.ids.includes(String((item.project || {}).project_id || '')));
       if (!members.length) return;
       members.forEach(item => used.add(item));
-      sections.push(`<section class="cc-cluster" data-cluster="${esc(cluster.id)}"><div class="cc-cluster-head"><span class="cc-cluster-name">${esc(cluster.label)}</span><span class="cc-cluster-meta">${esc(_ccClusterMeta(members))}</span></div><div class="cc-cluster-cards">${members.map(_ccRenderCockpitCard).join('')}</div></section>`);
+      const ordered = _ccApplyOrder(members, cluster.id);
+      sections.push(`<section class="cc-cluster" data-cluster="${esc(cluster.id)}"><div class="cc-cluster-head"><span class="cc-cluster-name">${esc(cluster.label)}</span><span class="cc-cluster-meta">${esc(_ccClusterMeta(members))}</span></div><div class="cc-cluster-cards">${ordered.map(item => _ccRenderCockpitCard(item, cluster.id)).join('')}</div></section>`);
     });
     const rest = visible.filter(item => !used.has(item));
     if (rest.length) {
-      sections.push(`<section class="cc-cluster" data-cluster="altro"><div class="cc-cluster-head"><span class="cc-cluster-name">Altro</span><span class="cc-cluster-meta">${esc(_ccClusterMeta(rest))}</span></div><div class="cc-cluster-cards">${rest.map(_ccRenderCockpitCard).join('')}</div></section>`);
+      const orderedRest = _ccApplyOrder(rest, 'altro');
+      sections.push(`<section class="cc-cluster" data-cluster="altro"><div class="cc-cluster-head"><span class="cc-cluster-name">Altro</span><span class="cc-cluster-meta">${esc(_ccClusterMeta(rest))}</span></div><div class="cc-cluster-cards">${orderedRest.map(item => _ccRenderCockpitCard(item, 'altro')).join('')}</div></section>`);
     }
     cockpitRows = sections.length ? sections.join('') : `<div class="memory-empty">${esc(t('daily_command_no_projects'))}</div>`;
   } else {
@@ -4929,6 +5002,7 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
     </div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
+  _ccAttachCockpitDnd(body);
   if (opts.memory) {
     _memoryMode = 'read';
     _setMemoryHeaderButtons('read');
