@@ -6079,6 +6079,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/tasks":
         return _handle_bridge_tasks(handler, parsed)
 
+    if parsed.path == "/api/bridge/agents":
+        return _handle_bridge_agents(handler, parsed)
+
     if parsed.path == "/api/projects/overview":
         return _handle_projects_overview(handler, parsed)
 
@@ -10726,6 +10729,17 @@ def _handle_bridge_tasks(handler, parsed):
         logger.exception("bridge tasks failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
     return j(handler, {"ok": True, "tasks": tasks}) or True
+
+
+def _handle_bridge_agents(handler, parsed):
+    """GET /api/bridge/agents — registro vivo/dormiente degli agenti Hermes."""
+    try:
+        from api import agent_registry
+        data = agent_registry.get_agent_registry(Path(str(DEFAULT_WORKSPACE)))
+    except Exception as exc:
+        logger.exception("bridge agents failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    return j(handler, data) or True
 
 
 def _handle_projects_overview(handler, parsed):

@@ -175,6 +175,20 @@
 '.cb-mem-head{display:flex;align-items:center;gap:9px;padding:13px 16px;border-bottom:1px solid var(--cb-line2);',
 '  font-family:var(--cb-mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--cb-muted);}',
 '.cb-mem-dot{width:7px;height:7px;border-radius:50%;background:var(--cb-accent);box-shadow:0 0 8px var(--cb-accent);flex:0 0 auto;}',
+'.cb-agents{border-bottom:1px solid var(--cb-line2);background:rgba(255,255,255,.018);}',
+'.cb-agents summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;cursor:pointer;',
+'  font-family:var(--cb-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--cb-muted);}',
+'.cb-agents summary::-webkit-details-marker{display:none;}',
+'.cb-agents summary:hover{color:var(--cb-text);}',
+'.cb-agents-count{color:var(--cb-accent-2);font-weight:600;letter-spacing:.08em;}',
+'.cb-agent-list{max-height:240px;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:8px;}',
+'.cb-agent-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:9px;align-items:start;border:1px solid var(--cb-line2);',
+'  border-radius:8px;padding:8px;background:rgba(0,0,0,.18);}',
+'.cb-agent-state{width:8px;height:8px;border-radius:50%;margin-top:4px;background:#6b7280;box-shadow:0 0 8px rgba(107,114,128,.35);}',
+'.cb-agent-state.cb-live{background:#48c774;box-shadow:0 0 10px rgba(72,199,116,.65);}',
+'.cb-agent-name{font-family:var(--cb-disp);font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-agent-role{font-size:11px;line-height:1.35;color:var(--cb-muted);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
+'.cb-agent-meta{font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-faint);text-align:right;white-space:nowrap;}',
 '.cb-planet{position:relative;flex:1;min-height:0;}',
 '.cb-planet canvas{display:block;}',
 '@media(max-width:980px){.cb-mem{display:none;}.cb-petals{left:0;right:0;}}',
@@ -275,6 +289,10 @@
           '</div>' +
           '<div class="cb-mem" id="cbMem">' +
             '<div class="cb-mem-head"><span class="cb-mem-dot"></span>Memoria · Vault</div>' +
+            '<details class="cb-agents" id="cbAgents" open>' +
+              '<summary><span>Agenti</span><span class="cb-agents-count" id="cbAgentsCount">--</span></summary>' +
+              '<div class="cb-agent-list" id="cbAgentList"><div class="cb-empty">caricamento agenti</div></div>' +
+            '</details>' +
             '<div class="cb-planet" id="cbPlanet"></div>' +
             '<div class="cb-stats" id="cbStats"></div>' +
           '</div>' +
@@ -412,6 +430,11 @@
     }).catch(function () {});
   }
   function startTaskPolling() { if (!_cbPollTimer) _cbPollTimer = setInterval(pollTasks, 3000); }
+  var _cbAgentsTimer = null;
+  function pollAgents() {
+    api('api/bridge/agents').then(renderAgents).catch(function () {});
+  }
+  function startAgentsPolling() { if (!_cbAgentsTimer) _cbAgentsTimer = setInterval(pollAgents, 30000); }
   // Strip markdown so the TTS doesn't read "asterisco asterisco" etc.
   function cleanForSpeech(t) {
     return String(t || '')
@@ -969,6 +992,33 @@
     });
   }
 
+  function renderAgents(data) {
+    var list = $('cbAgentList'), count = $('cbAgentsCount');
+    if (!list) return;
+    var agents = (data && data.agents) || [];
+    if (count) {
+      var live = agents.filter(function (a) { return a && a.state === 'vivo'; }).length;
+      count.textContent = live + '/' + agents.length + ' vivi';
+    }
+    if (!agents.length) {
+      list.innerHTML = '<div class="cb-empty">nessun agente trovato</div>';
+      return;
+    }
+    list.innerHTML = agents.map(function (a) {
+      var live = a.state === 'vivo';
+      var last = a.last_used && a.last_used.rel ? a.last_used.rel : 'mai';
+      return '' +
+        '<div class="cb-agent-row">' +
+          '<span class="cb-agent-state ' + (live ? 'cb-live' : '') + '"></span>' +
+          '<div style="min-width:0">' +
+            '<div class="cb-agent-name">' + esc(a.name || 'Agente') + '</div>' +
+            '<div class="cb-agent-role">' + esc(a.role || '') + '</div>' +
+          '</div>' +
+          '<div class="cb-agent-meta">' + esc(a.model || 'auto') + '<br>' + esc(last) + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
   // Phase 4 will fly the planet camera here; for now scroll to the stage and pulse.
   function focusProject(id, path) {
     try { document.dispatchEvent(new CustomEvent('cb:focus-project', { detail: { id: id, path: path } })); } catch (e) {}
@@ -994,6 +1044,9 @@
     api('api/vault/graph').then(function (g) { renderStats(g); mountPlanet(g); }).catch(function () {});
     api('api/projects/overview').then(renderProjects).catch(function () {
       var grid = $('cbGrid'); if (grid) grid.innerHTML = '<div class="cb-loading">vault non disponibile.</div>';
+    });
+    api('api/bridge/agents').then(renderAgents).catch(function () {
+      var list = $('cbAgentList'); if (list) list.innerHTML = '<div class="cb-empty">agenti non disponibili</div>';
     });
   }
 
@@ -1174,6 +1227,7 @@
     if (!BUILT) { if (!build()) return Promise.resolve(); }
     refresh();
     startTaskPolling();
+    startAgentsPolling();
     return Promise.resolve();
   };
 })();

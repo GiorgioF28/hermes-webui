@@ -5,6 +5,7 @@
 
 ### Added
 - Added a local `Work` view for 60-minute Deep Focus sessions. It prioritizes urgent P0 work, rotates projects using recent focus time, shows floating project bubbles and project tasks, persists session history in `tasks/work-sessions.json`, and can create or reopen a project-specific chat.
+- Added a Command Bridge agent registry backed by `obsidian-vault/06-Agents` and a best-effort `tasks/agent-usage.jsonl` ledger, showing live/dormant agents, model, role, and last use.
 - Hermes Prime delegation can now load an optional worker persona from `obsidian-vault/06-Agents`, and successful delegated Agent Results enqueue a best-effort Memory Librarian pass with the workspace memory MCP servers (`hermes-memory`, `notion`) plus `sync-hermes-brain`.
 
 ### Changed

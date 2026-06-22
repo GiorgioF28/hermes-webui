@@ -376,6 +376,12 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             "task_type": task_type,
             "task": task, "status": "in_corso", "output": "", "started": time.time(), "finished": None,
         }
+        if agent_id:
+            try:
+                from api.agent_registry import record_agent_usage
+                record_agent_usage(workspace, agent_id, task_type, task_id)
+            except Exception:
+                logger.debug("agent usage ledger append failed", exc_info=True)
         # Avvia in background: Prime torna subito a parlare con l'utente.
         fut = asyncio.ensure_future(_run_and_store(task_id, task_type, task, model, label, workspace))
         _BG_REFS.add(fut)

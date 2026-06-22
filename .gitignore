@@ -29,6 +29,7 @@ copilot-instructions.md
 screenshot-*.png
 full-UI.png
 *.log
+tasks/agent-usage.jsonl
 
 # Version file written by Docker/CI build — generated, never committed
 api/_version.py
