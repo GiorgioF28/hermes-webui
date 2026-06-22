@@ -5,6 +5,7 @@
 
 ### Added
 - Added a local `Work` view for 60-minute Deep Focus sessions. It prioritizes urgent P0 work, rotates projects using recent focus time, shows floating project bubbles and project tasks, persists session history in `tasks/work-sessions.json`, and can create or reopen a project-specific chat.
+- Hermes Prime delegation can now load an optional worker persona from `obsidian-vault/06-Agents`, and successful delegated Agent Results enqueue a best-effort Memory Librarian pass with the workspace memory MCP servers (`hermes-memory`, `notion`) plus `sync-hermes-brain`.
 
 ### Changed
 - Hermes Prime replies in the Command Bridge now stream token-by-token over SSE instead of appearing only after the full Claude turn completes. The existing Vault Planet state, TTS playback, and asynchronous delegation polling remain unchanged.
