@@ -1568,7 +1568,12 @@
   .cc-health-green{border-color:color-mix(in srgb,var(--success) 45%,var(--border));}
   .cc-health-yellow{border-color:color-mix(in srgb,var(--warning) 45%,var(--border));}
   .cc-health-red{border-color:color-mix(in srgb,var(--error) 45%,var(--border));}
-  .cc-cockpit-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+  .cc-cockpit-list{display:flex;flex-direction:column;gap:14px;}
+  .cc-cluster{border:1px solid var(--border);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:10px;}
+  .cc-cluster-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:0 2px;}
+  .cc-cluster-name{font-weight:700;font-size:13px;letter-spacing:.02em;}
+  .cc-cluster-meta{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
+  .cc-cluster-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
   .cc-cockpit-card{display:grid;grid-template-columns:minmax(0,1fr) minmax(190px,.82fr);gap:12px;border:1px solid var(--border);border-radius:8px;background:var(--input-bg);padding:12px;min-width:0;}
   .cc-cockpit-main,.cc-cockpit-side{min-width:0;}
   .cc-cockpit-side{border-left:1px solid var(--border);padding-left:12px;}
@@ -1604,7 +1609,7 @@
     .cc-hero{align-items:stretch;flex-direction:column;}
     .cc-stat-grid{min-width:0;}
     .cc-grid{grid-template-columns:1fr;}
-    .cc-cockpit-list{grid-template-columns:1fr;}
+    .cc-cluster-cards{grid-template-columns:1fr;}
   }
   @media (max-width: 520px){
     .cc-stat-grid{grid-template-columns:1fr;}

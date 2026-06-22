@@ -4699,7 +4699,7 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
   const projects = _ccLimitRows(data.active_projects, 8);
   const backlog = _ccLimitRows(data.open_backlog, 8);
   const notes = _ccLimitRows(data.project_notes, 6);
-  const cockpit = _ccLimitRows(data.project_cockpit, 6);
+  const cockpit = _ccLimitRows(data.project_cockpit, 24);
   const queue = _ccLimitRows(data.action_queue, 8);
   const automations = _ccLimitRows(data.automations, 8);
   const agents = _ccLimitRows((_controlCenterAgents && _controlCenterAgents.agents) || [], 8);
@@ -4803,7 +4803,7 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
       <div class="cc-list-body">${esc(note.next_action || note.status || note.goal || '')}</div>
       <div class="cc-card-actions">${_ccPathButton(note.path)}</div>
     </article>`).join('') : `<div class="memory-empty">${esc(t('daily_command_no_notes'))}</div>`;
-  const cockpitRows = cockpit.length ? cockpit.map(item => {
+  const _ccRenderCockpitCard = (item) => {
     const project = item.project || {};
     const note = item.note || null;
     const tasks = _ccLimitRows(item.open_tasks, 3);
@@ -4825,7 +4825,37 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
         ${taskHtml}
       </div>
     </article>`;
-  }).join('') : `<div class="memory-empty">${esc(t('daily_command_no_projects'))}</div>`;
+  };
+  const CC_PROJECT_CLUSTERS = [
+    {id:'hermes', label:'Hermes', ids:['hermes','hermes-control-center','hermes-webui']},
+    {id:'visionbuilts', label:'VisionBuilts', ids:['giorgiof28-creator-earning-engine','giorgiof28-visionbuilts-console','visionbuilts-ebook-platform']},
+    {id:'podcast-rap', label:'Podcast e Produzione Rap', ids:['rap-music-production']},
+  ];
+  const CC_PROJECT_HIDDEN = new Set(['carol-company-application']);
+  const _ccClusterMeta = (members) => {
+    const tasks = members.reduce((n, item) => n + (Number(item.open_task_count) || 0), 0);
+    const projects = members.length === 1 ? '1 progetto' : `${members.length} progetti`;
+    return tasks ? `${projects} (${tasks} task)` : projects;
+  };
+  let cockpitRows;
+  if (cockpit.length) {
+    const visible = cockpit.filter(item => !CC_PROJECT_HIDDEN.has(String((item.project || {}).project_id || '')));
+    const used = new Set();
+    const sections = [];
+    CC_PROJECT_CLUSTERS.forEach(cluster => {
+      const members = visible.filter(item => cluster.ids.includes(String((item.project || {}).project_id || '')));
+      if (!members.length) return;
+      members.forEach(item => used.add(item));
+      sections.push(`<section class="cc-cluster" data-cluster="${esc(cluster.id)}"><div class="cc-cluster-head"><span class="cc-cluster-name">${esc(cluster.label)}</span><span class="cc-cluster-meta">${esc(_ccClusterMeta(members))}</span></div><div class="cc-cluster-cards">${members.map(_ccRenderCockpitCard).join('')}</div></section>`);
+    });
+    const rest = visible.filter(item => !used.has(item));
+    if (rest.length) {
+      sections.push(`<section class="cc-cluster" data-cluster="altro"><div class="cc-cluster-head"><span class="cc-cluster-name">Altro</span><span class="cc-cluster-meta">${esc(_ccClusterMeta(rest))}</span></div><div class="cc-cluster-cards">${rest.map(_ccRenderCockpitCard).join('')}</div></section>`);
+    }
+    cockpitRows = sections.length ? sections.join('') : `<div class="memory-empty">${esc(t('daily_command_no_projects'))}</div>`;
+  } else {
+    cockpitRows = `<div class="memory-empty">${esc(t('daily_command_no_projects'))}</div>`;
+  }
 
   body.innerHTML = `
     <div class="main-view-content control-center-view">
