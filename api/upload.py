@@ -325,6 +325,47 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     return {'extracted': len(extracted_files), 'files': extracted_files, 'dest': str(dest_dir)}
 
 
+def handle_prime_upload(handler):
+    """POST /api/bridge/prime/upload — attach an image for Hermes Prime.
+
+    Hermes Prime (Command Bridge) is a persistent SDK session, not a chat
+    session, so it has no get_session() entry. Attachments land in the dedicated
+    'hermes-prime' inbox, which the SDK factory already adds to the Prime
+    client's add_dirs — so Prime can read them with its Read tool. Images only:
+    the bridge attach button is for photos.
+    """
+    import traceback as _tb
+    try:
+        content_type = handler.headers.get('Content-Type', '')
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        if content_length > MAX_UPLOAD_BYTES:
+            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        if 'file' not in files:
+            return j(handler, {'error': 'No file field in request'}, status=400)
+        filename, file_bytes = files['file']
+        if not filename:
+            return j(handler, {'error': 'No filename in upload'}, status=400)
+        safe_name = _sanitize_upload_name(filename)
+        mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+        if not mime.startswith('image/'):
+            return j(handler, {'error': 'Solo immagini sono supportate qui'}, status=400)
+        dest = _upload_destination('hermes-prime', safe_name)
+        dest.write_bytes(file_bytes)
+        return j(handler, {
+            'filename': dest.name,
+            'path': str(dest),
+            'size': dest.stat().st_size,
+            'mime': mime,
+            'is_image': True,
+        })
+    except ValueError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    except Exception:
+        print('[webui] prime upload error: ' + _tb.format_exc(), flush=True)
+        return j(handler, {'error': 'Upload failed'}, status=500)
+
+
 def handle_upload_extract(handler):
     """Handle archive upload and extraction."""
     import traceback as _tb

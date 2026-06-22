@@ -39,7 +39,20 @@ _TASK_SEQ = itertools.count(1)
 _WORKER_PERSONA = (
     "Sei un sotto-agente operativo di Hermes. Esegui il task assegnato in modo "
     "concreto e conciso. Rispondi SOLO con il risultato/esito, niente preamboli. "
-    "Rispondi in italiano."
+    "Rispondi in italiano.\n"
+    "\n"
+    "REGOLE DI SICUREZZA (vincolanti):\n"
+    "1) NON rompere il sistema in esecuzione. Hermes gira live sulla 8788 mentre "
+    "l'utente lo usa: non modificare il codice in modo da romperlo.\n"
+    "2) Le modifiche al codice devono essere COMPLETE e COERENTI, mai a metà. Se "
+    "tocchi un endpoint backend e il suo consumo frontend, vanno fatti INSIEME.\n"
+    "3) Non dare per scontato che una modifica sia 'live': i .py richiedono RIAVVIO "
+    "del server, i .js/.css richiedono Ctrl+F5. NON riavviare tu: SEGNALA che serve "
+    "un riavvio e lascia decidere all'utente.\n"
+    "4) Non toccare le parti che gia' funzionano (Command Bridge: pianeta 3D, voce, "
+    "delega asincrona). Se un task tocca file condivisi, segnala il rischio.\n"
+    "5) Scritture/azioni distruttive: niente senza necessita' chiara. Mai salvare "
+    "segreti/credenziali (token, password, API key, OAuth, auth.json)."
 )
 
 
@@ -76,6 +89,18 @@ def get_background_tasks(max_age: float = 600.0) -> list:
         })
     out.sort(key=lambda x: x["id"])
     return out
+
+
+def get_background_task(task_id: str) -> dict | None:
+    """Snapshot JSON-safe di una singola delega (per il brief automatico)."""
+    t = _BG_TASKS.get(task_id)
+    if not t:
+        return None
+    return {
+        "id": t["id"], "agent": t["agent"], "task_type": t["task_type"],
+        "task": t["task"], "status": t["status"], "output": t.get("output", ""),
+        "finished": t.get("finished"),
+    }
 
 
 def _model_for(task_type: str):

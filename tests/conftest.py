@@ -587,7 +587,13 @@ def test_server():
     real_skills  = HERMES_HOME / 'skills'
     test_skills  = TEST_STATE_DIR / 'skills'
     if real_skills.exists() and not test_skills.exists():
-        test_skills.symlink_to(real_skills)
+        try:
+            test_skills.symlink_to(real_skills)
+        except OSError:
+            # Windows without Developer Mode / admin can't create symlinks
+            # (WinError 1314). Skill-dependent tests are gated separately; the
+            # rest of the suite must still be able to run, so degrade quietly.
+            pass
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)

@@ -47,6 +47,15 @@ class _LoopThread:
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result(timeout=timeout)
 
+    def submit_future(self, coro: Awaitable[Any]):
+        """Schedule a coroutine and return its concurrent.futures.Future.
+
+        Unlike submit(), this does not block: the caller can poll the future
+        with its own (e.g. progress-aware) deadline. Cancelling the returned
+        future propagates cancellation to the underlying asyncio task.
+        """
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+
     def submit_nowait(self, coro: Awaitable[Any]) -> None:
         asyncio.run_coroutine_threadsafe(coro, self._loop)
 
@@ -92,6 +101,23 @@ class ClaudeSessionRegistry:
         with self._mutex:
             self._entries[session_id].last_used = time.time()
         return self._loop.submit(_guarded(), timeout=timeout)
+
+    def submit_turn(self, session_id: str, coro_factory: Callable[[Any], Awaitable[Any]]):
+        """Like run_turn but returns the future without blocking.
+
+        Lets the caller enforce a progress-aware deadline (e.g. abort only when
+        the turn truly stalls) instead of a fixed wall-clock timeout.
+        """
+        client = self.get(session_id)
+        if client is None:
+            raise KeyError(session_id)
+        async def _guarded():
+            entry = self._entries[session_id]
+            async with entry.lock:
+                return await coro_factory(client)
+        with self._mutex:
+            self._entries[session_id].last_used = time.time()
+        return self._loop.submit_future(_guarded())
 
     def close(self, session_id: str) -> None:
         with self._mutex:

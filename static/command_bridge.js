@@ -26,6 +26,13 @@
     return fetch(new URL(path, document.baseURI || location.href).href, { credentials: 'same-origin' })
       .then(function (r) { if (!r.ok) throw new Error(path + ' -> ' + r.status); return r.json(); });
   }
+  function apiPost(path, payload) {
+    return fetch(new URL(path, document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    }).then(function (r) { if (!r.ok) throw new Error(path + ' -> ' + r.status); return r.json(); });
+  }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c];
@@ -108,21 +115,24 @@
 '.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:2px solid var(--cb-accent);',
 '  border-radius:8px;padding:9px 12px;background:rgba(255,106,0,.05);font-family:var(--cb-mono);font-size:11px;}',
 '.cb-deleg b{color:var(--cb-accent-2);font-weight:600;}',
-'.cb-chat-input{display:flex;gap:8px;padding:14px 16px;border-top:1px solid var(--cb-line2);align-items:flex-end;}',
-'.cb-chat-input input,.cb-chat-input textarea{flex:1;min-width:0;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:10px;',
-'  color:var(--cb-text);font-family:var(--cb-sans);font-size:13.5px;line-height:1.45;padding:10px 14px;outline:none;}',
-'.cb-chat-input textarea{resize:none;display:block;min-height:42px;max-height:40vh;overflow-y:auto;}',
-'.cb-chat-input .cb-send,.cb-chat-input .cb-mic,.cb-chat-input .cb-attach{height:42px;flex:0 0 auto;}',
-'.cb-chat-input input:focus,.cb-chat-input textarea:focus{border-color:var(--cb-accent);box-shadow:0 0 0 3px rgba(255,106,0,.12);}',
-'.cb-send{background:var(--cb-accent);border:none;color:#1a0c00;font-weight:700;border-radius:10px;width:42px;cursor:pointer;',
-'  font-family:var(--cb-disp);display:flex;align-items:center;justify-content:center;transition:filter .15s;}',
-'.cb-mic{background:rgba(255,255,255,.05);border:1px solid var(--cb-line);color:var(--cb-muted);border-radius:10px;width:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;}',
-'.cb-mic:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
+/* input: a single compact row, fixed at the bottom of the chat console */
+'.cb-chat-input{display:flex;padding:12px 14px 14px;border-top:1px solid var(--cb-line2);}',
+'.cb-chat-input textarea{flex:1;min-width:0;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:12px;',
+'  color:var(--cb-text);font-family:var(--cb-sans);font-size:13.5px;line-height:1.45;padding:11px 14px;outline:none;',
+'  resize:none;display:block;min-height:44px;max-height:46vh;overflow-y:auto;}',
+'.cb-chat-input textarea:focus{border-color:var(--cb-accent);box-shadow:0 0 0 3px rgba(255,106,0,.12);}',
+/* action buttons: floating just OUTSIDE the chat card, to its right */
+'.cb-actions{position:absolute;z-index:4;left:calc(22px + min(430px,40vw) + 14px);bottom:30px;display:flex;flex-direction:column;gap:9px;}',
+'.cb-hero.cb-collapsed .cb-actions{opacity:0;pointer-events:none;}',
+'.cb-mic,.cb-attach,.cb-send{width:40px;height:40px;border-radius:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;border:1px solid var(--cb-line);',
+'  background:linear-gradient(180deg,rgba(12,14,20,.7),rgba(8,9,14,.82));backdrop-filter:blur(8px);box-shadow:0 10px 30px -16px rgba(0,0,0,.9);}',
+'.cb-mic,.cb-attach{color:var(--cb-muted);}',
+'.cb-mic:hover,.cb-attach:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
 '.cb-mic.cb-on{color:#1a0c00;background:var(--cb-accent);border-color:var(--cb-accent);animation:cb-micpulse 1.1s ease-in-out infinite;}',
 '@keyframes cb-micpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,106,0,.5);}50%{box-shadow:0 0 0 6px rgba(255,106,0,0);}}',
+'.cb-send{background:var(--cb-accent);border-color:var(--cb-accent);color:#1a0c00;font-weight:700;}',
 '.cb-send:hover{filter:brightness(1.12);}',
-'.cb-attach{background:rgba(255,255,255,.05);border:1px solid var(--cb-line);color:var(--cb-muted);border-radius:10px;width:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;}',
-'.cb-attach:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
+'@media(max-width:680px){.cb-actions{left:auto;right:12px;bottom:auto;top:74px;}}',
 '.cb-attbar{display:flex;flex-wrap:wrap;gap:8px;padding:0 16px;}',
 '.cb-attbar:not(:empty){padding-top:12px;}',
 '.cb-chip{position:relative;display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.05);border:1px solid var(--cb-line);border-radius:8px;padding:4px 7px 4px 5px;max-width:190px;}',
@@ -134,31 +144,45 @@
 '.cb-chip button{background:none;border:none;color:var(--cb-faint);cursor:pointer;font-size:13px;line-height:1;padding:0 2px;flex:0 0 auto;}',
 '.cb-chip button:hover{color:var(--cb-accent);}',
 '.cb-msg.cb-from-user .cb-bubble img{max-width:160px;border-radius:8px;margin-top:6px;display:inline-block;}',
-/* center stage */
-'.cb-stage{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;overflow:hidden;}',
-'.cb-planet{position:absolute;inset:0;z-index:1;}',
-'.cb-planet canvas{display:block;}',
-'.cb-stage-toggle{position:absolute;top:16px;left:16px;z-index:5;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);',
-'  color:var(--cb-muted);width:34px;height:34px;border-radius:9px;cursor:pointer;display:flex;align-items:center;justify-content:center;}',
+/* center stage: petal core (center) · memory planet (right) */
+'.cb-stage{position:absolute;inset:0;z-index:1;overflow:hidden;}',
+'.cb-stage-toggle{position:absolute;top:30px;z-index:5;border:1px solid var(--cb-line);color:var(--cb-muted);width:34px;height:34px;',
+'  border-radius:9px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;',
+'  background:linear-gradient(180deg,rgba(12,14,20,.72),rgba(8,9,14,.84));backdrop-filter:blur(8px);box-shadow:0 10px 30px -16px rgba(0,0,0,.9);}',
 '.cb-stage-toggle:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
-/* the core / orb placeholder */
-'.cb-core{position:relative;width:min(50vh,480px);height:min(50vh,480px);display:flex;align-items:center;justify-content:center;}',
-'.cb-core-glow{position:absolute;inset:0;border-radius:50%;',
-'  background:radial-gradient(circle at 50% 50%,rgba(255,255,255,.92) 0%,rgba(255,246,200,.58) 10%,rgba(255,224,70,.36) 27%,rgba(255,202,20,.20) 45%,rgba(255,196,20,.07) 63%,transparent 75%);',
-'  filter:blur(3px);animation:cb-breathe 5.2s ease-in-out infinite;}',
-'.cb-core-ring{position:absolute;inset:0;border-radius:50%;border:1px solid rgba(255,170,110,.18);',
-'  box-shadow:inset 0 0 60px rgba(255,106,0,.12);}',
-'.cb-core-ring.r2{inset:-9%;border-color:rgba(255,255,255,.05);}',
-'.cb-core-ring.r3{inset:-20%;border-color:rgba(255,255,255,.035);}',
-'.cb-core-label{position:relative;z-index:2;text-align:center;mix-blend-mode:screen;}',
-'.cb-core-label .cb-h{font-family:var(--cb-disp);font-weight:700;font-size:15px;letter-spacing:.34em;color:#fff;text-transform:uppercase;}',
-'.cb-core-label .cb-s{font-family:var(--cb-mono);font-size:10px;letter-spacing:.16em;color:rgba(255,255,255,.7);margin-top:5px;}',
-'@keyframes cb-breathe{0%,100%{transform:scale(1);opacity:.92;}50%{transform:scale(1.045);opacity:1;}}',
-/* stage stat ring */
-'.cb-stats{position:absolute;bottom:28px;left:50%;transform:translateX(-50%);display:flex;gap:30px;}',
+'.cb-stage-toggle svg{transition:transform .25s;}',
+/* chat toggle sits just right of the chat card; memory toggle just left of the memory card */
+'#cbToggle{left:calc(22px + min(430px,40vw) + 14px);}',
+'#cbMemToggle{right:calc(22px + min(34%,470px) + 14px);}',
+'.cb-hero.cb-collapsed #cbToggle svg{transform:rotate(180deg);}',
+'.cb-hero.cb-mem-collapsed #cbMemToggle svg{transform:rotate(180deg);}',
+'.cb-hero.cb-mem-collapsed .cb-mem{opacity:0;pointer-events:none;transform:translateX(14px);}',
+'.cb-hero.cb-mem-collapsed .cb-petals{right:30px;}',
+'@media(max-width:980px){#cbMemToggle{display:none;}}',
+/* Hermes Prime petal-core: the luminous center; sub-agents radiate outward */
+'.cb-petals{position:absolute;top:0;bottom:0;left:min(430px,40vw);right:calc(min(34%,470px) + 30px);z-index:1;pointer-events:none;transition:left .25s,right .25s;}',
+'.cb-petals canvas{display:block;width:100%;height:100%;}',
+'.cb-hero.cb-collapsed .cb-petals{left:0;}',
+'.cb-petal-label{position:absolute;left:50%;bottom:7%;transform:translateX(-50%);text-align:center;z-index:2;pointer-events:none;}',
+'.cb-petal-label .cb-h{font-family:var(--cb-disp);font-weight:700;font-size:13px;letter-spacing:.34em;text-transform:uppercase;',
+'  background:linear-gradient(90deg,#fff 0%,#fff 30%,#ffb673 70%,var(--cb-accent) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
+'.cb-petal-label .cb-s{font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.16em;color:var(--cb-muted);margin-top:4px;}',
+/* memory planet panel (right): the vault graph, kept as the live memory view */
+'.cb-mem{position:absolute;right:22px;top:22px;bottom:22px;width:min(34%,470px);z-index:2;display:flex;flex-direction:column;transition:opacity .25s,transform .25s;',
+'  border:1px solid var(--cb-line);border-radius:16px;overflow:hidden;',
+'  background:linear-gradient(180deg,rgba(8,9,14,.34),rgba(6,7,11,.52));backdrop-filter:blur(6px);',
+'  box-shadow:0 30px 90px -40px rgba(0,0,0,.9);}',
+'.cb-mem-head{display:flex;align-items:center;gap:9px;padding:13px 16px;border-bottom:1px solid var(--cb-line2);',
+'  font-family:var(--cb-mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--cb-muted);}',
+'.cb-mem-dot{width:7px;height:7px;border-radius:50%;background:var(--cb-accent);box-shadow:0 0 8px var(--cb-accent);flex:0 0 auto;}',
+'.cb-planet{position:relative;flex:1;min-height:0;}',
+'.cb-planet canvas{display:block;}',
+'@media(max-width:980px){.cb-mem{display:none;}.cb-petals{left:0;right:0;}}',
+/* memory stat row (inside the planet panel) */
+'.cb-stats{display:flex;gap:14px;justify-content:space-around;padding:11px 12px 13px;border-top:1px solid var(--cb-line2);}',
 '.cb-stat{text-align:center;}',
-'.cb-stat .n{font-family:var(--cb-disp);font-weight:700;font-size:22px;color:#fff;line-height:1;}',
-'.cb-stat .l{font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--cb-muted);margin-top:6px;}',
+'.cb-stat .n{font-family:var(--cb-disp);font-weight:700;font-size:19px;color:#fff;line-height:1;}',
+'.cb-stat .l{font-family:var(--cb-mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cb-muted);margin-top:6px;}',
 '.cb-stat.proj .n{color:var(--cb-accent-2);}',
 '.cb-stage-hint{position:absolute;top:18px;right:18px;font-family:var(--cb-mono);font-size:10px;letter-spacing:.1em;',
 '  color:var(--cb-faint);text-transform:uppercase;}',
@@ -188,12 +212,21 @@
 '.cb-line-item .t{color:var(--cb-muted);font-family:var(--cb-mono);font-size:10.5px;flex:0 0 auto;}',
 '.cb-line-item .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
 '.cb-task{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--cb-text);padding:2px 0;line-height:1.4;}',
-'.cb-task .box{width:13px;height:13px;border:1.4px solid var(--cb-accent);border-radius:3px;flex:0 0 auto;margin-top:2px;}',
+'.cb-task .box{width:13px;height:13px;border:1.4px solid var(--cb-accent);border-radius:3px;flex:0 0 auto;margin-top:2px;transition:background .15s;}',
+'.cb-task-do{cursor:pointer;border-radius:6px;margin:0 -4px;padding:2px 4px;transition:background .12s;}',
+'.cb-task-do:hover{background:rgba(255,255,255,.05);}',
+'.cb-task-do:hover .box{background:var(--cb-accent-dim);}',
+'.cb-task-done .box{background:var(--cb-accent);}',
+'.cb-task-done .cb-task-txt{text-decoration:line-through;opacity:.5;}',
+'.cb-task-add{margin-top:9px;}',
+'.cb-task-input{width:100%;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:8px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12px;padding:6px 9px;outline:none;transition:border-color .15s;}',
+'.cb-task-input:focus{border-color:var(--cb-accent);box-shadow:0 0 0 2px rgba(255,106,0,.1);}',
+'.cb-task-input::placeholder{color:var(--cb-faint);}',
 '.cb-empty{font-family:var(--cb-mono);font-size:11px;color:var(--cb-faint);font-style:italic;}',
 '.cb-loading{padding:60px;text-align:center;font-family:var(--cb-mono);color:var(--cb-muted);letter-spacing:.1em;}',
 /* white -> fluo-orange gradient on display titles (the accent the user wanted on TEXT) */
 '.cb-chat-name,.cb-sec-title,.cb-card-name{background:linear-gradient(90deg,#ffffff 0%,#ffffff 26%,#ffb673 62%,var(--cb-accent) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
-(reduceMotion ? '.cb-core-glow{animation:none!important;}' : '')
+''
     ].join('\n');
     var s = el('style'); s.id = 'cb-styles'; s.textContent = css;
     document.head.appendChild(s);
@@ -220,25 +253,31 @@
           '<div class="cb-chat-log" id="cbLog"></div>' +
           '<div class="cb-attbar" id="cbAtt"></div>' +
           '<form class="cb-chat-input" id="cbForm" autocomplete="off">' +
-            '<button type="button" class="cb-mic" id="cbMic" aria-label="Parla a voce" title="Parla a voce">' +
-              '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg></button>' +
-            '<button type="button" class="cb-attach" id="cbAttachBtn" aria-label="Allega foto" title="Allega foto">' +
-              '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>' +
-            '<input id="cbFile" type="file" accept="image/*" multiple style="display:none">' +
             '<textarea id="cbInput" rows="1" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime"></textarea>' +
-            '<button class="cb-send" type="submit" aria-label="Invia">&#8594;</button>' +
           '</form>' +
         '</aside>' +
+        '<div class="cb-actions" id="cbActions">' +
+          '<button type="button" class="cb-mic" id="cbMic" aria-label="Parla a voce" title="Parla a voce">' +
+            '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg></button>' +
+          '<button type="button" class="cb-attach" id="cbAttachBtn" aria-label="Allega foto" title="Allega foto">' +
+            '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>' +
+          '<input id="cbFile" type="file" accept="image/*" multiple style="display:none">' +
+          '<button class="cb-send" type="submit" form="cbForm" id="cbSend" aria-label="Invia" title="Invia">' +
+            '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></button>' +
+        '</div>' +
         '<section class="cb-stage" id="cbStage">' +
-          '<button class="cb-stage-toggle" id="cbToggle" title="Comprimi pannello" aria-label="Comprimi pannello">' +
+          '<button class="cb-stage-toggle" id="cbToggle" title="Comprimi chat" aria-label="Comprimi chat">' +
             '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg></button>' +
-          '<div class="cb-stage-hint">Vault Planet · anteprima</div>' +
-          '<div class="cb-planet" id="cbPlanet"></div>' +
-          '<div class="cb-core">' +
-            '<div class="cb-core-ring r3"></div><div class="cb-core-ring r2"></div><div class="cb-core-ring"></div>' +
-            '<div class="cb-core-glow"></div>' +
+          '<button class="cb-stage-toggle" id="cbMemToggle" title="Comprimi memoria" aria-label="Comprimi memoria">' +
+            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></button>' +
+          '<div class="cb-petals" id="cbPetals">' +
+            '<div class="cb-petal-label"><div class="cb-h">Hermes Prime</div><div class="cb-s">stella viva · agenti in orbita</div></div>' +
           '</div>' +
-          '<div class="cb-stats" id="cbStats"></div>' +
+          '<div class="cb-mem" id="cbMem">' +
+            '<div class="cb-mem-head"><span class="cb-mem-dot"></span>Memoria · Vault</div>' +
+            '<div class="cb-planet" id="cbPlanet"></div>' +
+            '<div class="cb-stats" id="cbStats"></div>' +
+          '</div>' +
         '</section>' +
       '</div>' +
       '<section class="cb-projects">' +
@@ -246,10 +285,13 @@
         '<div class="cb-grid" id="cbGrid"><div class="cb-loading">caricamento vault…</div></div>' +
       '</section>';
     host.appendChild(root);
+    mountPrimeCore($('cbPetals')); // central Hermes Prime: living-star system (voice orb)
 
     // interactions
     var toggle = $('cbToggle'), hero = $('cbHero');
     if (toggle && hero) toggle.addEventListener('click', function () { hero.classList.toggle('cb-collapsed'); });
+    var memToggle = $('cbMemToggle');
+    if (memToggle && hero) memToggle.addEventListener('click', function () { hero.classList.toggle('cb-mem-collapsed'); });
     var form = $('cbForm');
     if (form) form.addEventListener('submit', onPrimeSubmit);
     // Textarea che cresce mentre scrivi e torna piccola all'invio; Invio manda,
@@ -258,7 +300,7 @@
     if (ta) {
       var autoGrow = function () {
         ta.style.height = 'auto';
-        ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.4)) + 'px';
+        ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.46)) + 'px';
       };
       ta.addEventListener('input', autoGrow);
       ta.addEventListener('keydown', function (ev) {
@@ -291,10 +333,17 @@
   var _listening = false, _micTimer = null;
   var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
 
+  // The central petal-core is the primary Voice Orb; the memory planet on the
+  // right echoes the same state so its heart pulses in sync with the voice.
   function setOrb(state, amp) {
-    if (!window.cbPlanet) return;
-    if (state != null) window.cbPlanet.setState(state);
-    if (amp != null) window.cbPlanet.setAmplitude(amp);
+    if (window.cbCore) {
+      if (state != null) window.cbCore.setState(state);
+      if (amp != null) window.cbCore.setAmplitude(amp);
+    }
+    if (window.cbPlanet) {
+      if (state != null) window.cbPlanet.setState(state);
+      if (amp != null) window.cbPlanet.setAmplitude(amp);
+    }
   }
   function sysNote(text) {
     var log = $('cbLog'); if (!log) return;
@@ -321,6 +370,8 @@
       var c = el('div', 'cb-deleg'); c.innerHTML = html;
       var _sb = nearBottom(log); log.appendChild(c); if (_sb) log.scrollTop = log.scrollHeight;
       _cbTasks[t.id] = { el: c, status: t.status };
+      // light up the matching planet in the star system
+      if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
     if (prev && prev.status === 'in_corso' && t.status !== 'in_corso') {
       sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + (t.status === 'ok' ? 'finito' : 'fallito') + ' il task.');
@@ -869,8 +920,10 @@
         return '<div class="cb-line-item"><span class="n">' + esc(l.name) + '</span><span class="t">' + esc(l.rel || '') + '</span></div>';
       }).join('') || '<div class="cb-empty">nessuna modifica recente</div>';
       var tasks = (p.tasks || []).map(function (t) {
-        return '<div class="cb-task"><span class="box"></span><span>' + esc(t) + '</span></div>';
+        return '<div class="cb-task cb-task-do" data-text="' + esc(t) + '" role="button" tabindex="0" title="Segna come fatto">' +
+          '<span class="box"></span><span class="cb-task-txt">' + esc(t) + '</span></div>';
       }).join('') || '<div class="cb-empty">nessun task aperto</div>';
+      tasks += '<div class="cb-task-add"><input type="text" class="cb-task-input" placeholder="+ aggiungi task" aria-label="Aggiungi task"></div>';
       return '' +
         '<article class="cb-card" data-project-id="' + esc(p.id) + '" data-path="' + esc(p.path) + '" tabindex="0" role="button">' +
           '<div class="cb-card-top"><span class="cb-card-name">' + esc(p.name) + '</span>' + sparkDots(p.activity) + '</div>' +
@@ -882,6 +935,37 @@
       var go = function () { focusProject(card.getAttribute('data-project-id'), card.getAttribute('data-path')); };
       card.addEventListener('click', go);
       card.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+      var notePath = card.getAttribute('data-path');
+      // Up-next: click a task to mark it done in the project note (writes - [x]).
+      Array.prototype.forEach.call(card.querySelectorAll('.cb-task-do'), function (el) {
+        var done = function (e) {
+          e.stopPropagation();
+          if (el.classList.contains('cb-task-done')) return;
+          var text = el.getAttribute('data-text');
+          el.classList.add('cb-task-done');
+          apiPost('api/projects/task', { action: 'toggle', note_path: notePath, text: text, done: true })
+            .then(function () { setTimeout(refresh, 300); })
+            .catch(function () { el.classList.remove('cb-task-done'); });
+        };
+        el.addEventListener('click', done);
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); done(e); } });
+      });
+      // Up-next: add a new task to the project note.
+      var input = card.querySelector('.cb-task-input');
+      if (input) {
+        input.addEventListener('click', function (e) { e.stopPropagation(); });
+        input.addEventListener('keydown', function (e) {
+          e.stopPropagation();
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          var v = input.value.trim();
+          if (!v) return;
+          input.disabled = true;
+          apiPost('api/projects/task', { action: 'add', note_path: notePath, text: v })
+            .then(function () { input.value = ''; input.disabled = false; refresh(); })
+            .catch(function () { input.disabled = false; });
+        });
+      }
     });
   }
 
@@ -890,8 +974,7 @@
     try { document.dispatchEvent(new CustomEvent('cb:focus-project', { detail: { id: id, path: path } })); } catch (e) {}
     var root = document.querySelector('.cb-root');
     if (root) root.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
-    var glow = document.querySelector('.cb-core-glow');
-    if (glow && !reduceMotion) { glow.style.filter = 'blur(2px) brightness(1.5)'; setTimeout(function () { glow.style.filter = ''; }, 420); }
+    if (window.cbCore && window.cbCore.pulse) window.cbCore.pulse();
   }
 
   function mountPlanet(g, tries) {
@@ -901,9 +984,7 @@
       try {
         window.cbInitPlanet(pc, g);
         pc.setAttribute('data-mounted', '1');
-        var core = document.querySelector('.cb-core'); if (core) core.style.display = 'none';
-        var hint = document.querySelector('.cb-stage-hint'); if (hint) hint.textContent = 'Vault Planet';
-      } catch (e) { /* keep CSS core fallback */ }
+      } catch (e) { /* planet failed to mount; memory panel stays empty */ }
     } else if (tries < 40) {
       setTimeout(function () { mountPlanet(g, tries + 1); }, 250); // wait for three.js module to load
     }
@@ -914,6 +995,178 @@
     api('api/projects/overview').then(renderProjects).catch(function () {
       var grid = $('cbGrid'); if (grid) grid.innerHTML = '<div class="cb-loading">vault non disponibile.</div>';
     });
+  }
+
+  /* ── Hermes Prime petal-core (canvas 2D) ───────────────────────────────────
+   * The luminous heart of the bridge: Hermes Prime at the center, the sub-agents
+   * radiating as glowing petals with sparks that flow outward from the core
+   * (the "petali" metaphor). Doubles as the Voice Orb: reacts to setState/
+   * setAmplitude exactly like the planet did, so voice still drives the center.
+   * Palette: incandescent white core -> fluo orange leaves; cool tint on listen.
+   * ──────────────────────────────────────────────────────────────────────── */
+  var WHITE = [255, 255, 255], CREAM = [255, 247, 205], GOLD = [255, 224, 70];
+  var ORANGE = [255, 106, 0], COOL = [127, 208, 255];
+  function _mix(a, b, t) {
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  }
+  function _rgba(c, a) { return 'rgba(' + (c[0] | 0) + ',' + (c[1] | 0) + ',' + (c[2] | 0) + ',' + a + ')'; }
+
+  function initPrimeCore(host) {
+    if (!host || host.getAttribute('data-core')) return;
+    host.setAttribute('data-core', '1');
+    var canvas = el('canvas');
+    host.insertBefore(canvas, host.firstChild); // sits under the .cb-petal-label
+    var ctx = canvas.getContext('2d');
+    var DPR = Math.min(2, window.devicePixelRatio || 1), W = 1, H = 1;
+    function size() {
+      var r = host.getBoundingClientRect();
+      W = Math.max(1, r.width); H = Math.max(1, r.height);
+      canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+      canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    }
+    size();
+    try { new ResizeObserver(size).observe(host); } catch (e) { window.addEventListener('resize', size); }
+
+    // The agents as "organs" around the Hermes Prime heart: each one fixed in
+    // place (so it stays distinct and recognisable) and wired to the heart by a
+    // living vessel with pulses flowing in and out, like a circulatory system.
+    var AGENTS = [
+      { name: 'codice',       ang: -1.05, dist: 0.96, size: 0.135, tint: 0.10 },
+      { name: 'ricerca',      ang: -0.18, dist: 1.02, size: 0.115, tint: 0.45 },
+      { name: 'ragionamento', ang:  0.72, dist: 0.90, size: 0.150, tint: 0.00 },
+      { name: 'semplice',     ang:  1.95, dist: 0.98, size: 0.100, tint: 0.62 },
+      { name: 'voce',         ang:  2.75, dist: 0.92, size: 0.120, tint: 0.30 }
+    ];
+    AGENTS.forEach(function (a, i) { a.phase = i * 1.3; });
+
+    var mode = 'idle', amp = 0, pulse = 0, t = 0;
+    window.cbCore = {
+      setState: function (s) { mode = s || 'idle'; },
+      setAmplitude: function (a) { amp = a < 0 ? 0 : (a > 1 ? 1 : a); },
+      pulse: function () { pulse = 0.7; }
+    };
+
+    function qbez(ax, ay, bx, by, c2x, c2y, s) {
+      var u = 1 - s;
+      return [u * u * ax + 2 * u * s * bx + s * s * c2x, u * u * ay + 2 * u * s * by + s * s * c2y];
+    }
+    // double-beat (lub-dub) envelope, ~0..1
+    function heartbeat(time, bpm) {
+      var period = 60 / bpm, x = (time % period) / period;
+      var lub = Math.exp(-Math.pow((x - 0.10) / 0.045, 2));
+      var dub = 0.55 * Math.exp(-Math.pow((x - 0.26) / 0.05, 2));
+      return lub + dub;
+    }
+
+    var running = true;
+    function frame() {
+      if (!running) return;
+      requestAnimationFrame(frame);
+      t += 0.016;
+      var cx = W / 2, cy = H / 2, base = Math.min(W, H) * 0.5;
+      if (base < 2) return;
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+
+      var bpm = mode === 'speaking' ? 96 : (mode === 'listening' ? 78 : (mode === 'thinking' ? 66 : 60));
+      var beat = reduceMotion ? 0.35 : heartbeat(t, bpm);
+      var bright = 1, cool = 0;
+      if (mode === 'speaking') bright = 1 + amp * 0.7;
+      else if (mode === 'listening') { cool = 0.7; bright = 1.08; }
+      else if (mode === 'thinking') bright = 0.66;
+      pulse *= 0.92; bright += pulse;
+      var beatBright = bright * (0.86 + beat * 0.5);
+
+      var Rx = base * 0.78, Ry = base * 0.62;
+      var coreR = base * 0.14 * (1 + beat * 0.16 + (mode === 'speaking' ? amp * 0.18 : 0));
+
+      ctx.globalCompositeOperation = 'lighter';
+      var labels = [];
+
+      AGENTS.forEach(function (ag) {
+        var bob = reduceMotion ? 0 : Math.sin(t * 1.1 + ag.phase) * 0.025;
+        var ang = ag.ang + bob;
+        var ox = cx + Math.cos(ang) * Rx * ag.dist;
+        var oy = cy + Math.sin(ang) * Ry * ag.dist;
+        var col = _mix(_mix(GOLD, ORANGE, ag.tint), COOL, cool * 0.5);
+        // vessel (artery) heart -> organ, gently arced
+        var hx = cx + Math.cos(ang) * coreR, hy = cy + Math.sin(ang) * coreR;
+        var mx = (hx + ox) / 2, my = (hy + oy) / 2;
+        var nx = -(oy - hy), ny = (ox - hx), nl = Math.sqrt(nx * nx + ny * ny) || 1;
+        var arc = base * 0.12 * Math.sin(ag.phase);
+        var c2x = mx + nx / nl * arc, c2y = my + ny / nl * arc;
+        ctx.beginPath();
+        ctx.moveTo(hx, hy); ctx.quadraticCurveTo(c2x, c2y, ox, oy);
+        ctx.lineWidth = base * 0.012; ctx.strokeStyle = _rgba(col, 0.10 * beatBright); ctx.stroke();
+        ctx.lineWidth = base * 0.004; ctx.strokeStyle = _rgba(_mix(col, WHITE, 0.4), 0.16 * beatBright); ctx.stroke();
+        // pulses along the vessel (two flow outward, one returns to the heart)
+        if (!reduceMotion) {
+          for (var k = 0; k < 3; k++) {
+            var s = ((t * (mode === 'speaking' ? 0.5 + amp * 0.4 : 0.32) + ag.phase * 0.3 + k * 0.37) % 1 + 1) % 1;
+            if (k === 2) s = 1 - s;
+            var pp = qbez(hx, hy, c2x, c2y, ox, oy, s);
+            var fade = Math.sin(s * Math.PI), pr = base * 0.011 * (1 + beat * 0.4);
+            var pg = ctx.createRadialGradient(pp[0], pp[1], 0, pp[0], pp[1], pr * 3.5);
+            pg.addColorStop(0, _rgba(_mix(col, WHITE, 0.5), 0.6 * fade * beatBright));
+            pg.addColorStop(1, _rgba(col, 0));
+            ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(pp[0], pp[1], pr * 3.5, 0, 7); ctx.fill();
+          }
+        }
+        // organ body (membrane glow + ring + nucleus)
+        var orad = base * ag.size * (1 + beat * 0.12 + (reduceMotion ? 0 : Math.sin(t * 1.6 + ag.phase) * 0.04));
+        var og = ctx.createRadialGradient(ox, oy, 0, ox, oy, orad);
+        og.addColorStop(0, _rgba(_mix(WHITE, col, 0.35), 0.95 * beatBright));
+        og.addColorStop(0.4, _rgba(col, 0.5 * beatBright));
+        og.addColorStop(1, _rgba(col, 0));
+        ctx.fillStyle = og; ctx.beginPath(); ctx.arc(ox, oy, orad, 0, 7); ctx.fill();
+        ctx.lineWidth = Math.max(1, base * 0.005);
+        ctx.strokeStyle = _rgba(_mix(col, WHITE, 0.3), 0.4 * beatBright);
+        ctx.beginPath(); ctx.arc(ox, oy, orad * 0.62, 0, 7); ctx.stroke();
+        ctx.fillStyle = _rgba(WHITE, 0.9 * beatBright);
+        ctx.beginPath(); ctx.arc(ox, oy, orad * 0.16, 0, 7); ctx.fill();
+        labels.push({ x: ox, y: oy + orad + base * 0.05, name: ag.name });
+      });
+
+      // heart core: nebula + incandescent heart
+      var c0 = _mix(WHITE, COOL, cool * 0.5);
+      var ng = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR * 4.4);
+      ng.addColorStop(0, _rgba(c0, Math.min(1, 0.95 * beatBright)));
+      ng.addColorStop(0.16, _rgba(_mix(CREAM, COOL, cool * 0.5), 0.85 * beatBright));
+      ng.addColorStop(0.42, _rgba(_mix(GOLD, COOL, cool), 0.34 * beatBright));
+      ng.addColorStop(0.72, _rgba(_mix(ORANGE, COOL, cool), 0.1 * beatBright));
+      ng.addColorStop(1, _rgba(ORANGE, 0));
+      ctx.fillStyle = ng; ctx.beginPath(); ctx.arc(cx, cy, coreR * 4.4, 0, 7); ctx.fill();
+
+      var cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+      cg.addColorStop(0, _rgba(WHITE, Math.min(1, beatBright)));
+      cg.addColorStop(0.5, _rgba(_mix(CREAM, COOL, cool), 0.94 * beatBright));
+      cg.addColorStop(1, _rgba(_mix(GOLD, ORANGE, 0.3), 0));
+      ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(cx, cy, coreR, 0, 7); ctx.fill();
+
+      // organ labels (crisp, on top)
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '600 ' + Math.max(8, Math.round(base * 0.03)) + 'px "IBM Plex Mono", ui-monospace, monospace';
+      labels.forEach(function (l) {
+        ctx.fillStyle = _rgba([182, 186, 198], 0.82);
+        ctx.fillText(l.name, l.x, l.y);
+      });
+    }
+    frame();
+  }
+
+  // Prefer the three.js living-star system; fall back to the canvas core if the
+  // module hasn't loaded yet or WebGL is unavailable.
+  function mountPrimeCore(host, tries) {
+    tries = tries || 0;
+    if (!host) return;
+    if (typeof window.cbInitStar === 'function') {
+      try { window.cbInitStar(host); return; } catch (e) { /* fall back to canvas */ }
+      initPrimeCore(host); return;
+    }
+    if (tries < 40) { setTimeout(function () { mountPrimeCore(host, tries + 1); }, 200); return; }
+    initPrimeCore(host); // star module never arrived -> canvas fallback
   }
 
   /* ── entry point (called by switchPanel) ───────────────────────────────── */

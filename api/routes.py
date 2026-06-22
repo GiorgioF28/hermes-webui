@@ -3457,6 +3457,7 @@ from api.workspace import (
 )
 from api.upload import (
     handle_upload,
+    handle_prime_upload,
     handle_upload_extract,
     handle_transcribe,
     handle_transcribe_capability,
@@ -6818,6 +6819,8 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
+    if parsed.path == "/api/bridge/prime/upload":
+        return handle_prime_upload(handler)
     if parsed.path == "/api/upload/extract":
         return handle_upload_extract(handler)
     if parsed.path == "/api/workspace/upload":
@@ -6874,6 +6877,8 @@ def handle_post(handler, parsed) -> bool:
         return _handle_control_center_project_next_action(handler, body)
     if parsed.path == "/api/control-center/task-status":
         return _handle_control_center_task_status(handler, body)
+    if parsed.path == "/api/projects/task":
+        return _handle_projects_task(handler, body)
     if parsed.path == "/api/work/start":
         return _handle_work_start(handler, body)
     if parsed.path == "/api/work/finish":
@@ -10754,46 +10759,161 @@ def _hermes_prime_system_prompt(workspace):
     return {"type": "preset", "preset": "claude_code", "append": append}
 
 
-def _hermes_prime_reply(message, workspace, on_token=None):
+def _hermes_prime_turn_limits():
+    """Resolve the progress-aware watchdog limits for a Hermes Prime turn.
+
+    Returns (idle_timeout, hard_cap, poll) in seconds. Un turno NON viene più
+    ucciso da un wall-clock fisso: finché Prime continua a produrre (token, tool
+    call, ragionamento) il deadline di stallo si riarma. Si interviene solo se:
+      - non arriva NESSUNA attività per `idle_timeout` secondi (stallo/blocco), o
+      - il turno supera `hard_cap` secondi in assoluto (anti-loop di sicurezza).
+    """
+    def _num(name, default):
+        try:
+            v = float(os.getenv(name, "") or default)
+            return v if v > 0 else default
+        except (TypeError, ValueError):
+            return default
+    idle = _num("HERMES_PRIME_IDLE_TIMEOUT", 90.0)
+    hard = _num("HERMES_PRIME_HARD_CAP", 600.0)
+    poll = _num("HERMES_PRIME_POLL", 1.0)
+    return idle, hard, poll
+
+
+_PRIME_TURN_LOCK = threading.Lock()
+
+
+def _reset_prime_session(reg, fut):
+    """Scarta la sessione persistente 'hermes-prime' dopo un turno anomalo.
+
+    Il client SDK è riusato tra i turni: se un turno finisce a metà (timeout,
+    stallo, oppure browser ricaricato con Ctrl+F5 che disconnette il client) lo
+    stream resta con messaggi non consumati. Senza reset, il receive_response()
+    del turno dopo leggerebbe PRIMA quei residui -> l'utente vede la risposta
+    del messaggio precedente (desync off-by-one). Scartando la sessione, il
+    prossimo get_or_create ricostruisce un client pulito.
+
+    Consuma anche in modo silenzioso l'esito della future abbandonata, così non
+    resta il warning asyncio "exception never retrieved".
+    """
+    def _swallow(f):
+        try:
+            if not f.cancelled():
+                f.exception()
+        except Exception:
+            pass
+    try:
+        fut.add_done_callback(_swallow)
+    except Exception:
+        pass
+    try:
+        reg.close("hermes-prime")
+    except Exception:
+        logger.debug("prime session reset failed", exc_info=True)
+
+
+def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_status=None):
     """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
     from api.prime_delegation import get_background_tasks
+
+    def _status(state, **extra):
+        if on_status is not None:
+            on_status({"state": state, **extra})
+
     reg = _get_claude_registry()
-    reg.get_or_create(
-        "hermes-prime", cwd=workspace, add_dir=workspace,
-        system_prompt=_hermes_prime_system_prompt(workspace),
-    )
     parts = []
     final = {"text": ""}
+    last_state = [None]
+
+    # Le foto allegate finiscono nell'inbox 'hermes-prime', già negli add_dirs
+    # della sessione Prime: aggiungiamo la nota che gli dice di leggerle con Read.
+    prompt_text = " ".join(str(message or "").split())
+    prompt_text += _claude_attachment_note("hermes-prime", attachments)
 
     async def _drive(client):
-        await client.query(" ".join(str(message or "").split()))
+        await client.query(prompt_text)
         async for m in client.receive_response():
+            last_activity[0] = time.monotonic()
             ev = getattr(m, "event", None)
-            if isinstance(ev, dict) and ev.get("type") == "content_block_delta":
-                d = ev.get("delta") or {}
-                if d.get("type") == "text_delta":
-                    text = str(d.get("text", "") or "")
-                    if text:
-                        parts.append(text)
-                        if on_token is not None:
-                            on_token(text)
+            if isinstance(ev, dict):
+                event_type = ev.get("type")
+                if event_type == "content_block_start":
+                    block = ev.get("content_block") or {}
+                    block_type = block.get("type")
+                    if block_type == "tool_use":
+                        last_state[0] = "tool"
+                        _status("tool", tool=str(block.get("name") or "strumento"))
+                    elif block_type in {"thinking", "reasoning"} and last_state[0] != "reasoning":
+                        last_state[0] = "reasoning"
+                        _status("reasoning")
+                elif event_type == "content_block_delta":
+                    d = ev.get("delta") or {}
+                    if d.get("type") == "text_delta":
+                        text = str(d.get("text", "") or "")
+                        if text:
+                            if last_state[0] != "responding":
+                                last_state[0] = "responding"
+                                _status("responding")
+                            parts.append(text)
+                            if on_token is not None:
+                                on_token(text)
             elif type(m).__name__ == "ResultMessage":
                 r = getattr(m, "result", None)
                 if r:
                     final["text"] = str(r)
 
-    # Il timeout del turno NON deve sfuggire come TimeoutError: in Python 3.11
+    # Watchdog "anti-blocco / anti-loop" basato sul progresso, non un wall-clock
+    # fisso. NB: un TimeoutError NON deve sfuggire — in Python 3.11
     # TimeoutError == concurrent.futures.TimeoutError, che è dentro
-    # _CLIENT_DISCONNECT_ERRORS. Se sfuggisse, _handle_bridge_prime lo
-    # scambierebbe per un client disconnesso e chiuderebbe lo stream senza
-    # 'done', facendo apparire "risposta interrotta" lato UI. Qui lo gestiamo
-    # e restituiamo comunque ciò che è già stato prodotto.
+    # _CLIENT_DISCONNECT_ERRORS; se sfuggisse, _handle_bridge_prime lo
+    # scambierebbe per client disconnesso e chiuderebbe senza 'done'
+    # ("risposta interrotta" lato UI). Qui lo gestiamo e restituiamo comunque
+    # ciò che è già stato prodotto.
     import concurrent.futures as _futures
+    idle_timeout, hard_cap, poll = _hermes_prime_turn_limits()
     timed_out = False
+    acquired = _PRIME_TURN_LOCK.acquire(blocking=False)
+    if not acquired:
+        _status("queued")
+        _PRIME_TURN_LOCK.acquire()
     try:
-        reg.run_turn("hermes-prime", _drive, timeout=120)
-    except (TimeoutError, _futures.TimeoutError):
-        timed_out = True
+        _status("reasoning")
+        last_state[0] = "reasoning"
+        reg.get_or_create(
+            "hermes-prime", cwd=workspace, add_dir=workspace,
+            system_prompt=_hermes_prime_system_prompt(workspace),
+        )
+        # Start the watchdog only after this HTTP turn owns the Prime session.
+        last_activity = [time.monotonic()]
+        fut = reg.submit_turn("hermes-prime", _drive)
+        started = time.monotonic()
+        try:
+            while True:
+                try:
+                    fut.result(timeout=poll)
+                    break
+                except _futures.CancelledError:
+                    timed_out = True
+                    break
+                except _futures.TimeoutError:
+                    now = time.monotonic()
+                    stalled = (now - last_activity[0]) >= idle_timeout
+                    over_cap = (now - started) >= hard_cap
+                    if stalled or over_cap:
+                        timed_out = True
+                        try:
+                            fut.cancel()
+                        except Exception:
+                            logger.debug("prime turn cancel failed", exc_info=True)
+                        break
+        except Exception:
+            _reset_prime_session(reg, fut)
+            raise
+        if timed_out:
+            _reset_prime_session(reg, fut)
+    finally:
+        _PRIME_TURN_LOCK.release()
+
     reply = ("".join(parts).strip() or final["text"].strip())
     if timed_out and not reply:
         reply = (
@@ -10808,8 +10928,12 @@ def _hermes_prime_reply(message, workspace, on_token=None):
 def _handle_bridge_prime(handler, body):
     """POST /api/bridge/prime — stream Hermes Prime tokens, then delegations."""
     msg = str((body or {}).get("message") or "").strip()
-    if not msg:
+    raw_atts = (body or {}).get("attachments")
+    attachments = [a for a in raw_atts if isinstance(a, dict)] if isinstance(raw_atts, list) else []
+    if not msg and not attachments:
         return bad(handler, "message is required")
+    if not msg and attachments:
+        msg = "(L'utente ha allegato un'immagine senza testo.)"
     workspace = Path(str(DEFAULT_WORKSPACE))
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -10825,8 +10949,11 @@ def _handle_bridge_prime(handler, body):
         result = _hermes_prime_reply(
             msg,
             workspace,
+            attachments=attachments,
             on_token=lambda text: _sse(handler, "token", {"text": text}),
+            on_status=lambda status: _sse(handler, "status", status),
         )
+        _sse(handler, "status", {"state": "done"})
         _sse(
             handler,
             "done",
@@ -12756,6 +12883,98 @@ def _handle_control_center_task_status(handler, body):
         return bad(handler, str(exc), status=400)
     except Exception as exc:
         logger.exception("control center task status update failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _cc_add_project_note_task(path: Path, text: str) -> dict:
+    """Append a new open ``- [ ] text`` checkbox to a project note.
+
+    Inserts it just under the first tasky heading (## TODO / ## Next / ## Up next
+    / ...) when present; otherwise appends a small ``## Up next`` section at the
+    end. Keeps the rest of the note untouched.
+    """
+    if not path.is_file():
+        raise ValueError("project note not found")
+    original = path.read_text(encoding="utf-8-sig", errors="replace")
+    lines = original.splitlines()
+    task_line = f"- [ ] {text}"
+    keywords = ("todo", "next", "up next", "da fare", "prossimi", "next steps")
+    heading_idx = None
+    for i, line in enumerate(lines):
+        m = re.match(r"^#{1,6}\s+(.*\S)\s*$", line)
+        if m and any(k in m.group(1).strip().lower() for k in keywords):
+            heading_idx = i
+            break
+    if heading_idx is not None:
+        insert_at = heading_idx + 1
+        j = heading_idx + 1
+        while j < len(lines):
+            if re.match(r"^#{1,6}\s+", lines[j]):
+                break
+            if lines[j].strip():
+                insert_at = j + 1
+            j += 1
+        lines.insert(insert_at, task_line)
+        updated = "\n".join(lines) + "\n"
+    else:
+        updated = original.rstrip() + "\n\n## Up next\n\n" + task_line + "\n"
+    path.write_text(updated, encoding="utf-8", errors="replace")
+    return {"path": str(path), "text": text, "added": True}
+
+
+def _handle_projects_task(handler, body):
+    """POST /api/projects/task — toggle done or add an Up-next checkbox.
+
+    Writes directly into the project note in ``obsidian-vault/01-Projects``.
+    Body: {action: "toggle"|"add", note_path, text, done?}. note_path is the
+    vault-relative path the Command Bridge card already carries (data-path).
+    """
+    try:
+        action = str(body.get("action") or "").strip().lower()
+        note_path_raw = str(body.get("note_path") or "").strip()
+        text = re.sub(r"\s+", " ", str(body.get("text") or "")).strip()
+        if action not in {"toggle", "add"}:
+            return bad(handler, "action must be toggle or add", status=400)
+        if not note_path_raw:
+            return bad(handler, "note_path is required", status=400)
+        if len(text) < 1:
+            return bad(handler, "text is required", status=400)
+        if len(text) > 280:
+            return bad(handler, "text is too long", status=400)
+        root = _control_center_root()
+        vault = (root / "obsidian-vault").resolve()
+        projects_dir = (vault / "01-Projects").resolve()
+        raw_path = Path(note_path_raw)
+        candidate = raw_path.resolve() if raw_path.is_absolute() else (vault / raw_path).resolve()
+        try:
+            candidate.relative_to(projects_dir)
+        except ValueError:
+            return bad(handler, "note_path must be inside 01-Projects", status=400)
+        if candidate.suffix.lower() != ".md" or not candidate.is_file():
+            return bad(handler, "project note not found", status=400)
+        audit = _cc_audit_snapshot(root, "project-note-task", [candidate], {
+            "action": action,
+            "note": str(candidate.relative_to(vault)).replace("\\", "/"),
+            "text": text,
+            "requested_by": "Hermes WebUI Command Bridge",
+        })
+        if action == "toggle":
+            done = bool(body.get("done", True))
+            result = _cc_update_today_task_checkbox(candidate, text, done)
+            if not result.get("updated"):
+                return bad(handler, "task line not found in note", status=404)
+        else:
+            result = _cc_add_project_note_task(candidate, text)
+        try:
+            from api import projects_overview
+            projects_overview._cache.clear()
+        except Exception:
+            logger.debug("projects overview cache clear failed", exc_info=True)
+        return j(handler, {"ok": True, "action": action, "result": result, "audit": audit})
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400)
+    except Exception as exc:
+        logger.exception("project note task update failed")
         return bad(handler, _sanitize_error(exc), status=500)
 
 

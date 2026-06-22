@@ -111,7 +111,25 @@ window.cbInitPlanet = function (container, graph) {
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(45, w / h, 1, 4000);
-  camera.position.set(0, R * 0.35, R * 3.1);
+
+  // Frame the sphere so it ALWAYS fits inside the (often narrow) memory card.
+  // A PerspectiveCamera fits by vertical FOV only, so on a tall/narrow panel
+  // (aspect < 1) the globe was wider than the viewport and spilled over the
+  // card's sides. We push the camera back by whichever of width/height is the
+  // tighter constraint, with a margin so it never touches the edges.
+  const FIT_MARGIN = 1.22; // >1 leaves breathing room around the sphere
+  function fitDistance() {
+    const halfFov = THREE.MathUtils.degToRad(camera.fov) / 2;
+    const aspect = camera.aspect || 1;
+    const distV = (R * FIT_MARGIN) / Math.tan(halfFov);
+    const distH = (R * FIT_MARGIN) / (Math.tan(halfFov) * aspect);
+    return Math.max(distV, distH);
+  }
+  const _camDir = new THREE.Vector3(0, 0.35, 3.1).normalize();
+  function applyFit() {
+    camera.position.copy(_camDir).multiplyScalar(fitDistance());
+  }
+  applyFit();
 
   // sphere shell (faint lat/long wireframe)
   const shell = new THREE.Mesh(
@@ -174,8 +192,9 @@ window.cbInitPlanet = function (container, graph) {
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.enablePan = false;
+  controls.enableZoom = false; // memory view stays at a fixed, comfortable size
   controls.minDistance = R * 1.3;
-  controls.maxDistance = R * 6;
+  controls.maxDistance = R * 9; // headroom so a narrow panel's fit isn't clamped
   controls.autoRotate = !reduceMotion();
   controls.autoRotateSpeed = 0.45;
   let interacting = false;
@@ -187,6 +206,7 @@ window.cbInitPlanet = function (container, graph) {
     if (!ww || !hh) return;
     camera.aspect = ww / hh; camera.updateProjectionMatrix();
     renderer.setSize(ww, hh);
+    applyFit(); // re-fit so the globe stays inside the card at any width
   }
   try { new ResizeObserver(resize).observe(container); } catch (e) { window.addEventListener('resize', resize); }
 
