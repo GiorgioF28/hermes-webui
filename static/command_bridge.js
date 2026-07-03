@@ -915,15 +915,24 @@
           if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
         },
         error: function (d) {
-          fail((d && d.error) ? ('Hermes Prime: ' + d.error) : 'Hermes Prime non ha completato la risposta.');
+          var base = (d && d.error) ? d.error : 'Hermes Prime non ha completato la risposta.';
+          var br = (d && d.branch) ? (' [' + d.branch + ']') : '';
+          var hint = (d && d.hint) ? ('\n↳ ' + d.hint) : '';
+          fail('Hermes Prime' + br + ': ' + base + hint);
         }
       });
     }).then(function () {
       if (!settled && reply) finish('\u2713 risposta ricevuta');
       else if (!settled) fail('La risposta di Hermes Prime si è interrotta prima del completamento.');
     })
-      .catch(function () {
-        fail('Non riesco a contattare Hermes Prime (bridge). Riprova tra poco.');
+      .catch(function (e) {
+        // Ramo trasporto: la fetch/stream SSE e' caduta a livello di rete. Diamo
+        // comunque il motivo (perche') invece del generico "non riesco a contattare".
+        var partial = reply && reply.length;
+        var why = (e && e.message) ? (' (' + e.message + ')') : '';
+        fail(partial
+          ? 'Connessione con Hermes Prime interrotta a meta risposta [transport_cut]' + why + '. Riprova.'
+          : 'Non riesco a contattare Hermes Prime (bridge) [transport_cut]' + why + '. Riprova tra poco.');
       });
   }
 

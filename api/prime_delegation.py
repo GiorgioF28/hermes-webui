@@ -30,8 +30,10 @@ logger = logging.getLogger(__name__)
 
 # Marker model per instradare a Codex CLI invece che al client Claude.
 _CODEX_MODEL = "__codex_cli__"
-# Timeout ragionevole per un turno Codex effimero (secondi).
-_CODEX_TIMEOUT = 600
+# Timeout per un turno Codex effimero (secondi). 1000s: i task di sviluppo lunghi
+# (implementare una spec + test) sforavano i 600s precedenti. Overridabile con
+# HERMES_CODEX_TIMEOUT. Alzalo ancora se ricompaiono errori 'codex_timeout'.
+_CODEX_TIMEOUT = int(os.getenv("HERMES_CODEX_TIMEOUT", "1000") or "1000")
 
 # session_id -> list[ {agent, task_type, task, status, output} ] for the current turn
 _DELEGATIONS: dict[str, list] = {}

@@ -1126,6 +1126,7 @@ from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
+from api import bridge_errors
 
 
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
@@ -11001,13 +11002,23 @@ def _handle_bridge_prime(handler, body):
         # socket è davvero morto la write fallisce e la ignoriamo. Così l'utente
         # non resta col generico "risposta interrotta".
         try:
-            _sse(handler, "error", {"error": "La sessione di Hermes Prime si è interrotta. Riprova tra poco."})
+            _sse(handler, "error", {
+                "error": "La sessione di Hermes Prime si è interrotta. Riprova tra poco.",
+                "branch": bridge_errors.TRANSPORT_CUT,
+                "hint": bridge_errors.classify(bridge_errors.TRANSPORT_CUT)["hint"],
+            })
         except _CLIENT_DISCONNECT_ERRORS:
             pass
     except Exception as exc:
         logger.exception("hermes prime reply failed")
+        info = bridge_errors.classify(exc)
         try:
-            _sse(handler, "error", {"error": _sanitize_error(exc)})
+            _sse(handler, "error", {
+                "error": info["message"],
+                "branch": info["branch"],
+                "hint": info["hint"],
+                "detail": _sanitize_error(exc),
+            })
         except _CLIENT_DISCONNECT_ERRORS:
             pass
     return True
