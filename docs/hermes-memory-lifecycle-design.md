@@ -77,6 +77,19 @@ Graphify → Notion, secondo il protocollo. **La sessione NON viene resettata.**
 Prima del reset ci si assicura che il Livello 1 abbia persistito lo stato corrente
 (flush). Dopo il reset, Prime riparte col **contesto a regime** (§4).
 
+**Carry-forward per l'auto-compact (60%): riassunto SERIO.** Interrompendo un task
+a metà non sappiamo quanto sia grande/serio → il riassunto deve essere completo, non
+una riga. Meccanismo:
+- si mantiene un **log di conversazione della sessione** di Prime (coppie messaggio
+  utente / risposta Prime, **redatto** e **bounded**) — è il materiale da riassumere;
+- al 60% un modello **economico (Codex)** produce un **resume strutturato**: obiettivo/
+  task corrente, stato, file/componenti toccati, cosa è fatto, prossima azione,
+  decisioni aperte, vincoli;
+- `_reset_prime_session` → la nuova sessione riparte con quel resume come primo
+  contesto; il log si azzera.
+Il riassunto costa su **Codex**, non su Claude → coerente con "Prime leggero,
+pesante su Codex". (Distinto da `active-context`, che resta solo per il riavvio.)
+
 **Difesa a più livelli:** se Prime dimentica `task_done`, il commit (L1) e il
 cambio-argomento (L2) fanno da rete. Nessun singolo punto di fallimento.
 
@@ -240,6 +253,8 @@ reset (fase 4, il pezzo più delicato) solo quando salvataggio e lettura sono so
 - **Nessun comando manuale** di potatura. ✅
 - **Auto-compact a ≥60% del context** (Prime non supera mai il 60%): reset con
   carry-forward, misurato a fine turno. Feasibility verificata. ✅
+- **Carry-forward = riassunto SERIO su Codex** (non 1 riga), da un log di
+  conversazione bounded della sessione di Prime; formato resume strutturato. ✅
 
 ### Ancora da definire in fase di piano
 - Quale/i **database Notion** esporre a `memory_search` (mappatura DB → tipi di
