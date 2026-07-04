@@ -66,6 +66,12 @@ Graphify → Notion, secondo il protocollo. **La sessione NON viene resettata.**
   occupiamoci di X"). Rilevato con euristica leggera e **conservativa** (§5).
 - **Grappolo chiuso**: nessun (sotto-)task in sospeso dopo un `task_done` → il
   sistema chiede *"cosa facciamo adesso?"*; alla ripartenza la sessione è pulita.
+- **Pressione di contesto ≥ 60%** (auto-compact, rete di sicurezza): dopo OGNI
+  turno di Prime si misura l'uso del context (token prompt dell'ultimo
+  `ResultMessage` / finestra del modello). Se ≥ 60% → auto-compact (reset con
+  carry-forward) PRIMA del turno successivo. Così Prime **non supera mai il 60%**,
+  indipendentemente da task/argomento. Feasibility verificata: token da
+  `ResultMessage.usage`, finestra da `agent.model_metadata.get_model_context_length`.
 
 **Azione:** `_reset_prime_session` (già esistente) chiude e ricrea il client SDK.
 Prima del reset ci si assicura che il Livello 1 abbia persistito lo stato corrente
@@ -104,6 +110,10 @@ Nuovo modulo `api/memory_lifecycle.py` (puro/testabile dove possibile):
   resetta** (falso negativo < falso positivo).
 - `task_done` tool (nel bridge server SDK di Prime): Prime lo chiama con
   `{nome, riassunto_1_riga, stato: chiuso|parziale}`.
+- `context_pressure(result_message, model) -> float`: uso context dell'ultimo turno
+  (`ResultMessage.usage` input+cache token) / `get_model_context_length(model)`.
+  `>= 0.60` → trigger L2 (auto-compact). Misurato a fine turno, agito prima del
+  successivo.
 - `checkpoint(level, payload, workspace)`: orchestratore. L1 → enqueue Librarian
   (SALVA). L2 → flush L1 pendenti + `_reset_prime_session` (RESET).
 
@@ -228,6 +238,8 @@ reset (fase 4, il pezzo più delicato) solo quando salvataggio e lettura sono so
   (Codex)** via `ask_librarian` (specie prima di delegare); i **sotto-agenti (Codex)**
   leggono la memoria direttamente. Librarian esteso a read+write, si auto-ottimizza. ✅
 - **Nessun comando manuale** di potatura. ✅
+- **Auto-compact a ≥60% del context** (Prime non supera mai il 60%): reset con
+  carry-forward, misurato a fine turno. Feasibility verificata. ✅
 
 ### Ancora da definire in fase di piano
 - Quale/i **database Notion** esporre a `memory_search` (mappatura DB → tipi di
