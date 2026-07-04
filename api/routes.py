@@ -13640,6 +13640,41 @@ def _append_obsidian_interaction_memory(workspace, session_id, user_message, ass
     return target
 
 
+def _in_progress_projects_brief(workspace, *, max_projects: int = 6, max_chars: int = 1600) -> str:
+    """Brief compatto dei progetti IN CORSO per il contesto a regime di Prime.
+
+    Legge projects/project-inventory.csv (righe status=active) e per ognuno rende
+    nome + obiettivo + prossima azione. Niente dump: solo le basi per orientarsi;
+    il dettaglio profondo Prime lo chiede al Librarian (delega). '' se assente.
+    """
+    import csv
+    root = Path(str(workspace)).expanduser()
+    inv = root / "projects" / "project-inventory.csv"
+    rows_out: list[str] = []
+    if inv.is_file():
+        try:
+            with inv.open("r", encoding="utf-8-sig", newline="") as fh:
+                for row in csv.DictReader(fh):
+                    if str(row.get("status", "")).strip().lower() != "active":
+                        continue
+                    name = str(row.get("name") or row.get("project_id") or "").strip()
+                    if not name:
+                        continue
+                    goal = str(row.get("business_goal") or "").strip()
+                    nxt = str(row.get("next_action") or "").strip()
+                    rows_out.append(f"- {name}: {goal} | prossima: {nxt}")
+                    if len(rows_out) >= max_projects:
+                        break
+        except Exception:
+            logger.debug("project-inventory read failed", exc_info=True)
+    if not rows_out:
+        return ""
+    text = "Progetti in corso (basi; per il dettaglio chiedi al Librarian):\n" + "\n".join(rows_out)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n…[brief troncato]"
+    return text
+
+
 def _local_workspace_context(workspace):
     """Return verified local context for the CLI bridge prompts."""
     root = Path(str(workspace)).expanduser()
