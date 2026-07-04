@@ -64,10 +64,20 @@ class _LoopThread:
 
 
 class ClaudeSessionRegistry:
-    def __init__(self, factory: ClientFactory, idle_ttl: float = 1800.0, max_sessions: int = 12) -> None:
+    def __init__(
+        self,
+        factory: ClientFactory,
+        idle_ttl: float = 1800.0,
+        max_sessions: int = 12,
+        pinned_ids: Optional[set[str]] = None,
+    ) -> None:
         self._factory = factory
         self._idle_ttl = idle_ttl
         self._max_sessions = max_sessions
+        # Sessioni "pinnate": il capo persistente (hermes-prime) NON va mai chiuso
+        # per inattivita' ne' sfrattato. Cosi' una pausa dell'utente non distrugge
+        # il contesto e non costringe a re-iniettare il system prompt pesante.
+        self._pinned: set[str] = set(pinned_ids or ())
         self._loop = _LoopThread()
         self._entries: dict[str, _Entry] = {}
         self._mutex = threading.Lock()
@@ -130,15 +140,19 @@ class ClaudeSessionRegistry:
         to_close = []
         with self._mutex:
             for sid, e in list(self._entries.items()):
+                if sid in self._pinned:
+                    continue
                 if now - e.last_used > self._idle_ttl:
                     to_close.append(self._entries.pop(sid).client)
         for c in to_close:
             self._safe_disconnect(c)
 
     def _evict_oldest_locked(self) -> None:
-        if not self._entries:
+        # Non sfrattare mai il capo pinnato: scegli il piu' vecchio tra gli effimeri.
+        candidates = [(sid, e) for sid, e in self._entries.items() if sid not in self._pinned]
+        if not candidates:
             return
-        oldest = min(self._entries.items(), key=lambda kv: kv[1].last_used)[0]
+        oldest = min(candidates, key=lambda kv: kv[1].last_used)[0]
         client = self._entries.pop(oldest).client
         self._safe_disconnect(client)
 

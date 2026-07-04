@@ -1,15 +1,20 @@
 """Per-project overview for the Command Bridge "Projects Strip".
 
-Reads project notes from ``<vault>/01-Projects/*.md`` (direct fs). For each
-project returns:
-- ``tasks`` ("Up next"): up to 3 open ``- [ ]`` checkboxes, prioritising those
-  under a configured section heading (## TODO / ## Next / ## Up next / ...).
-- ``latest`` ("Latest changes"): the 3 most-recently-modified files among the
-  project note and the notes it wikilinks to (name + relative time).
-- ``activity``: a 14-element array (oldest -> today) counting modifications,
-  bucketed from file mtimes.
+Reads project notes from ``<vault>/01-Projects/*.md`` (direct fs) and rolls them
+up into THREE family cards (Hermes · VisionBuilts · Podcast Rap). Each single
+note in 01-Projects is a *sub-project* of one family; the card aggregates them.
 
-Parsing rules live in the small CONFIG block below so they are easy to tweak.
+For each family the payload returns:
+- ``children``: the member sub-projects (name + vault-relative path) to drill in.
+- ``tasks`` ("Up next"): open ``- [ ]`` checkboxes gathered from the member
+  notes AND from idea/area/inbox/resource notes that mention the family, each
+  carrying its own source ``path`` so the toggle writes back to the right note.
+- ``latest`` ("Latest changes"): most-recently-modified notes across the family.
+- ``activity``: 14-element array (oldest -> today) of modification counts.
+
+The flat per-note ``projects`` list is kept too, for backward compatibility.
+
+Parsing rules / family mapping live in the small CONFIG block below.
 """
 from __future__ import annotations
 
@@ -19,17 +24,57 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── CONFIG (parsing rules — tweak here) ──────────────────────────────────────
+# ── CONFIG (parsing rules + family mapping — tweak here) ─────────────────────
 PROJECTS_DIR = "01-Projects"
-TASK_SECTION_KEYWORDS = ("todo", "next", "up next", "da fare", "prossimi", "next steps")
-MAX_TASKS = 3
-MAX_LATEST = 3
+# Headings whose bullet items count as "things to do". Notes here often write
+# tasks as plain bullets (not `- [ ]`), so under one of these sections a bullet
+# is treated as a task; prose under other headings is ignored.
+TASK_SECTION_KEYWORDS = (
+    "todo", "to do", "next", "up next", "next steps", "da fare", "prossim",
+    "azione", "roadmap", "backlog", "mvp", "feature", "miglior", "blocch",
+    "blocco", "task", "obiettivi prossim", "cose da",
+)
+MAX_TASKS = 3            # legacy per-note cap (flat list)
+MAX_FAMILY_TASKS = 12    # aggregated cap per family card (UI scrolls)
+MAX_LATEST = 4
 ACTIVITY_DAYS = 14
 _MAX_BYTES = 1_000_000
 
+# The three families, in display order. ``stem_keywords`` map a 01-Projects note
+# to its family by its filename; ``keywords`` (broader) attribute a *free* task
+# (from Ideas/Areas/Inbox/Resources) to a family by note name + task text.
+FAMILIES = (
+    {
+        "id": "hermes",
+        "name": "Hermes",
+        "stem_keywords": ("hermes",),
+        "keywords": ("hermes", "command bridge", "webui", "web ui", "prime", "voce", "voice", "planet", "pianeta"),
+    },
+    {
+        "id": "visionbuilts",
+        "name": "VisionBuilts",
+        "stem_keywords": ("visionbuilts", "vision builts", "giorgiof28", "creator earning", "creator-earning"),
+        "keywords": ("visionbuilts", "vision builts", "giorgiof28", "creator earning", "creator-earning",
+                     "ebook", "e-book", "n8n", "console", "instagram", "crm", "webhook", "gotenberg"),
+    },
+    {
+        "id": "rap",
+        "name": "Podcast Rap",
+        "stem_keywords": ("rap", "album", "produzione musicale"),
+        "keywords": ("rap", "album", "produzione musicale", "podcast", "beat", "lyrics",
+                     "testo", "strofa", "ritornello", "mix", "master", "musica"),
+    },
+)
+# Vault folders scanned for free-floating tasks (besides the project notes).
+FREE_TASK_DIRS = ("00-Inbox", "02-Ideas", "03-Areas", "04-Resources")
+
 _OPEN_TASK_RE = re.compile(r"^\s*[-*]\s+\[\s\]\s+(.*\S)\s*$")
+# Plain bullet that is NOT a checkbox (open or done). Counts as a task only when
+# it sits under a tasky heading. Limit indent so deep sub-bullets are skipped.
+_BULLET_RE = re.compile(r"^[ \t]{0,3}[-*]\s+(?!\[[ xX]\])(.*\S)\s*$")
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.*\S)\s*$")
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
+_NON_TASK = {"nessuno", "nessuna", "none", "n/a", "na", "-", "tbd"}
 
 _CACHE_TTL = 15.0
 _cache_lock = threading.Lock()
@@ -52,6 +97,10 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+def _rel(path: Path, vault: Path) -> str:
+    return str(path.relative_to(vault)).replace("\\", "/")
+
+
 def _rel_time(ts: float) -> str:
     if not ts:
         return ""
@@ -65,11 +114,22 @@ def _rel_time(ts: float) -> str:
     return f"{int(delta // 86400)}g fa"
 
 
-def parse_open_tasks(body: str) -> list[str]:
-    """Open `- [ ]` tasks, those under TODO/Next-style headings first. Max MAX_TASKS."""
+def _looks_like_task(text: str) -> bool:
+    t = text.strip().strip("*_`").strip()
+    low = t.lower()
+    if len(t) < 4 or low in _NON_TASK or low.startswith("nessun"):
+        return False
+    return True
+
+
+def _open_tasks_with_flag(body: str) -> list[tuple[str, bool]]:
+    """Things to do as (text, under_tasky_heading).
+
+    Captures open ``- [ ]`` checkboxes anywhere, plus plain bullets that sit
+    under a tasky heading (where these notes actually write their to-dos).
+    """
+    out: list[tuple[str, bool]] = []
     section_is_tasky = False
-    prioritized: list[str] = []
-    plain: list[str] = []
     for line in body.splitlines():
         h = _HEADING_RE.match(line)
         if h:
@@ -78,8 +138,42 @@ def parse_open_tasks(body: str) -> list[str]:
             continue
         m = _OPEN_TASK_RE.match(line)
         if m:
-            (prioritized if section_is_tasky else plain).append(m.group(1).strip())
+            out.append((m.group(1).strip(), section_is_tasky))
+            continue
+        if section_is_tasky:
+            b = _BULLET_RE.match(line)
+            if b and _looks_like_task(b.group(1)):
+                out.append((b.group(1).strip(), True))
+    return out
+
+
+def parse_open_tasks(body: str) -> list[str]:
+    """Open tasks, tasky-heading ones first, capped at MAX_TASKS (legacy/flat)."""
+    prioritized = [t for t, pri in _open_tasks_with_flag(body) if pri]
+    plain = [t for t, pri in _open_tasks_with_flag(body) if not pri]
     return (prioritized + plain)[:MAX_TASKS]
+
+
+def _family_for_stem(stem: str) -> str | None:
+    s = stem.lower()
+    for fam in FAMILIES:
+        if any(k in s for k in fam["stem_keywords"]):
+            return fam["id"]
+    return None
+
+
+def _family_for_text(*texts: str) -> str | None:
+    """Attribute a free task to a family by note name + task text keywords.
+
+    Checks the specific families (VisionBuilts, Rap) before Hermes so a generic
+    Hermes mention doesn't swallow a clearly-VisionBuilts task.
+    """
+    blob = " ".join(t.lower() for t in texts if t)
+    for fid in ("visionbuilts", "rap", "hermes"):
+        fam = next(f for f in FAMILIES if f["id"] == fid)
+        if any(k in blob for k in fam["keywords"]):
+            return fid
+    return None
 
 
 def _activity_buckets(mtimes, days: int = ACTIVITY_DAYS) -> list[int]:
@@ -96,48 +190,131 @@ def _activity_buckets(mtimes, days: int = ACTIVITY_DAYS) -> list[int]:
     return buckets
 
 
+def _latest_entries(notes, vault: Path) -> list[dict]:
+    ordered = sorted(set(notes), key=_mtime, reverse=True)
+    return [{
+        "name": p.stem,
+        "path": _rel(p, vault),
+        "mtime": _mtime(p),
+        "rel": _rel_time(_mtime(p)),
+    } for p in ordered[:MAX_LATEST]]
+
+
+def _build_families(vault: Path, project_notes, stem_map) -> list[dict]:
+    """Roll the per-note projects up into the three family cards."""
+    members: dict[str, list[Path]] = {f["id"]: [] for f in FAMILIES}
+    for note in project_notes:
+        fid = _family_for_stem(note.stem)
+        if fid:
+            members[fid].append(note)
+
+    # Gather free-floating tasks from Ideas/Areas/Inbox/Resources, attributed
+    # to a family by keyword. (text, rel_path, family_id)
+    free: list[tuple[str, str, str]] = []
+    for d in FREE_TASK_DIRS:
+        base = vault / d
+        if not base.is_dir():
+            continue
+        for nf in base.rglob("*.md"):
+            body = _read(nf)
+            if not body:
+                continue
+            rel = _rel(nf, vault)
+            for text, _pri in _open_tasks_with_flag(body):
+                fam = _family_for_text(text, nf.stem, rel)
+                if fam:
+                    free.append((text, rel, fam))
+
+    families: list[dict] = []
+    for fam in FAMILIES:
+        fid = fam["id"]
+        mlist = members[fid]
+        # primary: exact family-name note if present, else most-recent member.
+        primary = next((p for p in mlist if p.stem.lower() == fam["name"].lower()), None)
+        if primary is None and mlist:
+            primary = max(mlist, key=_mtime)
+        # children sorted: primary first, then by name.
+        children_notes = sorted(
+            mlist, key=lambda p: (p is not primary, p.stem.lower())
+        )
+        children = [{"name": p.stem, "path": _rel(p, vault)} for p in children_notes]
+
+        # Tasks: tasky-heading member tasks, then plain member tasks, then free
+        # tasks; dedup by text (case-insensitive); each keeps its source path.
+        member_pri: list[tuple[str, str]] = []
+        member_plain: list[tuple[str, str]] = []
+        for p in children_notes:
+            rel = _rel(p, vault)
+            for text, pri in _open_tasks_with_flag(_read(p)):
+                (member_pri if pri else member_plain).append((text, rel))
+        ordered_tasks = member_pri + member_plain + [(t, rp) for t, rp, ff in free if ff == fid]
+        seen: set[str] = set()
+        tasks: list[dict] = []
+        for text, rel in ordered_tasks:
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tasks.append({"text": text, "path": rel})
+            if len(tasks) >= MAX_FAMILY_TASKS:
+                break
+
+        # latest + activity across members and the notes they wikilink to.
+        related: set[Path] = set(mlist)
+        for p in mlist:
+            for m in _WIKILINK_RE.finditer(_read(p)):
+                tp = stem_map.get(m.group(1).strip().lower())
+                if tp:
+                    related.add(tp)
+
+        families.append({
+            "id": fid,
+            "name": fam["name"],
+            "primary_path": _rel(primary, vault) if primary else "",
+            "children": children,
+            "tasks": tasks,
+            "latest": _latest_entries(related, vault),
+            "activity": _activity_buckets([_mtime(p) for p in related]),
+        })
+    return families
+
+
 def build_projects_overview(vault_path) -> dict:
-    """Walk 01-Projects and return per-project overview payloads. Pure function."""
+    """Walk 01-Projects -> flat ``projects`` + grouped ``families``. Pure fn."""
     vault = Path(str(vault_path)).expanduser()
     pdir = vault / PROJECTS_DIR
     if not pdir.is_dir():
-        return {"projects": [], "count": 0, "exists": False}
+        return {"families": [], "projects": [], "count": 0, "exists": False}
 
     stem_map: dict[str, Path] = {}
     for p in vault.rglob("*.md"):
         stem_map.setdefault(p.stem.lower(), p)
 
+    project_notes = sorted(pdir.glob("*.md"), key=lambda p: p.name.lower())
     projects = []
-    for note in sorted(pdir.glob("*.md"), key=lambda p: p.name.lower()):
+    for note in project_notes:
         body = _read(note)
-        tasks = parse_open_tasks(body)
         related = {note}
         for m in _WIKILINK_RE.finditer(body):
             tp = stem_map.get(m.group(1).strip().lower())
             if tp:
                 related.add(tp)
-        related_sorted = sorted(related, key=_mtime, reverse=True)
-        latest = [{
-            "name": p.stem,
-            "path": str(p.relative_to(vault)).replace("\\", "/"),
-            "mtime": _mtime(p),
-            "rel": _rel_time(_mtime(p)),
-        } for p in related_sorted[:MAX_LATEST]]
-        activity = _activity_buckets([_mtime(p) for p in related])
         projects.append({
             "id": re.sub(r"[^\w]+", "-", note.stem).strip("-").lower() or "project",
             "name": note.stem,
-            "path": str(note.relative_to(vault)).replace("\\", "/"),
+            "path": _rel(note, vault),
             "mtime": _mtime(note),
-            "tasks": tasks,
-            "latest": latest,
-            "activity": activity,
+            "tasks": parse_open_tasks(body),
+            "latest": _latest_entries(related, vault),
+            "activity": _activity_buckets([_mtime(p) for p in related]),
         })
-    return {"projects": projects, "count": len(projects), "exists": True}
+
+    families = _build_families(vault, project_notes, stem_map)
+    return {"families": families, "projects": projects, "count": len(projects), "exists": True}
 
 
 def get_projects_overview(vault_path) -> dict:
-    """Cached build_projects_overview (TTL + projects-dir mtime invalidation)."""
+    """Cached build_projects_overview (TTL + vault-dir mtime invalidation)."""
     vault = str(Path(str(vault_path)).expanduser())
     pdir = Path(vault) / PROJECTS_DIR
     sig = _mtime(pdir)

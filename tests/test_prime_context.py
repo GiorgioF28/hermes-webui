@@ -36,3 +36,25 @@ def test_brief_empty_when_no_csv(tmp_path):
 def test_brief_is_bounded(tmp_path):
     brief = routes._in_progress_projects_brief(_mk_ws(tmp_path), max_chars=40)
     assert len(brief) <= 60  # 40 + suffisso troncamento
+
+
+def test_system_prompt_is_lean(tmp_path, monkeypatch):
+    monkeypatch.setattr(routes, "_hermes_prime_persona_text", lambda: "PERSONA_X")
+    ws = _mk_ws(tmp_path)
+    sp = routes._hermes_prime_system_prompt(ws)
+    append = sp["append"]
+    # persona + brief presenti
+    assert "PERSONA_X" in append
+    assert "Alpha" in append
+    # vecchio dump vault RIMOSSO
+    assert "Contesto vault verificato" not in append
+    assert "Obsidian memory" not in append
+    # istruzione a delegare al Librarian per il dettaglio profondo
+    assert "Librarian" in append
+
+
+def test_system_prompt_shape_unchanged(tmp_path):
+    sp = routes._hermes_prime_system_prompt(_mk_ws(tmp_path))
+    assert sp["type"] == "preset"
+    assert sp["preset"] == "claude_code"
+    assert isinstance(sp["append"], str)

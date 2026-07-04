@@ -393,3 +393,7 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "if (!reply && ph && ph.parentNode)" in source
     assert "api('api/bridge/tasks')" in source
     assert "setInterval(pollTasks, 3000)" in source
+    assert 'id="cbBrainClaude"' in source
+    assert 'id="cbBrainCodex"' in source
+    assert "api/bridge/prime/lead" in source
+    assert "action: 'auto'" in source

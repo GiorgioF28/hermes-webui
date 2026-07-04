@@ -76,12 +76,13 @@ def test_run_and_store_marks_ok_before_enqueueing_librarian(monkeypatch, tmp_pat
         )
     )
 
-    assert calls[0] == (
-        "worker",
-        "fai qa",
-        "claude-sonnet-4-6",
-        {"agent_id": "qa-reviewer"},
-    )
+    # _run_and_store ora passa anche progress=<task dict> per catturare l'output
+    # parziale se il turno si interrompe (token finiti) prima della fine.
+    assert calls[0][0] == "worker"
+    assert calls[0][1] == "fai qa"
+    assert calls[0][2] == "claude-sonnet-4-6"
+    assert calls[0][3]["agent_id"] == "qa-reviewer"
+    assert calls[0][3]["progress"] is delegation._BG_TASKS[task_id]
     assert calls[1][0] == "enqueue"
     assert calls[1][4] == "Agent Result"
     assert calls[1][5]["status"] == "ok"

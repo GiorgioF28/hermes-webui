@@ -7946,6 +7946,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/prime":
         return _handle_bridge_prime(handler, body)
 
+    if parsed.path == "/api/bridge/prime/lead":
+        return _handle_bridge_prime_lead(handler, body)
+
     if parsed.path == "/api/clarify/respond":
         return _handle_clarify_respond(handler, body)
 
@@ -10774,22 +10777,44 @@ def _handle_projects_overview(handler, parsed):
     return j(handler, data) or True
 
 
-def _hermes_prime_system_prompt(workspace):
-    """Chief-of-staff persona (prompts/hermes-prime.md) + read-only vault context."""
-    persona = ""
+def _hermes_prime_persona_text():
+    """Solo il testo persona (prompts/hermes-prime.md), senza contesto vault."""
     try:
         pf = Path(__file__).resolve().parent.parent / "prompts" / "hermes-prime.md"
         if pf.is_file():
-            persona = pf.read_text(encoding="utf-8")
+            return pf.read_text(encoding="utf-8")
     except Exception:
-        persona = ""
-    local_context = _local_workspace_context(workspace)
-    append = (
-        persona
-        + "\n\n--- Contesto vault verificato (sola lettura) ---\n" + local_context
-        + "\n\nRispondi breve (2-4 frasi), in italiano, da capo di stato maggiore."
+        logger.debug("hermes-prime persona read failed", exc_info=True)
+    return ""
+
+
+def _hermes_prime_system_prompt(workspace):
+    """Chief-of-staff persona (prompts/hermes-prime.md) + contesto LEGGERO.
+
+    Fase 1 ciclo-memoria: niente più dump del vault nel prompt di Prime. Prime
+    tiene solo persona + basi dei progetti in corso; per il dettaglio profondo
+    (codice, memoria, come funzionano le componenti) DELEGA al Librarian, che gira
+    su Codex e non consuma i crediti Claude di Prime.
+    """
+    persona = _hermes_prime_persona_text()
+    brief = _in_progress_projects_brief(workspace)
+    parts = [persona]
+    if brief:
+        parts.append("--- Progetti in corso ---\n" + brief)
+    parts.append(
+        "Per dettagli profondi (codice, memoria, funzionamento delle componenti) "
+        "NON ricostruirli a mente: delega al Librarian (task_type 'memoria'/'ricerca') "
+        "e usa la sua risposta. Rispondi breve (2-4 frasi), in italiano, da capo di "
+        "stato maggiore."
     )
-    return {"type": "preset", "preset": "claude_code", "append": append}
+    append = "\n\n".join(parts)
+    # exclude_dynamic_sections: toglie cwd/auto-memory/git-status dal system prompt
+    # cosi' il grosso prefisso del preset resta STATICO e cachabile turno dopo turno
+    # (il git status cambia ad ogni commit e altrimenti rompe la cache). Il contenuto
+    # tolto e' re-iniettato nel primo messaggio. CLI vecchie lo ignorano (safe).
+    # Prime delega: non gli serve il git status live (quello e' dei sotto-agenti).
+    return {"type": "preset", "preset": "claude_code", "append": append,
+            "exclude_dynamic_sections": True}
 
 
 def _hermes_prime_turn_limits():
@@ -10845,9 +10870,120 @@ def _reset_prime_session(reg, fut):
         logger.debug("prime session reset failed", exc_info=True)
 
 
+class _ClaudeExhausted(Exception):
+    """Il turno Claude è morto per crediti/quota finiti → fai handoff a Codex.
+
+    Porta con sé il testo parziale già prodotto (se c'è) e il motivo, così il
+    brain Codex può riprendere il filo senza ripartire da zero.
+    """
+
+    def __init__(self, partial="", reason=""):
+        super().__init__(reason or "claude exhausted")
+        self.partial = partial or ""
+        self.reason = reason or ""
+
+
 def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_status=None):
+    """Un turno di Hermes Prime, instradato al capo corrente (Claude o Codex).
+
+    Default Claude. Se Claude esaurisce i crediti durante il turno, flippa il
+    capo a Codex (stato persistito in tasks/lead-brain.json) e ritenta lo stesso
+    turno su Codex, passandogli active-context + la risposta parziale. Una volta
+    su Codex ci resta (revert manuale via /api/bridge/prime/lead o cancellando il
+    file di stato) finché Giorgio non lo riporta a Claude.
+    """
+    from api import lead_brain
+
+    # Comando manuale del capo dalla chat ("/brain codex" | "/brain claude" |
+    # "/brain"): rete di sicurezza se l'auto-failover non scatta. Risponde subito
+    # senza coinvolgere Claude/Codex.
+    brain_cmd = lead_brain.parse_brain_command(message)
+    if brain_cmd is not None:
+        from api.prime_delegation import get_background_tasks
+        if brain_cmd in (lead_brain.LEAD_CLAUDE, lead_brain.LEAD_CODEX):
+            state = lead_brain.set_lead(
+                workspace, brain_cmd, reason="manuale (chat)", manual=True,
+            )
+            reply = f"Ok, capo impostato e pinnato a {state['lead'].upper()}."
+        elif brain_cmd == "auto":
+            state = lead_brain.set_auto_failover(workspace)
+            reply = f"Failover automatico riattivato. Capo attuale: {state['lead'].upper()}."
+        else:
+            state = lead_brain.get_lead_state(workspace)
+            mode = "PINNATO" if state.get("manual") else "AUTO"
+            reply = (
+                f"Capo attuale: {state.get('lead', lead_brain.LEAD_CLAUDE).upper()} "
+                f"({mode})."
+            )
+        if on_token is not None:
+            on_token(reply)
+        return {"reply": reply, "delegations": get_background_tasks()}
+
+    if lead_brain.get_lead(workspace) == lead_brain.LEAD_CODEX:
+        return _hermes_prime_reply_codex(message, workspace, on_token=on_token, on_status=on_status)
+    try:
+        return _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status)
+    except _ClaudeExhausted as ex:
+        current = lead_brain.get_lead_state(workspace)
+        if current.get("manual"):
+            raise RuntimeError(
+                "Claude è pinnato manualmente e ha rifiutato il turno per quota "
+                f"({ex.reason or 'limite Anthropic'}). Lo switch automatico a Codex "
+                "è disattivato: scegli CODEX dalla UI oppure usa /brain auto."
+            ) from ex
+        state = lead_brain.set_lead(
+            workspace,
+            lead_brain.LEAD_CODEX,
+            reason=ex.reason or "anthropic-exhausted",
+            manual=False,
+        )
+        logger.warning("Hermes Prime brain failover Claude→Codex: %s", state.get("reason"))
+        if on_status is not None:
+            on_status({"state": "handoff", "from": "claude", "to": "codex"})
+        return _hermes_prime_reply_codex(
+            message, workspace, on_token=on_token, on_status=on_status, partial=ex.partial,
+        )
+
+
+def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=None, on_status=None, partial=""):
+    """Turno di Prime quando il capo è Codex (one-shot via `codex exec`).
+
+    Niente streaming token e niente tool `delega` in-process: Codex risponde come
+    capo di stato maggiore leggendo active-context + handoff. Può comunque agire
+    sul workspace (gira con i suoi permessi CLI come nelle deleghe)."""
+    from api.prime_delegation import get_background_tasks, _codex_exec_blocking
+    from api import lead_brain
+
+    if on_status is not None:
+        on_status({"state": "reasoning"})
+
+    handoff = lead_brain.build_handoff_packet(workspace, user_message=message, partial_reply=partial)
+    prompt = (
+        _hermes_prime_persona_text()
+        + "\n\n=== SUBENTRO COME BRAIN ===\n"
+        "Claude (il brain precedente) ha esaurito i crediti e il comando di Hermes "
+        "Prime passa ora a TE (Codex). Riprendi il filo dallo stato qui sotto e "
+        "rispondi all'utente come capo di stato maggiore.\n\n"
+        + handoff
+        + "\n\n=== ISTRUZIONI ===\nRispondi SOLO con il messaggio per l'utente: "
+        "italiano, 2-4 frasi, diretto, da chief of staff. Niente output grezzi né "
+        "elenchi di file. Se serve un lavoro pesante, dillo in una riga (lo si delega)."
+    )
+    try:
+        reply = (_codex_exec_blocking(prompt, str(workspace)) or "").strip()
+    except Exception as exc:
+        logger.exception("codex brain reply failed")
+        detail = _redact_text(_sanitize_error(exc))
+        raise RuntimeError(f"Codex CLI non ha completato il turno: {detail}") from exc
+    if reply and on_token is not None:
+        on_token(reply)
+    return {"reply": reply, "delegations": get_background_tasks()}
+
+
+def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=None, on_status=None):
     """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
     from api.prime_delegation import get_background_tasks
+    from api import lead_brain
 
     def _status(state, **extra):
         if on_status is not None:
@@ -10894,6 +11030,11 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
                 r = getattr(m, "result", None)
                 if r:
                     final["text"] = str(r)
+                # Crediti/usage Claude finiti: il SDK NON solleva, segnala l'errore
+                # qui (is_error + api_error_status). Trasformalo in handoff a Codex.
+                quota_reason = lead_brain.result_message_quota_reason(m)
+                if quota_reason:
+                    raise _ClaudeExhausted(partial="".join(parts), reason=quota_reason)
 
     # Watchdog "anti-blocco / anti-loop" basato sul progresso, non un wall-clock
     # fisso. NB: un TimeoutError NON deve sfuggire — in Python 3.11
@@ -10939,8 +11080,13 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
                         except Exception:
                             logger.debug("prime turn cancel failed", exc_info=True)
                         break
-        except Exception:
+        except Exception as turn_exc:
             _reset_prime_session(reg, fut)
+            # Crediti Claude finiti a metà turno → segnala l'handoff a Codex.
+            if lead_brain.is_claude_quota_error(turn_exc):
+                raise _ClaudeExhausted(
+                    partial="".join(parts), reason=f"{type(turn_exc).__name__}",
+                ) from turn_exc
             raise
         if timed_out:
             _reset_prime_session(reg, fut)
@@ -11022,6 +11168,28 @@ def _handle_bridge_prime(handler, body):
         except _CLIENT_DISCONNECT_ERRORS:
             pass
     return True
+
+
+def _handle_bridge_prime_lead(handler, body):
+    """POST /api/bridge/prime/lead — leggi o cambia il capo (brain) di Prime.
+
+    Body: {} o {"action":"get"} → ritorna lo stato. {"action":"set","lead":
+    "claude"|"codex"} → imposta il capo a mano (revert/forzatura). Niente segreti.
+    """
+    from api import lead_brain
+
+    workspace = Path(str(DEFAULT_WORKSPACE))
+    action = str((body or {}).get("action") or "get").strip().lower()
+    if action == "set":
+        lead = str((body or {}).get("lead") or "").strip().lower()
+        if lead not in (lead_brain.LEAD_CLAUDE, lead_brain.LEAD_CODEX):
+            return bad(handler, "lead must be 'claude' or 'codex'")
+        state = lead_brain.set_lead(workspace, lead, reason="manuale (UI)", manual=True)
+        return j(handler, {"ok": True, **state})
+    if action == "auto":
+        state = lead_brain.set_auto_failover(workspace)
+        return j(handler, {"ok": True, **state})
+    return j(handler, {"ok": True, **lead_brain.get_lead_state(workspace)})
 
 
 def _handle_bridge_prime_brief(handler, body):
@@ -12822,12 +12990,19 @@ def _cc_update_today_task_checkbox(path: Path, title: str, done: bool) -> dict:
     lines = []
     matches = 0
     for line in text.splitlines():
-        match = re.match(r"^(\s*-\s+\[)( |x|X)(\]\s+)(.*)$", line)
+        match = re.match(r"^(\s*[-*]\s+\[)( |x|X)(\]\s+)(.*)$", line)
         if match and match.group(4).strip() == title:
             matches += 1
             lines.append(f"{match.group(1)}{'x' if done else ' '}{match.group(3)}{match.group(4)}")
-        else:
-            lines.append(line)
+            continue
+        # Family cards also surface plain bullets (not just `- [ ]`); completing
+        # one converts it to a done checkbox so the click sticks. Rest untouched.
+        bullet = re.match(r"^(\s*)[-*]\s+(?!\[[ xX]\])(.*\S)\s*$", line)
+        if done and bullet and bullet.group(2).strip() == title:
+            matches += 1
+            lines.append(f"{bullet.group(1)}- [x] {bullet.group(2).strip()}")
+            continue
+        lines.append(line)
     updated = "\n".join(lines)
     if text.endswith("\n"):
         updated += "\n"
@@ -12968,9 +13143,11 @@ def _cc_add_project_note_task(path: Path, text: str) -> dict:
 def _handle_projects_task(handler, body):
     """POST /api/projects/task — toggle done or add an Up-next checkbox.
 
-    Writes directly into the project note in ``obsidian-vault/01-Projects``.
+    Writes directly into a note anywhere inside ``obsidian-vault``.
     Body: {action: "toggle"|"add", note_path, text, done?}. note_path is the
     vault-relative path the Command Bridge card already carries (data-path).
+    Family cards aggregate tasks from Ideas/Areas/Inbox notes too, so the target
+    is sandboxed to the vault (not only 01-Projects), still .md and existing.
     """
     try:
         action = str(body.get("action") or "").strip().lower()
@@ -12986,13 +13163,12 @@ def _handle_projects_task(handler, body):
             return bad(handler, "text is too long", status=400)
         root = _control_center_root()
         vault = (root / "obsidian-vault").resolve()
-        projects_dir = (vault / "01-Projects").resolve()
         raw_path = Path(note_path_raw)
         candidate = raw_path.resolve() if raw_path.is_absolute() else (vault / raw_path).resolve()
         try:
-            candidate.relative_to(projects_dir)
+            candidate.relative_to(vault)
         except ValueError:
-            return bad(handler, "note_path must be inside 01-Projects", status=400)
+            return bad(handler, "note_path must be inside the vault", status=400)
         if candidate.suffix.lower() != ".md" or not candidate.is_file():
             return bad(handler, "project note not found", status=400)
         audit = _cc_audit_snapshot(root, "project-note-task", [candidate], {
@@ -13543,7 +13719,7 @@ def _read_text_excerpt(path: Path, *, max_chars: int = 2200) -> str:
     return text[:max_chars].rstrip() + "\n...[truncated]"
 
 
-def _obsidian_memory_context(workspace, *, max_chars: int = 14000) -> str:
+def _obsidian_memory_context(workspace, *, max_chars: int = 6000) -> str:
     """Return compact Markdown-vault context for local CLI bridge prompts."""
     root = Path(str(workspace)).expanduser()
     vault = root / "obsidian-vault"
@@ -13568,18 +13744,18 @@ def _obsidian_memory_context(workspace, *, max_chars: int = 14000) -> str:
         if not path.is_file():
             continue
         rel = str(path.relative_to(root)).replace("\\", "/")
-        excerpt = _read_text_excerpt(path, max_chars=1800)
+        excerpt = _read_text_excerpt(path, max_chars=900)
         if excerpt:
             sections.append(f"\n--- {rel} ---\n{excerpt}")
 
     project_dir = vault / "01-Projects"
     if project_dir.is_dir():
-        project_notes = sorted(project_dir.glob("*.md"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[:8]
+        project_notes = sorted(project_dir.glob("*.md"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[:3]
         if project_notes:
             sections.append("\nNote progetto principali:")
         for path in project_notes:
             rel = str(path.relative_to(vault)).replace("\\", "/")
-            excerpt = _read_text_excerpt(path, max_chars=900)
+            excerpt = _read_text_excerpt(path, max_chars=500)
             if excerpt:
                 sections.append(f"\n--- obsidian-vault/{rel} ---\n{excerpt}")
 
@@ -13972,7 +14148,7 @@ def _get_claude_registry():
                     system_prompt=system_prompt,
                     permission_mode="bypassPermissions",
                     include_partial_messages=True,
-                    model="claude-opus-4-8",
+                    model="claude-fable-5",
                     mcp_servers=_mcp,
                     allowed_tools=_allowed,
                     # Isolate the bridge from the user's global Claude Code config:
@@ -13987,7 +14163,15 @@ def _get_claude_registry():
                 await client.connect()
                 return client
 
-            _CLAUDE_REGISTRY = ClaudeSessionRegistry(factory=_factory, idle_ttl=1800.0, max_sessions=12)
+            # idle_ttl alto (12h): una pausa dell'utente NON deve uccidere il
+            # contesto e costringere a re-iniettare il system prompt pesante.
+            # hermes-prime e' pinnato: il capo persistente non scade mai per
+            # inattivita'. L'anti-loop "dice che lavora ma non fa niente" resta
+            # gestito dal watchdog PER-TURNO (_hermes_prime_turn_limits), non da qui.
+            _CLAUDE_REGISTRY = ClaudeSessionRegistry(
+                factory=_factory, idle_ttl=43200.0, max_sessions=12,
+                pinned_ids={"hermes-prime"},
+            )
 
             def _sweeper():
                 while True:

@@ -105,6 +105,12 @@
 '.cb-voicetoggle{background:transparent;border:1px solid var(--cb-line);color:var(--cb-faint);border-radius:8px;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;transition:.15s;}',
 '.cb-voicetoggle:hover{color:var(--cb-text);}',
 '.cb-voicetoggle.cb-on{color:var(--cb-accent);border-color:var(--cb-accent-dim);}',
+'.cb-brainctl{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--cb-line);border-radius:9px;background:rgba(255,255,255,.025);}',
+'.cb-brainbtn{border:0;border-radius:6px;background:transparent;color:var(--cb-faint);font:600 8.5px var(--cb-mono);letter-spacing:.08em;padding:5px 6px;cursor:pointer;transition:.15s;}',
+'.cb-brainbtn:hover{color:var(--cb-text);background:rgba(255,255,255,.05);}',
+'.cb-brainbtn.cb-active{color:#160900;background:var(--cb-accent);}',
+'.cb-brainbtn.cb-auto-active{color:var(--cb-accent-2);box-shadow:inset 0 0 0 1px var(--cb-accent-dim);}',
+'.cb-brainctl.cb-busy{opacity:.55;pointer-events:none;}',
 '.cb-chat-log{flex:1;min-height:0;overflow-y:auto;padding:18px 20px;display:flex;flex-direction:column;gap:14px;}',
 '.cb-msg{max-width:92%;font-size:13.5px;line-height:1.5;}',
 '.cb-msg .cb-who{font-family:var(--cb-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--cb-faint);margin-bottom:4px;}',
@@ -186,6 +192,7 @@
 '  border-radius:8px;padding:8px;background:rgba(0,0,0,.18);}',
 '.cb-agent-state{width:8px;height:8px;border-radius:50%;margin-top:4px;background:#6b7280;box-shadow:0 0 8px rgba(107,114,128,.35);}',
 '.cb-agent-state.cb-live{background:#48c774;box-shadow:0 0 10px rgba(72,199,116,.65);}',
+'.cb-agent-state.cb-waiting{background:#f5c518;box-shadow:0 0 10px rgba(245,197,24,.6);}',
 '.cb-agent-name{font-family:var(--cb-disp);font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
 '.cb-agent-role{font-size:11px;line-height:1.35;color:var(--cb-muted);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
 '.cb-agent-meta{font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-faint);text-align:right;white-space:nowrap;}',
@@ -255,6 +262,19 @@
 '.cb-task-input::placeholder{color:var(--cb-faint);}',
 '.cb-empty{font-family:var(--cb-mono);font-size:11px;color:var(--cb-faint);font-style:italic;}',
 '.cb-loading{padding:60px;text-align:center;font-family:var(--cb-mono);color:var(--cb-muted);letter-spacing:.1em;}',
+/* family cards: groupable + draggable (hold a card and move to reorder) */
+'.cb-card.cb-fam{cursor:grab;user-select:none;-webkit-user-select:none;touch-action:manipulation;}',
+'.cb-card.cb-fam:active{cursor:grabbing;}',
+'.cb-card.cb-dragging{opacity:.9;cursor:grabbing;z-index:6;transform:scale(1.025);border-color:rgba(255,138,61,.75);box-shadow:0 24px 64px -18px rgba(255,106,0,.7);}',
+'.cb-grid.cb-drag-active .cb-card:not(.cb-dragging){transition:transform .18s ease;}',
+'.cb-grid.cb-drag-active .cb-card:hover{transform:none;box-shadow:none;}',
+'.cb-card-head{display:flex;align-items:flex-start;gap:10px;justify-content:space-between;}',
+'.cb-drag{flex:0 0 auto;color:var(--cb-faint);font-size:15px;line-height:1;letter-spacing:1px;cursor:grab;padding:2px 2px 6px;opacity:.55;transition:opacity .15s,color .15s;}',
+'.cb-card:hover .cb-drag{opacity:.95;color:var(--cb-accent);}',
+'.cb-subs{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px;}',
+'.cb-sub{font-family:var(--cb-mono);font-size:10.5px;color:var(--cb-text);border:1px solid var(--cb-line);border-radius:999px;padding:4px 10px;background:rgba(255,255,255,.03);cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:border-color .15s,background .15s,color .15s;}',
+'.cb-sub:hover{border-color:rgba(255,138,61,.55);background:rgba(255,138,61,.08);color:#fff;}',
+'.cb-tasks-scroll{max-height:230px;overflow:auto;margin:0 -4px;padding:0 4px;}',
 /* white -> fluo-orange gradient on display titles (the accent the user wanted on TEXT) */
 '.cb-chat-name,.cb-sec-title,.cb-card-name{background:linear-gradient(90deg,#ffffff 0%,#ffffff 26%,#ffb673 62%,var(--cb-accent) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
 ''
@@ -278,6 +298,11 @@
             '<div class="cb-chat-name">Hermes Prime</div>' +
             '<div class="cb-chat-role">chief of staff · voce attiva</div>' +
           '</div>' +
+            '<div class="cb-brainctl" id="cbBrainCtl" aria-label="Seleziona brain di Hermes Prime">' +
+              '<button type="button" class="cb-brainbtn" id="cbBrainClaude" data-lead="claude" title="Usa Claude cloud e pinna la scelta">CLOUD</button>' +
+              '<button type="button" class="cb-brainbtn" id="cbBrainAuto" data-action="auto" title="Riabilita il failover automatico">AUTO</button>' +
+              '<button type="button" class="cb-brainbtn" id="cbBrainCodex" data-lead="codex" title="Usa Codex locale e pinna la scelta">CODEX</button>' +
+            '</div>' +
             '<button type="button" class="cb-voicetoggle cb-on" id="cbVoice" aria-label="Voce on/off" title="Voce on/off">' +
               '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg></button>' +
           '</div>' +
@@ -361,6 +386,8 @@
     if (pasteInput) pasteInput.addEventListener('paste', onPrimePaste);
     var vb = $('cbVoice');
     if (vb) vb.addEventListener('click', function () { userEngaged = true; toggleVoice(); });
+    wireBrainControls();
+    refreshBrainState();
     primeSay('prime', 'Plancia online. Ti dò il quadro quando vuoi — chiedimi "cosa serve oggi?" e ti briffo. Premi il microfono per parlarmi a voce.');
     BUILT = true;
     return true;
@@ -370,6 +397,48 @@
   var voiceOn = true, userEngaged = false, _ctx = null, _an = null, _raf = null, _cur = null, _rec = null, _ttsActive = false;
   var _listening = false, _micTimer = null;
   var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
+
+  function renderBrainState(state) {
+    state = state || {};
+    var lead = String(state.lead || 'claude').toLowerCase();
+    var manual = !!state.manual;
+    var claude = $('cbBrainClaude'), codex = $('cbBrainCodex'), auto = $('cbBrainAuto');
+    if (claude) claude.classList.toggle('cb-active', lead === 'claude');
+    if (codex) codex.classList.toggle('cb-active', lead === 'codex');
+    if (auto) auto.classList.toggle('cb-auto-active', !manual);
+    var role = document.querySelector('.cb-chat-role');
+    if (role) role.textContent = 'chief of staff · ' + lead.toUpperCase() + ' · ' + (manual ? 'PIN' : 'AUTO') + ' · ' + (voiceOn ? 'voce attiva' : 'voce muta');
+  }
+
+  function setBrain(payload) {
+    var ctl = $('cbBrainCtl'); if (ctl) ctl.classList.add('cb-busy');
+    var cfg = window.__HERMES_CONFIG__ || {};
+    return fetch(new URL('api/bridge/prime/lead', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: JSON.stringify(payload || {})
+    }).then(function (r) {
+      if (!r.ok) return r.json().catch(function () { return {}; }).then(function (d) { throw new Error(d.error || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function (state) {
+      renderBrainState(state);
+      return state;
+    }).catch(function (err) {
+      sysNote('Switch brain fallito: ' + String(err && err.message || err));
+    }).then(function (state) {
+      if (ctl) ctl.classList.remove('cb-busy');
+      return state;
+    });
+  }
+
+  function refreshBrainState() { return setBrain({ action: 'get' }); }
+
+  function wireBrainControls() {
+    var claude = $('cbBrainClaude'), codex = $('cbBrainCodex'), auto = $('cbBrainAuto');
+    if (claude) claude.addEventListener('click', function () { setBrain({ action: 'set', lead: 'claude' }); });
+    if (codex) codex.addEventListener('click', function () { setBrain({ action: 'set', lead: 'codex' }); });
+    if (auto) auto.addEventListener('click', function () { setBrain({ action: 'auto' }); });
+  }
 
   // The central petal-core is the primary Voice Orb; the memory planet on the
   // right echoes the same state so its heart pulses in sync with the voice.
@@ -709,7 +778,7 @@
   function toggleVoice() {
     voiceOn = !voiceOn;
     var b = $('cbVoice'); if (b) b.classList.toggle('cb-on', voiceOn);
-    var role = document.querySelector('.cb-chat-role'); if (role) role.textContent = 'chief of staff · ' + (voiceOn ? 'voce attiva' : 'voce muta');
+    refreshBrainState();
     if (!voiceOn) { stopSpeak(); setOrb('idle', 0); }
   }
 
@@ -965,85 +1034,202 @@
     }).join('') + '</span>';
   }
 
+  // Saved family order (drag&drop). Array of family ids, persisted locally.
+  function loadProjOrder() {
+    try { return JSON.parse(localStorage.getItem('cbProjOrder') || '[]') || []; } catch (e) { return []; }
+  }
+  function saveProjOrder(grid) {
+    var ids = Array.prototype.map.call(grid.querySelectorAll('.cb-card'), function (c) {
+      return c.getAttribute('data-family-id');
+    }).filter(Boolean);
+    try { localStorage.setItem('cbProjOrder', JSON.stringify(ids)); } catch (e) {}
+  }
+
+  // Latest-changes + up-next blocks shared by family cards and the flat fallback.
+  function latestHtml(latest) {
+    return (latest || []).map(function (l) {
+      return '<div class="cb-line-item"><span class="n">' + esc(l.name) + '</span><span class="t">' + esc(l.rel || '') + '</span></div>';
+    }).join('') || '<div class="cb-empty">nessuna modifica recente</div>';
+  }
+  function tasksHtml(tasks) {
+    // tasks are {text, path} (family) or plain strings (legacy flat list).
+    var html = (tasks || []).map(function (t) {
+      var text = (t && t.text != null) ? t.text : t;
+      var path = (t && t.path) ? t.path : '';
+      return '<div class="cb-task cb-task-do" data-text="' + esc(text) + '" data-path="' + esc(path) + '" role="button" tabindex="0" title="Segna come fatto">' +
+        '<span class="box"></span><span class="cb-task-txt">' + esc(text) + '</span></div>';
+    }).join('') || '<div class="cb-empty">nessun task aperto</div>';
+    return '<div class="cb-tasks-scroll">' + html + '</div>' +
+      '<div class="cb-task-add"><input type="text" class="cb-task-input" placeholder="+ aggiungi task" aria-label="Aggiungi task"></div>';
+  }
+
+  // Wire task toggle/add on a card. defaultPath is where new tasks are written.
+  function wireCardTasks(card, defaultPath) {
+    Array.prototype.forEach.call(card.querySelectorAll('.cb-task-do'), function (el) {
+      var done = function (e) {
+        e.stopPropagation();
+        if (el.classList.contains('cb-task-done')) return;
+        var text = el.getAttribute('data-text');
+        var notePath = el.getAttribute('data-path') || defaultPath;
+        el.classList.add('cb-task-done');
+        apiPost('api/projects/task', { action: 'toggle', note_path: notePath, text: text, done: true })
+          .then(function () { setTimeout(refresh, 300); })
+          .catch(function () { el.classList.remove('cb-task-done'); });
+      };
+      el.addEventListener('click', done);
+      el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); done(e); } });
+    });
+    var input = card.querySelector('.cb-task-input');
+    if (input && defaultPath) {
+      input.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+      input.addEventListener('click', function (e) { e.stopPropagation(); });
+      input.addEventListener('keydown', function (e) {
+        e.stopPropagation();
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        var v = input.value.trim();
+        if (!v) return;
+        input.disabled = true;
+        apiPost('api/projects/task', { action: 'add', note_path: defaultPath, text: v })
+          .then(function () { input.value = ''; input.disabled = false; refresh(); })
+          .catch(function () { input.disabled = false; });
+      });
+    }
+  }
+
+  // Drag-to-reorder the family cards (hold a card and move). Pointer-based so it
+  // works with touch + mouse, delegated on the grid so it survives re-renders.
+  function enableDragReorder(grid) {
+    if (grid.__cbDragBound) return;
+    grid.__cbDragBound = true;
+    var dragging = null, pid = null, startX = 0, startY = 0, moved = false;
+    var IGNORE = '.cb-task-do,.cb-task-input,.cb-sub,a,button';
+    grid.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      var card = e.target.closest && e.target.closest('.cb-card.cb-fam');
+      if (!card) return;
+      if (e.target.closest(IGNORE)) return; // let tasks/chips/input do their thing
+      dragging = card; pid = e.pointerId; startX = e.clientX; startY = e.clientY; moved = false;
+    });
+    grid.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      if (!moved) {
+        if (Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY) < 6) return;
+        moved = true;
+        dragging.classList.add('cb-dragging');
+        grid.classList.add('cb-drag-active');
+        try { dragging.setPointerCapture(pid); } catch (err) {}
+      }
+      e.preventDefault();
+      var cards = grid.querySelectorAll('.cb-card.cb-fam');
+      for (var i = 0; i < cards.length; i++) {
+        var c = cards[i]; if (c === dragging) continue;
+        var r = c.getBoundingClientRect();
+        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+          var before = (e.clientY - r.top) < (r.height / 2);
+          grid.insertBefore(dragging, before ? c : c.nextSibling);
+          break;
+        }
+      }
+    });
+    var end = function () {
+      if (!dragging) return;
+      try { dragging.releasePointerCapture(pid); } catch (err) {}
+      dragging.classList.remove('cb-dragging');
+      grid.classList.remove('cb-drag-active');
+      if (moved) saveProjOrder(grid);
+      dragging = null; moved = false; pid = null;
+    };
+    grid.addEventListener('pointerup', end);
+    grid.addEventListener('pointercancel', end);
+  }
+
   function renderProjects(data) {
     var grid = $('cbGrid'); if (!grid) return;
+    var families = (data && data.families) || [];
+    if (families.length) { renderFamilies(grid, families); return; }
+    // Fallback: flat per-note cards (legacy backend without families).
     var projects = (data && data.projects) || [];
     if (!projects.length) {
       grid.innerHTML = '<div class="cb-loading">Nessun progetto in 01-Projects.</div>';
       return;
     }
     grid.innerHTML = projects.map(function (p) {
-      var latest = (p.latest || []).map(function (l) {
-        return '<div class="cb-line-item"><span class="n">' + esc(l.name) + '</span><span class="t">' + esc(l.rel || '') + '</span></div>';
-      }).join('') || '<div class="cb-empty">nessuna modifica recente</div>';
-      var tasks = (p.tasks || []).map(function (t) {
-        return '<div class="cb-task cb-task-do" data-text="' + esc(t) + '" role="button" tabindex="0" title="Segna come fatto">' +
-          '<span class="box"></span><span class="cb-task-txt">' + esc(t) + '</span></div>';
-      }).join('') || '<div class="cb-empty">nessun task aperto</div>';
-      tasks += '<div class="cb-task-add"><input type="text" class="cb-task-input" placeholder="+ aggiungi task" aria-label="Aggiungi task"></div>';
       return '' +
         '<article class="cb-card" data-project-id="' + esc(p.id) + '" data-path="' + esc(p.path) + '" tabindex="0" role="button">' +
           '<div class="cb-card-top"><span class="cb-card-name">' + esc(p.name) + '</span>' + sparkDots(p.activity) + '</div>' +
-          '<div class="cb-card-block"><div class="cb-block-h">Latest changes</div>' + latest + '</div>' +
-          '<div class="cb-card-block"><div class="cb-block-h">Up next</div>' + tasks + '</div>' +
+          '<div class="cb-card-block"><div class="cb-block-h">Latest changes</div>' + latestHtml(p.latest) + '</div>' +
+          '<div class="cb-card-block"><div class="cb-block-h">Up next</div>' + tasksHtml(p.tasks) + '</div>' +
         '</article>';
     }).join('');
     Array.prototype.forEach.call(grid.querySelectorAll('.cb-card'), function (card) {
-      var go = function () { focusProject(card.getAttribute('data-project-id'), card.getAttribute('data-path')); };
+      var path = card.getAttribute('data-path');
+      var go = function () { focusProject(card.getAttribute('data-project-id'), path); };
       card.addEventListener('click', go);
       card.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
-      var notePath = card.getAttribute('data-path');
-      // Up-next: click a task to mark it done in the project note (writes - [x]).
-      Array.prototype.forEach.call(card.querySelectorAll('.cb-task-do'), function (el) {
-        var done = function (e) {
-          e.stopPropagation();
-          if (el.classList.contains('cb-task-done')) return;
-          var text = el.getAttribute('data-text');
-          el.classList.add('cb-task-done');
-          apiPost('api/projects/task', { action: 'toggle', note_path: notePath, text: text, done: true })
-            .then(function () { setTimeout(refresh, 300); })
-            .catch(function () { el.classList.remove('cb-task-done'); });
-        };
-        el.addEventListener('click', done);
-        el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); done(e); } });
-      });
-      // Up-next: add a new task to the project note.
-      var input = card.querySelector('.cb-task-input');
-      if (input) {
-        input.addEventListener('click', function (e) { e.stopPropagation(); });
-        input.addEventListener('keydown', function (e) {
-          e.stopPropagation();
-          if (e.key !== 'Enter') return;
-          e.preventDefault();
-          var v = input.value.trim();
-          if (!v) return;
-          input.disabled = true;
-          apiPost('api/projects/task', { action: 'add', note_path: notePath, text: v })
-            .then(function () { input.value = ''; input.disabled = false; refresh(); })
-            .catch(function () { input.disabled = false; });
-        });
-      }
+      wireCardTasks(card, path);
     });
+  }
+
+  function renderFamilies(grid, families) {
+    var order = loadProjOrder();
+    families = families.slice().sort(function (a, b) {
+      var ia = order.indexOf(a.id), ib = order.indexOf(b.id);
+      return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+    });
+    grid.innerHTML = families.map(function (f) {
+      var subs = (f.children || []).map(function (c) {
+        return '<button type="button" class="cb-sub" data-id="' + esc(c.id || '') + '" data-path="' + esc(c.path) + '" title="' + esc(c.name) + '">' + esc(c.name) + '</button>';
+      }).join('') || '<div class="cb-empty">nessuna sotto-parte</div>';
+      return '' +
+        '<article class="cb-card cb-fam" data-family-id="' + esc(f.id) + '" data-primary="' + esc(f.primary_path || '') + '" tabindex="0" role="group" aria-roledescription="card progetto trascinabile">' +
+          '<div class="cb-card-head">' +
+            '<div class="cb-card-top" style="flex:1;min-width:0"><span class="cb-card-name">' + esc(f.name) + '</span>' + sparkDots(f.activity) + '</div>' +
+            '<span class="cb-drag" title="Tieni premuto e trascina per riordinare" aria-hidden="true">∷∷</span>' +
+          '</div>' +
+          '<div class="cb-subs">' + subs + '</div>' +
+          '<div class="cb-card-block"><div class="cb-block-h">Latest changes</div>' + latestHtml(f.latest) + '</div>' +
+          '<div class="cb-card-block"><div class="cb-block-h">Up next</div>' + tasksHtml(f.tasks) + '</div>' +
+        '</article>';
+    }).join('');
+    Array.prototype.forEach.call(grid.querySelectorAll('.cb-card.cb-fam'), function (card) {
+      // Sub-project chip -> focus that specific note (drill into the sub-part).
+      Array.prototype.forEach.call(card.querySelectorAll('.cb-sub'), function (chip) {
+        chip.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+        chip.addEventListener('click', function (e) {
+          e.stopPropagation();
+          focusProject(chip.getAttribute('data-id'), chip.getAttribute('data-path'));
+        });
+      });
+      wireCardTasks(card, card.getAttribute('data-primary'));
+    });
+    enableDragReorder(grid);
   }
 
   function renderAgents(data) {
     var list = $('cbAgentList'), count = $('cbAgentsCount');
     if (!list) return;
     var agents = (data && data.agents) || [];
+    function stateClass(s) {
+      if (s === 'attivo' || s === 'vivo') return 'cb-live';
+      if (s === 'in_attesa') return 'cb-waiting';
+      return '';
+    }
     if (count) {
-      var live = agents.filter(function (a) { return a && a.state === 'vivo'; }).length;
-      count.textContent = live + '/' + agents.length + ' vivi';
+      var present = agents.filter(function (a) {
+        return a && (a.state === 'attivo' || a.state === 'vivo' || a.state === 'in_attesa');
+      }).length;
+      count.textContent = present + '/' + agents.length + ' attivi';
     }
     if (!agents.length) {
       list.innerHTML = '<div class="cb-empty">nessun agente trovato</div>';
       return;
     }
     list.innerHTML = agents.map(function (a) {
-      var live = a.state === 'vivo';
       var last = a.last_used && a.last_used.rel ? a.last_used.rel : 'mai';
       return '' +
         '<div class="cb-agent-row">' +
-          '<span class="cb-agent-state ' + (live ? 'cb-live' : '') + '"></span>' +
+          '<span class="cb-agent-state ' + stateClass(a.state) + '"></span>' +
           '<div style="min-width:0">' +
             '<div class="cb-agent-name">' + esc(a.name || 'Agente') + '</div>' +
             '<div class="cb-agent-role">' + esc(a.role || '') + '</div>' +
@@ -1123,6 +1309,7 @@
   }
 
   function refresh() {
+    refreshBrainState();
     api('api/vault/graph').then(function (g) { renderStats(g); mountPlanet(g); }).catch(function () {});
     api('api/projects/overview').then(renderProjects).catch(function () {
       var grid = $('cbGrid'); if (grid) grid.innerHTML = '<div class="cb-loading">vault non disponibile.</div>';

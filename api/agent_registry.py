@@ -12,11 +12,23 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from api.agent_health import _runtime_status_is_fresh
+
 AGENTS_DIR = "06-Agents"
 USAGE_LOG = "agent-usage.jsonl"
 LIVE_WINDOW_SECONDS = 14 * 24 * 60 * 60
+ACTIVE_USAGE_WINDOW_SECONDS = 10 * 60
 _CACHE_TTL = 15.0
 _MAX_BYTES = 1_000_000
+GATEWAY_STATE_FILE = "gateway_state.json"
+
+PROFILE_TO_AGENT_SLUG = {
+    "orchestratore": "orchestratore",
+    "programmatore": "programmatore-project-engineer",
+    "ricercatore": "research-analyst",
+    "social": "social-client-contact",
+    "librarian": "memory-librarian",
+}
 
 _EXCLUDED_STEMS = {
     "readme",
@@ -29,7 +41,7 @@ _SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
 _FIELD_RE = re.compile(r"^(?:[-*]\s*)?\**([^:\n]+?)\**\s*:\s*(.+?)\s*$", re.M)
 
 _cache_lock = threading.Lock()
-_cache: dict[str, tuple[float, float, dict]] = {}
+_cache: dict[str, tuple[float, object, dict]] = {}
 
 
 def _slug(value: str) -> str:
@@ -58,6 +70,25 @@ def _dir_signature(path: Path) -> float:
         return max((_mtime(p) for p in path.glob("*.md")), default=0.0)
     except OSError:
         return 0.0
+
+
+def _profiles_root() -> Path | None:
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        return get_default_hermes_root() / "profiles"
+    except Exception:
+        return None
+
+
+def _gateway_signature() -> float:
+    profiles_root = _profiles_root()
+    if profiles_root is None:
+        return 0.0
+    return max(
+        (_mtime(profiles_root / profile / GATEWAY_STATE_FILE) for profile in PROFILE_TO_AGENT_SLUG),
+        default=0.0,
+    )
 
 
 def _rel_time(ts: float, now: float | None = None) -> str:
@@ -170,12 +201,49 @@ def _load_usage(workspace: Path) -> dict[str, dict]:
     return latest
 
 
+def _gateway_states(now: float | None = None) -> dict[str, dict]:
+    profiles_root = _profiles_root()
+    if profiles_root is None:
+        return {}
+
+    reference = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc)
+    states: dict[str, dict] = {}
+    for profile, slug in PROFILE_TO_AGENT_SLUG.items():
+        path = profiles_root / profile / GATEWAY_STATE_FILE
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        try:
+            active = max(0, int(payload.get("active_agents") or 0))
+        except (TypeError, ValueError):
+            active = 0
+        discord = None
+        platforms = payload.get("platforms")
+        if isinstance(platforms, dict):
+            discord_payload = platforms.get("discord")
+            if isinstance(discord_payload, dict):
+                raw_discord = discord_payload.get("state")
+                if isinstance(raw_discord, str) and raw_discord:
+                    discord = raw_discord
+        states[slug] = {
+            "profile": profile,
+            "running": _runtime_status_is_fresh(payload, now=reference),
+            "active": active,
+            "discord": discord,
+        }
+    return states
+
+
 def build_agent_registry(workspace_path) -> dict:
     """Read agent notes and usage log, returning the live registry payload."""
     workspace = Path(str(workspace_path)).expanduser()
     agents_dir = workspace / "obsidian-vault" / AGENTS_DIR
     usage = _load_usage(workspace)
     now = time.time()
+    gateways = _gateway_states(now)
     if not agents_dir.is_dir():
         return {"ok": True, "agents": [], "count": 0, "exists": False}
 
@@ -186,15 +254,31 @@ def build_agent_registry(workspace_path) -> dict:
         agent = parse_agent_note(path)
         used = usage.get(agent["id"]) or usage.get(_slug(path.stem))
         ts = float(used.get("ts") or 0) if used else 0.0
-        state = "vivo" if ts and (now - ts) <= LIVE_WINDOW_SECONDS else "dormiente"
+        usage_live = bool(ts and (now - ts) <= LIVE_WINDOW_SECONDS)
+        usage_active = bool(ts and (now - ts) <= ACTIVE_USAGE_WINDOW_SECONDS)
+        gateway = gateways.get(agent["id"])
+        if gateway and gateway.get("running"):
+            if int(gateway.get("active") or 0) > 0 or usage_active:
+                state = "attivo"
+            else:
+                state = "in_attesa"
+        else:
+            state = "vivo" if usage_live else "dormiente"
         agent["state"] = state
+        agent["gateway"] = gateway or {
+            "profile": next((profile for profile, slug in PROFILE_TO_AGENT_SLUG.items() if slug == agent["id"]), None),
+            "running": False,
+            "active": 0,
+            "discord": None,
+        }
         agent["last_used"] = {"ts": _iso(ts), "rel": _rel_time(ts, now)} if ts else None
         agents.append(agent)
 
+    state_priority = {"attivo": 0, "in_attesa": 1, "vivo": 2, "dormiente": 3}
     agents.sort(
         key=lambda a: (
-            0 if a["state"] == "vivo" else 1,
-            -float((usage.get(a["id"]) or {}).get("ts") or 0) if a["state"] == "vivo" else 0,
+            state_priority.get(a["state"], 3),
+            -float((usage.get(a["id"]) or {}).get("ts") or 0),
             a["name"].lower(),
         )
     )
@@ -206,7 +290,7 @@ def get_agent_registry(workspace_path) -> dict:
     workspace = Path(str(workspace_path)).expanduser()
     agents_dir = workspace / "obsidian-vault" / AGENTS_DIR
     usage_log = workspace / "tasks" / USAGE_LOG
-    sig = max(_dir_signature(agents_dir), _mtime(usage_log))
+    sig = (_dir_signature(agents_dir), _mtime(usage_log), _gateway_signature())
     key = str(workspace)
     now = time.time()
     with _cache_lock:

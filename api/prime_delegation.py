@@ -51,6 +51,13 @@ _WORKER_PERSONA = (
     "concreto e conciso. Rispondi SOLO con il risultato/esito, niente preamboli. "
     "Rispondi in italiano.\n"
     "\n"
+    "MANDATO OPERATIVO: il tuo compito e' ESEGUIRE il task fino in fondo e "
+    "restituire l'esito concreto (cosa hai fatto, trovato o cambiato). Le regole "
+    "sotto sono vincoli su COME lavorare in sicurezza, NON un permesso per "
+    "fermarti a un semplice 'ricevuto' o a un piano senza agire. Se qualcosa ti "
+    "blocca davvero, fai il massimo possibile in sicurezza e segnala con "
+    "precisione cosa resta e perche'.\n"
+    "\n"
     "REGOLE DI SICUREZZA (vincolanti):\n"
     "1) NON rompere il sistema in esecuzione. Hermes gira live sulla 8788 mentre "
     "l'utente lo usa: non modificare il codice in modo da romperlo.\n"
@@ -66,6 +73,10 @@ _WORKER_PERSONA = (
 )
 
 _WORKER_SAFETY_RULES = (
+    "MANDATO OPERATIVO: ESEGUI il task fino in fondo e restituisci l'esito "
+    "concreto. Le regole sotto sono vincoli su COME lavorare in sicurezza, NON "
+    "un permesso per fermarti a un 'ricevuto' o a un piano senza agire.\n"
+    "\n"
     "REGOLE DI SICUREZZA (vincolanti):\n"
     "1) NON rompere il sistema in esecuzione. Hermes gira live sulla 8788 mentre "
     "l'utente lo usa: non modificare il codice in modo da romperlo.\n"
@@ -94,6 +105,75 @@ def get_and_clear_delegations(session_id: str) -> list:
     return _DELEGATIONS.pop(session_id, [])
 
 
+# --- Persistenza durevole delle deleghe -------------------------------------
+# Gli esiti vivevano SOLO in RAM (_BG_TASKS): se Prime sbatteva sul session-limit
+# o il server riavviava, il risultato del sotto-agente evaporava. Ora ogni cambio
+# di stato viene appeso a tasks/delegations.jsonl e ricaricato all'avvio.
+_DELEGATIONS_LOADED = False
+_PERSIST_FIELDS = (
+    "id", "agent", "agent_id", "task_type", "task", "status", "output",
+    "started", "finished", "librarian_status", "librarian_output",
+)
+
+
+def _delegations_log_path(workspace: str) -> Path:
+    return Path(workspace) / "tasks" / "delegations.jsonl"
+
+
+def _persist_bg_task(task_id: str, workspace: str) -> None:
+    """Appende lo stato corrente di una delega al log durevole (crash-safe)."""
+    t = _BG_TASKS.get(task_id)
+    if t is None or not workspace:
+        return
+    try:
+        path = _delegations_log_path(workspace)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = {k: t.get(k) for k in _PERSIST_FIELDS}
+        with path.open("a", encoding="utf-8", errors="replace") as fh:
+            fh.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+    except Exception:
+        logger.debug("delegation persist failed for %s", task_id, exc_info=True)
+
+
+def _load_bg_tasks(workspace: str) -> None:
+    """Ricarica l'ultimo stato noto delle deleghe dopo un riavvio."""
+    global _DELEGATIONS_LOADED, _TASK_SEQ
+    if _DELEGATIONS_LOADED or not workspace:
+        return
+    _DELEGATIONS_LOADED = True
+    path = _delegations_log_path(workspace)
+    if not path.is_file():
+        return
+    try:
+        latest: dict[str, dict] = {}
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            tid = rec.get("id")
+            if tid:
+                latest[tid] = rec
+        for tid, rec in latest.items():
+            if tid in _BG_TASKS:
+                continue
+            # Una delega rimasta "in_corso" prima del riavvio non gira piu':
+            # marcala interrotta cosi' si vede che si era bloccata (token/crash).
+            if rec.get("status") == "in_corso":
+                rec["status"] = "interrotta"
+                rec.setdefault("finished", rec.get("started"))
+            _BG_TASKS[tid] = dict(rec)
+        # Riallinea il contatore id per non riusare un "dN" gia' presente.
+        used = [int(str(k)[1:]) for k in _BG_TASKS if str(k).startswith("d") and str(k)[1:].isdigit()]
+        if used:
+            _TASK_SEQ = itertools.count(max(used) + 1)
+    except Exception:
+        logger.debug("delegation reload failed", exc_info=True)
+
+
 async def _run_and_store(task_id, task_type, task, model, label, workspace):
     """Esegue il sotto-agente in background e salva il risultato nel registro."""
     t = _BG_TASKS.get(task_id)
@@ -103,14 +183,21 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
         if model == _CODEX_MODEL:
             output = await _run_codex_worker(task, workspace)
         else:
-            output = await _run_worker(task, model, workspace, agent_id=t.get("agent_id"))
+            output = await _run_worker(task, model, workspace, agent_id=t.get("agent_id"), progress=t)
         t.update(status="ok", output=output, finished=time.time())
+        _persist_bg_task(task_id, workspace)
         try:
             _enqueue_librarian_pass(task_id, task_type, task, output, workspace)
         except Exception:
             logger.debug("librarian hook enqueue failed", exc_info=True)
     except Exception as e:
-        t.update(status="errore", output=str(e), finished=time.time())
+        # Conserva l'eventuale output PARZIALE accumulato prima del blocco
+        # (es. token finiti a meta' risposta): non deve andare perso.
+        partial = str(t.get("output") or "").strip()
+        msg = str(e)
+        combined = (partial + "\n\n[interrotta: " + msg + "]").strip() if partial else msg
+        t.update(status="errore", output=combined, finished=time.time())
+        _persist_bg_task(task_id, workspace)
 
 
 def get_background_tasks(max_age: float = 600.0) -> list:
@@ -145,13 +232,35 @@ def get_background_task(task_id: str) -> dict | None:
     }
 
 
-def _model_for(task_type: str):
+# Alias che identificano l'agente di sviluppo: deve SEMPRE girare su Codex,
+# qualunque task_type scelga Prime (basta che dica "passa al programmatore").
+_CODEX_AGENT_ALIASES = (
+    "programmatore", "programmer", "codex", "sviluppatore", "developer", "dev", "coder",
+)
+
+
+def _model_for(task_type: str, agent_id: str = ""):
+    """Instrada la delega al brain giusto.
+
+    DEFAULT: Codex. I sotto-agenti (librarian, ricercatore, social, dev, …) girano
+    su Codex per NON bruciare i crediti cloud di Claude — che è la risorsa scarsa e
+    che serve a Hermes Prime. Escape hatch: se il task_type chiede esplicitamente
+    ragionamento pesante ("opus"/"ragiona"/"reason"/"claude") si usa Opus. Overridabile
+    con HERMES_SUBAGENT_BRAIN=claude per tornare al vecchio routing Sonnet/Opus.
+    """
     t = (task_type or "").lower()
-    if "codic" in t or "code" in t or "dev" in t:
+    a = _agent_slug(agent_id)
+    if a in _CODEX_AGENT_ALIASES or "codic" in t or "code" in t or "dev" in t:
         return _CODEX_MODEL, "Codex"
-    if "sempl" in t or "simple" in t or "light" in t:
-        return "claude-sonnet-4-6", "Sonnet"
-    return "claude-opus-4-8", "Opus"
+    # Richiesta esplicita di ragionamento cloud (rara): resta su Opus.
+    if any(k in t for k in ("opus", "ragiona", "reason", "claude")):
+        return "claude-opus-4-8", "Opus"
+    if os.getenv("HERMES_SUBAGENT_BRAIN", "codex").strip().lower() == "claude":
+        if "sempl" in t or "simple" in t or "light" in t:
+            return "claude-sonnet-4-6", "Sonnet"
+        return "claude-opus-4-8", "Opus"
+    # Default: Codex per tutti i sotto-agenti (risparmia i crediti cloud).
+    return _CODEX_MODEL, "Codex"
 
 
 def _agent_slug(value: str) -> str:
@@ -251,17 +360,57 @@ async def _run_librarian(task_id: str, task_type: str, task: str, output: str, w
             mcp_servers=_load_memory_mcp_servers(workspace),
             skills=["sync-hermes-brain"],
         )
+        # Il Librarian gira in automatico dopo ogni delega ma finora non lasciava
+        # traccia nel registro uso: la sua card nel Command Bridge restava sempre
+        # "non vivo". Registra l'uso cosi' il pannello agenti riflette che ha
+        # girato davvero (best-effort: non deve mai far fallire il pass memoria).
+        try:
+            from api.agent_registry import record_agent_usage
+            record_agent_usage(workspace, _LIBRARIAN_AGENT_ID, "memoria", task_id)
+        except Exception:
+            logger.debug("librarian usage ledger append failed", exc_info=True)
         if t is not None:
             t.update(librarian_status="ok", librarian_output=result)
+            _persist_bg_task(task_id, workspace)
     except Exception as exc:
         logger.debug("librarian pass failed for %s", task_id, exc_info=True)
         if t is not None:
             t.update(librarian_status="errore", librarian_output=str(exc))
+            _persist_bg_task(task_id, workspace)
+
+
+def _resolve_codex_executable() -> str:
+    """Trova Codex anche quando il server Hermes parte con un PATH minimale."""
+    configured = str(os.getenv("HERMES_CODEX_CLI") or "").strip().strip('"')
+    candidates = [
+        configured,
+        shutil.which("codex.cmd"),
+        shutil.which("codex"),
+    ]
+    local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
+    app_data = str(os.getenv("APPDATA") or "").strip()
+    if local_app_data:
+        node_dir = Path(local_app_data) / "hermes" / "node"
+        candidates.extend([
+            str(node_dir / "codex.cmd"),
+            str(node_dir / "codex.exe"),
+            str(node_dir / "codex"),
+        ])
+    if app_data:
+        candidates.append(str(Path(app_data) / "npm" / "codex.cmd"))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate))
+    checked = [c for c in candidates if c]
+    raise FileNotFoundError(
+        "Codex CLI non trovato. Imposta HERMES_CODEX_CLI oppure installa codex "
+        f"in uno dei percorsi attesi ({len(checked)} controllati)."
+    )
 
 
 def _codex_exec_blocking(task: str, workspace: str) -> str:
     """Run one Codex CLI exec turn (blocking) and return stdout (or raise)."""
-    exe = shutil.which("codex.cmd") or shutil.which("codex") or "codex.cmd"
+    exe = _resolve_codex_executable()
     cmd = [
         exe, "exec",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -293,7 +442,13 @@ async def _run_codex_worker(task: str, workspace: str) -> str:
     except FileNotFoundError as e:
         raise RuntimeError("Codex CLI non trovato (codex.cmd non nel PATH)") from e
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"Codex CLI timeout dopo {_CODEX_TIMEOUT}s") from e
+        # Conserva l'output parziale prodotto da Codex prima del timeout.
+        partial = e.stdout or e.output or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        partial = str(partial).strip()
+        suffix = f"\nParziale prima del timeout:\n{partial}" if partial else ""
+        raise RuntimeError(f"Codex CLI timeout dopo {_CODEX_TIMEOUT}s.{suffix}") from e
 
 
 async def _run_worker(
@@ -304,8 +459,13 @@ async def _run_worker(
     agent_id: str | None = None,
     mcp_servers: dict[str, dict[str, Any]] | None = None,
     skills: list[str] | None = None,
+    progress: dict | None = None,
 ) -> str:
-    """Run one ephemeral sub-agent turn and return its text output."""
+    """Run one ephemeral sub-agent turn and return its text output.
+
+    Se ``progress`` e' fornito, il testo parziale viene scritto live in
+    ``progress["output"]`` cosi' che, se il turno si interrompe (token finiti),
+    l'esito accumulato fin li' non vada perso."""
     opts = ClaudeAgentOptions(
         cwd=str(workspace),
         add_dirs=[str(workspace)],
@@ -332,6 +492,8 @@ async def _run_worker(
                 for b in (getattr(m, "content", None) or []):
                     if type(b).__name__ == "TextBlock":
                         parts.append(getattr(b, "text", "") or "")
+                if progress is not None:
+                    progress["output"] = "".join(parts).strip()
             elif cls == "ResultMessage":
                 r = getattr(m, "result", None)
                 if r:
@@ -346,6 +508,8 @@ async def _run_worker(
 
 def build_prime_delegation_server(session_id: str, workspace: str):
     """In-process MCP server exposing `delega` to the Hermes Prime session."""
+    # Ricarica l'ultimo stato noto delle deleghe (sopravvive a riavvio/crash).
+    _load_bg_tasks(workspace)
     schema = {
         "type": "object",
         "properties": {
@@ -369,7 +533,7 @@ def build_prime_delegation_server(session_id: str, workspace: str):
         agent_id = str(args.get("agent") or "").strip()
         if not task:
             return {"content": [{"type": "text", "text": "task vuoto"}], "is_error": True}
-        model, label = _model_for(task_type)
+        model, label = _model_for(task_type, agent_id)
         if agent_id:
             label = agent_id
         task_id = "d" + str(next(_TASK_SEQ))
@@ -384,6 +548,9 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             record_agent_usage(workspace, agent_id or label, task_type, task_id)
         except Exception:
             logger.debug("agent usage ledger append failed", exc_info=True)
+        # Persisti subito il dispatch: anche se Prime muore prima della fine,
+        # resta traccia durevole che la delega era partita.
+        _persist_bg_task(task_id, workspace)
         # Avvia in background: Prime torna subito a parlare con l'utente.
         fut = asyncio.ensure_future(_run_and_store(task_id, task_type, task, model, label, workspace))
         _BG_REFS.add(fut)
@@ -392,4 +559,45 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             "Delega avviata (id " + task_id + ") al sotto-agente " + label + ". "
             "Continua pure a parlarmi: porto il risultato appena pronto."}]}
 
-    return create_sdk_mcp_server(name="team", version="1.0.0", tools=[delega])
+    done_schema = {
+        "type": "object",
+        "properties": {
+            "nome": {"type": "string", "description": "nome/argomento del (sotto-)task concluso"},
+            "riassunto": {"type": "string", "description": "1 riga: cosa e' stato fatto/deciso (per la memoria)"},
+            "stato": {"type": "string", "description": "chiuso | parziale (default: chiuso)"},
+        },
+        "required": ["nome", "riassunto"],
+    }
+
+    @tool(
+        "task_done",
+        "Segnala che un (sotto-)task e' concluso (chiuso o parziale). Registra l'esito "
+        "in memoria tramite il Librarian, SENZA resettare la sessione. Chiamalo quando "
+        "chiudi un ramo di lavoro: cosi' l'essenziale finisce in memoria e il contesto "
+        "resta pulito. NON usarlo per una semplice risposta: solo a lavoro concluso.",
+        done_schema,
+    )
+    async def task_done(args):
+        nome = str(args.get("nome") or "").strip()
+        riassunto = str(args.get("riassunto") or "").strip()
+        stato = (str(args.get("stato") or "chiuso").strip().lower() or "chiuso")
+        if not nome or not riassunto:
+            return {"content": [{"type": "text", "text": "task_done richiede nome e riassunto"}], "is_error": True}
+        task_id = "done-" + str(next(_TASK_SEQ))
+        _BG_TASKS[task_id] = {
+            "id": task_id, "session_id": session_id, "agent": "task_done", "agent_id": "",
+            "task_type": "memoria", "task": "Task concluso: " + nome,
+            "status": ("ok" if stato != "parziale" else "parziale"),
+            "output": riassunto, "started": time.time(), "finished": time.time(),
+        }
+        _persist_bg_task(task_id, workspace)
+        # Salvataggio in memoria (Vault -> Graphify -> Notion) via Librarian, async.
+        try:
+            _enqueue_librarian_pass(task_id, "memoria", "Task concluso: " + nome, riassunto, workspace)
+        except Exception:
+            logger.debug("task_done librarian enqueue failed", exc_info=True)
+        return {"content": [{"type": "text", "text":
+            "Segnato '" + nome + "' come " + stato + ". Salvo l'essenziale in memoria "
+            "(Librarian) e tengo il contesto pulito."}]}
+
+    return create_sdk_mcp_server(name="team", version="1.0.0", tools=[delega, task_done])
