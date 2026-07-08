@@ -10976,23 +10976,18 @@ def _hermes_prime_persona_text():
 
 
 def _hermes_prime_system_prompt(workspace):
-    """Chief-of-staff persona (prompts/hermes-prime.md) + contesto LEGGERO.
+    """Chief-of-staff persona + contesto LEGGERO per Prime.
 
-    Cantiere 2 (2026-07-08): l'indice della memoria è ora incluso nell'append
-    del preset (statico, cacheable). I corpi delle note rilevanti vengono
-    iniettati nel testo del turno in _hermes_prime_reply_claude tramite
-    memory_retrieval.build_prime_memory_context (budget controllato).
-
-    Fase 1 ciclo-memoria: niente più dump del vault nel prompt di Prime. Prime
-    tiene solo persona + basi dei progetti in corso; per il dettaglio profondo
-    (codice, memoria, come funzionano le componenti) DELEGA al Librarian, che
-    gira su Codex e non consuma i crediti Claude di Prime.
+    Cantiere 2 (2026-07-08): l'indice della memoria è incluso nell'append.
+    Fase 2 Punto 5: con HERMES_PRIME_USE_LEAN_PRESET=1 (default) usa un prompt
+    plain-text lean (<8k token) invece del claude_code preset (~15k token).
+    Con HERMES_PRIME_USE_LEAN_PRESET=0 mantiene il vecchio comportamento (compat).
     """
-    persona = _hermes_prime_persona_text()
+    from api.prime_lean_preset import build_lean_system_prompt
     brief = _in_progress_projects_brief(workspace)
-    parts = [persona]
+    append_parts: list[str] = []
     if brief:
-        parts.append("--- Progetti in corso ---\n" + brief)
+        append_parts.append("--- Progetti in corso ---\n" + brief)
     # Indice memoria (Cantiere 2): solo one-liner, statico e cacheable.
     # I corpi rilevanti per il task corrente vengono aggiunti nel testo del
     # turno (vedi _hermes_prime_reply_claude). Così il system prompt resta
@@ -11003,23 +10998,16 @@ def _hermes_prime_system_prompt(workspace):
         if mem_dir is not None:
             idx = memory_retrieval.build_memory_context("", mem_dir, index_only=True)
             if idx:
-                parts.append("--- Memoria (indice) ---\n" + idx)
+                append_parts.append("--- Memoria (indice) ---\n" + idx)
     except Exception:
         logger.debug("prime system prompt: memory index build failed", exc_info=True)
-    parts.append(
+    append_parts.append(
         "Per dettagli profondi (codice, memoria, funzionamento delle componenti) "
         "NON ricostruirli a mente: delega al Librarian (task_type 'memoria'/'ricerca') "
         "e usa la sua risposta. Rispondi breve (2-4 frasi), in italiano, da capo di "
         "stato maggiore."
     )
-    append = "\n\n".join(parts)
-    # exclude_dynamic_sections: toglie cwd/auto-memory/git-status dal system prompt
-    # cosi' il grosso prefisso del preset resta STATICO e cachabile turno dopo turno
-    # (il git status cambia ad ogni commit e altrimenti rompe la cache). Il contenuto
-    # tolto e' re-iniettato nel primo messaggio. CLI vecchie lo ignorano (safe).
-    # Prime delega: non gli serve il git status live (quello e' dei sotto-agenti).
-    return {"type": "preset", "preset": "claude_code", "append": append,
-            "exclude_dynamic_sections": True}
+    return build_lean_system_prompt(append_parts)
 
 
 def _hermes_prime_turn_limits():

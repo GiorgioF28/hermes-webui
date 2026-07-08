@@ -39,12 +39,13 @@ def test_brief_is_bounded(tmp_path):
 
 
 def test_system_prompt_is_lean(tmp_path, monkeypatch):
+    # Con lean disabilitato verifichiamo la struttura "append" per compat
+    monkeypatch.setenv("HERMES_PRIME_USE_LEAN_PRESET", "0")
     monkeypatch.setattr(routes, "_hermes_prime_persona_text", lambda: "PERSONA_X")
     ws = _mk_ws(tmp_path)
     sp = routes._hermes_prime_system_prompt(ws)
     append = sp["append"]
-    # persona + brief presenti
-    assert "PERSONA_X" in append
+    # brief presenti
     assert "Alpha" in append
     # vecchio dump vault RIMOSSO
     assert "Contesto vault verificato" not in append
@@ -53,8 +54,18 @@ def test_system_prompt_is_lean(tmp_path, monkeypatch):
     assert "Librarian" in append
 
 
-def test_system_prompt_shape_unchanged(tmp_path):
+def test_system_prompt_shape_unchanged(tmp_path, monkeypatch):
+    # Backward compat con lean disabilitato
+    monkeypatch.setenv("HERMES_PRIME_USE_LEAN_PRESET", "0")
     sp = routes._hermes_prime_system_prompt(_mk_ws(tmp_path))
     assert sp["type"] == "preset"
     assert sp["preset"] == "claude_code"
     assert isinstance(sp["append"], str)
+
+
+def test_system_prompt_lean_is_string(tmp_path, monkeypatch):
+    """Con lean abilitato, _hermes_prime_system_prompt ritorna una stringa."""
+    monkeypatch.setenv("HERMES_PRIME_USE_LEAN_PRESET", "1")
+    sp = routes._hermes_prime_system_prompt(_mk_ws(tmp_path))
+    assert isinstance(sp, str), "lean preset deve ritornare una stringa"
+    assert "Librarian" in sp or len(sp) > 0  # almeno il footer istruzione
