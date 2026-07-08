@@ -8,11 +8,16 @@ Strategia:
 - Selezione v1: keyword match tra task e title+description dell'indice.
 - Nessuna memoria fuori scope: se il match è vuoto, si restituisce solo
   l'indice, non un dump di fallback.
+- Selezione v2 (Fase 2 Punto 4): filtro per scope delle note prima del
+  keyword match. Le note con scope "global" (o senza scope) sono sempre
+  incluse. Le note con scope specifico compaiono solo se il task_scope corrente
+  corrisponde.
 
 Assunzione sulla struttura della memoria:
     <mem_dir>/
         MEMORY.md           ← indice con one-liner per ogni nota
         <slug>.md           ← corpo di ogni nota (link da MEMORY.md)
+                              Il frontmatter YAML può contenere scope: <valore>
 
 La directory si risolve in quest'ordine:
   1. Env HERMES_PRIME_MEMORY_DIR
@@ -92,6 +97,49 @@ def find_prime_memory_dir() -> Path | None:
     return None
 
 
+# ── Scope management ─────────────────────────────────────────────────────────
+
+VALID_SCOPES = frozenset({"hermes", "visionbuilts", "rap", "global"})
+
+_SCOPE_RE = re.compile(r"^scope:\s*(\w+)", re.MULTILINE)
+
+
+def normalize_scope(scope: str) -> str:
+    """Normalizza uno scope: lowercase, solo valori noti. Default 'global'."""
+    s = (scope or "").strip().lower()
+    return s if s in VALID_SCOPES else "global"
+
+
+def parse_note_scope_fast(mem_dir: Path, filename: str) -> str:
+    """Legge le prime 15 righe del file e ritorna il valore di scope.
+
+    Cerca ``scope: <value>`` nel frontmatter YAML.
+    Ritorna il valore in lowercase (normalizzato tramite normalize_scope),
+    o "global" se assente o in caso di errore.
+
+    Path safety: stesse regole di load_memory_body (no traversal, no slash).
+    """
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return "global"
+    path = mem_dir / filename
+    if not path.is_file():
+        return "global"
+    try:
+        lines: list[str] = []
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= 15:
+                    break
+                lines.append(line)
+        head = "".join(lines)
+        m = _SCOPE_RE.search(head)
+        if m:
+            return normalize_scope(m.group(1))
+    except Exception:
+        logger.debug("parse_note_scope_fast: error reading '%s'", filename, exc_info=True)
+    return "global"
+
+
 # ── Index parsing ──────────────────────────────────────────────────────────────
 
 _INDEX_LINE_RE = re.compile(
@@ -103,7 +151,7 @@ _INDEX_LINE_RE = re.compile(
 def parse_memory_index(mem_dir: Path) -> list[dict]:
     """Parsa MEMORY.md e ritorna la lista di entry dell'indice.
 
-    Ogni entry: {"title": str, "filename": str, "description": str}
+    Ogni entry: {"title": str, "filename": str, "description": str, "scope": str}
     """
     mem_file = mem_dir / "MEMORY.md"
     if not mem_file.is_file():
@@ -117,10 +165,13 @@ def parse_memory_index(mem_dir: Path) -> list[dict]:
         m = _INDEX_LINE_RE.match(line)
         if not m:
             continue
+        filename = m.group("filename").strip()
+        scope = parse_note_scope_fast(mem_dir, filename)
         entries.append({
             "title": m.group("title").strip(),
-            "filename": m.group("filename").strip(),
+            "filename": filename,
             "description": (m.group("description") or "").strip(),
+            "scope": scope,
         })
     return entries
 
@@ -196,11 +247,17 @@ def select_memories_for_task(
     mem_dir: Path,
     *,
     budget_tokens: int,
+    task_scope: str = "",
 ) -> list[dict]:
     """Seleziona le note rilevanti per il task entro il budget token.
 
     Ritorna una lista di entry arricchite con il campo "body".
     Lista vuota se nessuna entry ha score > 0, o se budget <= 0.
+
+    ``task_scope`` — se non-vuoto, filtra le entry per scope prima del
+    keyword match. Sono incluse le entry con scope == task_scope, oppure
+    scope == "global", oppure scope == "" (legacy, senza scope).
+    Se task_scope è vuota stringa, nessun filtro scope (backward compatible).
     """
     if budget_tokens <= 0:
         return []
@@ -210,6 +267,14 @@ def select_memories_for_task(
     keywords = _extract_keywords(task)
     if not keywords:
         return []
+
+    # Filtro scope (Fase 2 Punto 4)
+    if task_scope:
+        entries = [
+            e for e in entries
+            if e.get("scope", "") == task_scope
+            or e.get("scope", "") in {"global", ""}
+        ]
 
     scored = [
         (e, score_entry_relevance(e, keywords))
@@ -252,6 +317,7 @@ def build_memory_context(
     *,
     budget_tokens: int | None = None,
     index_only: bool = False,
+    task_scope: str = "",
 ) -> str:
     """Costruisce il blocco di contesto memoria per un turno Prime.
 
@@ -259,6 +325,7 @@ def build_memory_context(
     ``mem_dir`` — directory contenente MEMORY.md e le note individuali.
     ``budget_tokens`` — budget per i corpi (default: HERMES_MEMORY_BUDGET_TOKENS).
     ``index_only`` — se True, restituisce solo l'indice (per il system prompt).
+    ``task_scope`` — scope del task corrente (filtro per-note, Fase 2 Punto 4).
 
     Ritorna una stringa vuota se mem_dir non esiste o MEMORY.md è assente.
     """
@@ -274,7 +341,9 @@ def build_memory_context(
     if index_only or budget_tokens <= 0:
         return index_text
 
-    relevant = select_memories_for_task(task, mem_dir, budget_tokens=budget_tokens)
+    relevant = select_memories_for_task(
+        task, mem_dir, budget_tokens=budget_tokens, task_scope=task_scope
+    )
     if not relevant:
         return index_text
 
@@ -286,13 +355,20 @@ def build_memory_context(
     return index_text + "\n\n" + detail_text
 
 
-def build_prime_memory_context(task: str, workspace: Path | None = None) -> str:
+def build_prime_memory_context(
+    task: str,
+    workspace: Path | None = None,
+    *,
+    task_scope: str = "",
+) -> str:
     """Entry point per routes.py: seleziona la mem_dir e costruisce il contesto.
 
     Ritorna stringa vuota se la mem_dir non è trovata o non ha MEMORY.md.
+
+    ``task_scope`` — scope del task corrente per il filtro per-nota (Fase 2 Punto 4).
     """
     mem_dir = find_prime_memory_dir()
     if mem_dir is None:
         logger.debug("memory_retrieval: nessuna mem_dir trovata, contesto memoria omesso")
         return ""
-    return build_memory_context(task, mem_dir)
+    return build_memory_context(task, mem_dir, task_scope=task_scope)
