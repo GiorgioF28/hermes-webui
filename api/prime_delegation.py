@@ -45,6 +45,15 @@ _TASK_SEQ = itertools.count(1)
 _MEMORY_MCP_SERVER_NAMES = ("hermes-memory", "notion")
 _LIBRARIAN_AGENT_ID = "memory-librarian"
 _LIBRARIAN_MODEL = "claude-sonnet-4-6"
+_CODEX_FALLBACK_MODEL_ENV = "HERMES_CODEX_FALLBACK_MODEL"
+_CODEX_FALLBACK_COOLDOWN_ENV = "HERMES_CODEX_FALLBACK_COOLDOWN_SECONDS"
+_DEFAULT_CODEX_FALLBACK_MODEL = "claude-sonnet-4-6"
+_DEFAULT_CODEX_FALLBACK_COOLDOWN_SECONDS = 3600.0
+_CODEX_FALLBACK_STATE = {
+    "until": 0.0,
+    "reason": "",
+    "last_failure": 0.0,
+}
 
 _WORKER_PERSONA = (
     "Sei un sotto-agente operativo di Hermes. Esegui il task assegnato in modo "
@@ -113,6 +122,7 @@ _DELEGATIONS_LOADED = False
 _PERSIST_FIELDS = (
     "id", "agent", "agent_id", "task_type", "task", "status", "output",
     "started", "finished", "librarian_status", "librarian_output",
+    "runtime", "fallback_runtime", "fallback_model", "fallback_reason",
 )
 
 
@@ -181,7 +191,7 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
         return
     try:
         if model == _CODEX_MODEL:
-            output = await _run_codex_worker(task, workspace)
+            output = await _run_codex_worker_with_fallback(task, workspace, progress=t)
         else:
             output = await _run_worker(task, model, workspace, agent_id=t.get("agent_id"), progress=t)
         t.update(status="ok", output=output, finished=time.time())
@@ -213,6 +223,10 @@ def get_background_tasks(max_age: float = 600.0) -> list:
             "finished": t.get("finished"),
             "librarian_status": t.get("librarian_status"),
             "librarian_output": t.get("librarian_output", ""),
+            "runtime": t.get("runtime"),
+            "fallback_runtime": t.get("fallback_runtime"),
+            "fallback_model": t.get("fallback_model"),
+            "fallback_reason": t.get("fallback_reason"),
         })
     out.sort(key=lambda x: x["id"])
     return out
@@ -229,6 +243,10 @@ def get_background_task(task_id: str) -> dict | None:
         "finished": t.get("finished"),
         "librarian_status": t.get("librarian_status"),
         "librarian_output": t.get("librarian_output", ""),
+        "runtime": t.get("runtime"),
+        "fallback_runtime": t.get("fallback_runtime"),
+        "fallback_model": t.get("fallback_model"),
+        "fallback_reason": t.get("fallback_reason"),
     }
 
 
@@ -408,6 +426,126 @@ def _resolve_codex_executable() -> str:
     )
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "") or default)
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def codex_fallback_model() -> str:
+    return os.getenv(_CODEX_FALLBACK_MODEL_ENV, _DEFAULT_CODEX_FALLBACK_MODEL).strip() or _DEFAULT_CODEX_FALLBACK_MODEL
+
+
+def codex_fallback_cooldown_seconds() -> float:
+    return _env_float(_CODEX_FALLBACK_COOLDOWN_ENV, _DEFAULT_CODEX_FALLBACK_COOLDOWN_SECONDS)
+
+
+def is_codex_quota_error(exc: Any) -> bool:
+    """True when Codex CLI failed because account credits/usage are exhausted."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "codex" not in text:
+        return False
+    markers = (
+        "usage_limit_exceeded",
+        "usage_limit_reached",
+        "usage limit exceeded",
+        "hit your usage limit",
+        "usage limit",
+        "plan limit reached",
+        "limit of messages per 5 hours",
+        "used up your usage",
+        "quota",
+        "rate limit",
+        "rate_limit",
+        "out of credit",
+        "credit balance",
+        "credit_balance",
+        "insufficient_quota",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    return "http 429" in text and any(marker in text for marker in ("limit", "usage", "quota", "credit"))
+
+
+def _codex_fallback_active(now: float | None = None) -> bool:
+    now = time.time() if now is None else float(now)
+    return float(_CODEX_FALLBACK_STATE.get("until") or 0.0) > now
+
+
+def _codex_fallback_status(now: float | None = None) -> dict[str, Any]:
+    now = time.time() if now is None else float(now)
+    until = float(_CODEX_FALLBACK_STATE.get("until") or 0.0)
+    return {
+        "active": until > now,
+        "until": until,
+        "remaining": max(until - now, 0.0),
+        "reason": str(_CODEX_FALLBACK_STATE.get("reason") or ""),
+        "model": codex_fallback_model(),
+    }
+
+
+def _mark_codex_exhausted(reason: str, *, now: float | None = None) -> dict[str, Any]:
+    now = time.time() if now is None else float(now)
+    clean_reason = re.sub(r"\s+", " ", str(reason or "codex quota exhausted")).strip()[:240]
+    _CODEX_FALLBACK_STATE.update({
+        "until": now + codex_fallback_cooldown_seconds(),
+        "reason": clean_reason,
+        "last_failure": now,
+    })
+    return _codex_fallback_status(now)
+
+
+def _clear_codex_fallback() -> None:
+    _CODEX_FALLBACK_STATE.update({"until": 0.0, "reason": "", "last_failure": 0.0})
+
+
+def reset_codex_fallback_for_tests() -> None:
+    _clear_codex_fallback()
+
+
+def _set_progress_fallback(progress: dict | None, reason: str) -> None:
+    if progress is None:
+        return
+    progress["runtime"] = "sonnet-fallback"
+    progress["fallback_runtime"] = "sonnet"
+    progress["fallback_model"] = codex_fallback_model()
+    progress["fallback_reason"] = reason
+    progress["output"] = (
+        "Codex esaurito -> fallback Sonnet 4.6 temporaneo. "
+        "Esecuzione in corso..."
+    )
+
+
+async def _run_codex_worker_with_fallback(task: str, workspace: str, *, progress: dict | None = None) -> str:
+    """Run a Codex sub-agent, falling back to Sonnet 4.6 only for quota exhaustion."""
+    status = _codex_fallback_status()
+    if status["active"]:
+        reason = status.get("reason") or "cooldown quota Codex"
+        _set_progress_fallback(progress, reason)
+        logger.warning("Codex subagent fallback active -> %s (%.0fs remaining)", status["model"], status["remaining"])
+        return await _run_worker(task, codex_fallback_model(), workspace, progress=progress)
+
+    if progress is not None:
+        progress["runtime"] = "codex"
+    try:
+        output = await _run_codex_worker(task, workspace)
+        _clear_codex_fallback()
+        return output
+    except Exception as exc:
+        if not is_codex_quota_error(exc):
+            raise
+        status = _mark_codex_exhausted(str(exc))
+        _set_progress_fallback(progress, status["reason"])
+        logger.warning(
+            "Codex subagent quota exhausted -> fallback %s for %.0fs",
+            status["model"],
+            status["remaining"],
+        )
+        return await _run_worker(task, codex_fallback_model(), workspace, progress=progress)
+
+
 def _codex_exec_blocking(task: str, workspace: str) -> str:
     """Run one Codex CLI exec turn (blocking) and return stdout (or raise)."""
     exe = _resolve_codex_executable()
@@ -443,10 +581,17 @@ async def _run_codex_worker(task: str, workspace: str) -> str:
         raise RuntimeError("Codex CLI non trovato (codex.cmd non nel PATH)") from e
     except subprocess.TimeoutExpired as e:
         # Conserva l'output parziale prodotto da Codex prima del timeout.
-        partial = e.stdout or e.output or ""
-        if isinstance(partial, bytes):
-            partial = partial.decode("utf-8", "replace")
-        partial = str(partial).strip()
+        # Include anche stderr: a quota esaurita il CLI stampa il messaggio di
+        # usage limit e poi resta appeso fino al timeout — senza stderr nel
+        # testo dell'errore is_codex_quota_error non scatterebbe mai.
+        chunks = []
+        for raw in (e.stdout or e.output, e.stderr):
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            raw = str(raw or "").strip()
+            if raw:
+                chunks.append(raw)
+        partial = "\n".join(chunks)
         suffix = f"\nParziale prima del timeout:\n{partial}" if partial else ""
         raise RuntimeError(f"Codex CLI timeout dopo {_CODEX_TIMEOUT}s.{suffix}") from e
 
@@ -541,6 +686,10 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             "id": task_id, "session_id": session_id, "agent": label, "agent_id": agent_id,
             "task_type": task_type,
             "task": task, "status": "in_corso", "output": "", "started": time.time(), "finished": None,
+            "runtime": "codex" if model == _CODEX_MODEL else "claude",
+            "fallback_runtime": "",
+            "fallback_model": "",
+            "fallback_reason": "",
         }
         # Logga SEMPRE l'uso: se non c'e' un agente esplicito, usa il label/modello.
         try:
@@ -596,6 +745,13 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             _enqueue_librarian_pass(task_id, "memoria", "Task concluso: " + nome, riassunto, workspace)
         except Exception:
             logger.debug("task_done librarian enqueue failed", exc_info=True)
+        # Cantiere 1 — cut a fine task: segnala che la sessione va compattata
+        # a fine turno (routes._hermes_prime_reply_claude legge il flag).
+        try:
+            from api import prime_auto_compact
+            prime_auto_compact.request_compact_after_task()
+        except Exception:
+            logger.debug("task_done: compact request failed", exc_info=True)
         return {"content": [{"type": "text", "text":
             "Segnato '" + nome + "' come " + stato + ". Salvo l'essenziale in memoria "
             "(Librarian) e tengo il contesto pulito."}]}

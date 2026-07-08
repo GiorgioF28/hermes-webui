@@ -1905,6 +1905,69 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     return provider or None
 
 
+def _message_plain_text(message: dict) -> str:
+    content = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text") or part.get("content") or ""
+                if text:
+                    parts.append(str(text))
+            elif part:
+                parts.append(str(part))
+        return " ".join(parts)
+    return str(content or "")
+
+
+def _build_session_handoff_summary(session) -> str:
+    """Create a compact deterministic handoff for a clean follow-up session."""
+    messages = [
+        m for m in list(getattr(session, "messages", None) or [])
+        if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
+    ]
+    recent = []
+    for msg in messages[-12:]:
+        text = " ".join(_message_plain_text(msg).split())
+        if not text:
+            continue
+        if len(text) > 420:
+            text = text[:417].rstrip() + "..."
+        recent.append(f"- {msg.get('role')}: {text}")
+
+    signal_terms = (
+        "decision", "deciso", "stato", "task", "todo", "prossima",
+        "next", "blocco", "blocked", "done", "fatto", "implement",
+    )
+    live_facts = []
+    for msg in messages:
+        text = " ".join(_message_plain_text(msg).split())
+        low = text.lower()
+        if text and any(term in low for term in signal_terms):
+            if len(text) > 260:
+                text = text[:257].rstrip() + "..."
+            live_facts.append(f"- {text}")
+    live_facts = live_facts[-8:]
+
+    title = str(getattr(session, "title", "") or "sessione precedente").strip()
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    sections = [
+        "Handoff dalla chat precedente.",
+        f"Sessione origine: {title} ({sid}).",
+        "",
+        "Fatti vivi / decisioni / stato task:",
+        *(live_facts or ["- Nessun fatto vivo esplicito trovato; usa il riepilogo recente sotto."]),
+        "",
+        "Contesto recente:",
+        *(recent or ["- La sessione precedente non aveva messaggi leggibili."]),
+        "",
+        "Riparti da questo handoff senza trascinare la cronologia completa.",
+    ]
+    return "\n".join(sections)
+
+
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     model = str(model or "").strip()
     if model.startswith("@") and ":" in model:
@@ -4367,6 +4430,66 @@ def _handle_insights(handler, parsed) -> bool:
     })
 
 
+def _handle_token_insights(handler, parsed) -> bool:
+    """Return token usage analytics from Claude/Codex local transcripts."""
+    query = parse_qs(parsed.query)
+    try:
+        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+    except (ValueError, TypeError):
+        days = 30
+    try:
+        from api import token_insights
+        return j(handler, token_insights.collect(days))
+    except Exception:
+        logger.debug("Failed to collect token insights", exc_info=True)
+        return j(handler, {
+            "period_days": days,
+            "totals": {
+                "claude": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "tokens": 0, "cost_usd": 0.0},
+                "codex": {"input": 0, "output": 0, "cached": 0, "tokens": 0},
+            },
+            "by_agent": [],
+            "by_model": [],
+            "daily": [],
+            "top_sessions": [],
+            "unattributed": {"claude": 0, "codex": 0, "tokens": 0, "sessions": 0},
+        })
+
+
+def _handle_token_breakdown(handler, parsed) -> bool:
+    """Return Claude-only context breakdown analytics from local transcripts."""
+    query = parse_qs(parsed.query)
+    try:
+        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+    except (ValueError, TypeError):
+        days = 30
+    try:
+        from api import token_insights
+        return j(handler, token_insights.context_breakdown(days))
+    except Exception:
+        logger.debug("Failed to collect token context breakdown", exc_info=True)
+        return j(handler, {
+            "period_days": days,
+            "initial_context": {"avg": 0, "min": 0, "max": 0, "per_session": []},
+            "per_turn": {"input_avg": 0, "input_median": 0, "input_max": 0, "output_avg": 0, "output_median": 0, "output_max": 0},
+            "mcp_estimate": {"servers": [], "total_est": 0, "note": "Estimate unavailable."},
+            "heavy_turns": [],
+            "by_tool_cache_creation": [],
+            "drag": {"sessions": [], "total_cache_read": 0},
+            "scope": "claude_only",
+        })
+
+
+def _handle_usage_limits(handler, parsed) -> bool:
+    """Return current local plan/quota snapshot for visible header indicators."""
+    try:
+        from api import token_insights
+        return j(handler, token_insights.limits())
+    except Exception:
+        logger.debug("Failed to collect usage limits", exc_info=True)
+        return j(handler, {"codex": None, "claude": None})
+
+
 def _project_os_workspace_read(repo_root: Path, rel: str) -> dict | None:
     try:
         return read_file_content(repo_root, rel)
@@ -5316,6 +5439,12 @@ def handle_get(handler, parsed) -> bool:
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
+    if parsed.path == "/api/insights/tokens/breakdown":
+        return _handle_token_breakdown(handler, parsed)
+    if parsed.path == "/api/insights/tokens":
+        return _handle_token_insights(handler, parsed)
+    if parsed.path == "/api/usage/limits":
+        return _handle_usage_limits(handler, parsed)
     if parsed.path == "/api/project-os/dashboard":
         return _handle_project_os_dashboard(handler, parsed)
 
@@ -6973,6 +7102,64 @@ def handle_post(handler, parsed) -> bool:
         if worktree_info:
             publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
+
+    if parsed.path == "/api/session/handoff_new":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", status=400)
+        try:
+            source = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", status=404)
+        if getattr(source, "active_stream_id", None) or getattr(source, "pending_user_message", None):
+            return bad(handler, "Cannot close a session while a turn is running.", status=409)
+        try:
+            workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else source.workspace
+        except (TypeError, ValueError) as e:
+            return bad(handler, str(e), status=400)
+
+        model, model_provider = _session_model_state_from_request(
+            body.get("model") or getattr(source, "model", None),
+            body.get("model_provider") or getattr(source, "model_provider", None),
+        )
+        try:
+            from api.session_lifecycle import commit_session_memory
+            from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+            prev_agent = None
+            with SESSION_AGENT_CACHE_LOCK:
+                _cached = SESSION_AGENT_CACHE.get(sid)
+                if _cached:
+                    prev_agent = _cached[0]
+            commit_session_memory(sid, agent=prev_agent)
+        except Exception:
+            logger.debug("Lifecycle commit for handoff source session %s failed", sid, exc_info=True)
+
+        handoff = _build_session_handoff_summary(source)
+        s = new_session(
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            profile=body.get("profile") or getattr(source, "profile", None) or None,
+            project_id=body.get("project_id") or getattr(source, "project_id", None) or None,
+        )
+        handoff_msg = {
+            "role": "assistant",
+            "content": handoff,
+            "timestamp": time.time(),
+            "_handoff_summary": True,
+            "source_session_id": sid,
+        }
+        s.title = "Handoff: " + (getattr(source, "title", None) or "New session")[:60]
+        s.messages = [copy.deepcopy(handoff_msg)]
+        s.context_messages = [copy.deepcopy(handoff_msg)]
+        s.save()
+        publish_session_list_changed("session_handoff_new", profile=getattr(s, "profile", None))
+        return j(handler, {
+            "ok": True,
+            "source_session_id": sid,
+            "handoff": handoff,
+            "session": s.compact() | {"messages": s.messages},
+        })
 
     if parsed.path == "/api/session/duplicate":
         try:
@@ -10791,16 +10978,34 @@ def _hermes_prime_persona_text():
 def _hermes_prime_system_prompt(workspace):
     """Chief-of-staff persona (prompts/hermes-prime.md) + contesto LEGGERO.
 
+    Cantiere 2 (2026-07-08): l'indice della memoria è ora incluso nell'append
+    del preset (statico, cacheable). I corpi delle note rilevanti vengono
+    iniettati nel testo del turno in _hermes_prime_reply_claude tramite
+    memory_retrieval.build_prime_memory_context (budget controllato).
+
     Fase 1 ciclo-memoria: niente più dump del vault nel prompt di Prime. Prime
     tiene solo persona + basi dei progetti in corso; per il dettaglio profondo
-    (codice, memoria, come funzionano le componenti) DELEGA al Librarian, che gira
-    su Codex e non consuma i crediti Claude di Prime.
+    (codice, memoria, come funzionano le componenti) DELEGA al Librarian, che
+    gira su Codex e non consuma i crediti Claude di Prime.
     """
     persona = _hermes_prime_persona_text()
     brief = _in_progress_projects_brief(workspace)
     parts = [persona]
     if brief:
         parts.append("--- Progetti in corso ---\n" + brief)
+    # Indice memoria (Cantiere 2): solo one-liner, statico e cacheable.
+    # I corpi rilevanti per il task corrente vengono aggiunti nel testo del
+    # turno (vedi _hermes_prime_reply_claude). Così il system prompt resta
+    # stabile e sfrutta la cache di Anthropic turno dopo turno.
+    try:
+        from api import memory_retrieval
+        mem_dir = memory_retrieval.find_prime_memory_dir()
+        if mem_dir is not None:
+            idx = memory_retrieval.build_memory_context("", mem_dir, index_only=True)
+            if idx:
+                parts.append("--- Memoria (indice) ---\n" + idx)
+    except Exception:
+        logger.debug("prime system prompt: memory index build failed", exc_info=True)
     parts.append(
         "Per dettagli profondi (codice, memoria, funzionamento delle componenti) "
         "NON ricostruirli a mente: delega al Librarian (task_type 'memoria'/'ricerca') "
@@ -10920,7 +11125,7 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
         return {"reply": reply, "delegations": get_background_tasks()}
 
     if lead_brain.get_lead(workspace) == lead_brain.LEAD_CODEX:
-        return _hermes_prime_reply_codex(message, workspace, on_token=on_token, on_status=on_status)
+        return _hermes_prime_reply_codex(message, workspace, attachments, on_token=on_token, on_status=on_status)
     try:
         return _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status)
     except _ClaudeExhausted as ex:
@@ -10941,7 +11146,7 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
         if on_status is not None:
             on_status({"state": "handoff", "from": "claude", "to": "codex"})
         return _hermes_prime_reply_codex(
-            message, workspace, on_token=on_token, on_status=on_status, partial=ex.partial,
+            message, workspace, attachments, on_token=on_token, on_status=on_status, partial=ex.partial,
         )
 
 
@@ -10957,6 +11162,11 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
     if on_status is not None:
         on_status({"state": "reasoning"})
 
+    from api.bridge_attachments import build_prime_attachment_note, normalize_prime_attachments, prime_turn_started, record_prime_images
+
+    turn = prime_turn_started()
+    attachments = normalize_prime_attachments(attachments or [], bridge="hermes-prime")
+    record_prime_images(attachments, turn=turn)
     handoff = lead_brain.build_handoff_packet(workspace, user_message=message, partial_reply=partial)
     prompt = (
         _hermes_prime_persona_text()
@@ -10969,6 +11179,7 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
         "italiano, 2-4 frasi, diretto, da chief of staff. Niente output grezzi né "
         "elenchi di file. Se serve un lavoro pesante, dillo in una riga (lo si delega)."
     )
+    prompt += build_prime_attachment_note(attachments, current_turn=turn)
     try:
         reply = (_codex_exec_blocking(prompt, str(workspace)) or "").strip()
     except Exception as exc:
@@ -10984,6 +11195,7 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
     from api.prime_delegation import get_background_tasks
     from api import lead_brain
+    from api import prime_auto_compact
 
     def _status(state, **extra):
         if on_status is not None:
@@ -10992,12 +11204,31 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     reg = _get_claude_registry()
     parts = []
     final = {"text": ""}
+    final_usage = {"usage": {}}
     last_state = [None]
 
     # Le foto allegate finiscono nell'inbox 'hermes-prime', già negli add_dirs
     # della sessione Prime: aggiungiamo la nota che gli dice di leggerle con Read.
+    from api.bridge_attachments import normalize_prime_attachments, prime_turn_started, record_prime_images
+
+    turn = prime_turn_started()
+    attachments = normalize_prime_attachments(attachments or [], bridge="hermes-prime")
+    record_prime_images(attachments, turn=turn)
     prompt_text = " ".join(str(message or "").split())
-    prompt_text += _claude_attachment_note("hermes-prime", attachments)
+    prompt_text += _claude_attachment_note("hermes-prime", attachments, current_turn=turn)
+
+    # Cantiere 2: iniezione selettiva della memoria per-turno.
+    # Solo i corpi delle note rilevanti per il messaggio corrente, entro budget
+    # (HERMES_MEMORY_BUDGET_TOKENS, default 2000 tok). L'indice è nel system prompt.
+    try:
+        from api import memory_retrieval
+        _mem_ctx = memory_retrieval.build_prime_memory_context(
+            str(message or ""), workspace
+        )
+        if _mem_ctx:
+            prompt_text = _mem_ctx + "\n\n---\n\n" + prompt_text
+    except Exception:
+        logger.debug("prime turn: memory retrieval failed", exc_info=True)
 
     async def _drive(client):
         await client.query(prompt_text)
@@ -11006,6 +11237,10 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
             ev = getattr(m, "event", None)
             if isinstance(ev, dict):
                 event_type = ev.get("type")
+                if event_type == "message_delta":
+                    usage = prime_auto_compact.usage_from_sdk_message(m)
+                    if prime_auto_compact.context_tokens_from_usage(usage):
+                        final_usage["usage"] = usage
                 if event_type == "content_block_start":
                     block = ev.get("content_block") or {}
                     block_type = block.get("type")
@@ -11027,6 +11262,9 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
                             if on_token is not None:
                                 on_token(text)
             elif type(m).__name__ == "ResultMessage":
+                usage = prime_auto_compact.usage_from_sdk_message(m)
+                if prime_auto_compact.context_tokens_from_usage(usage):
+                    final_usage["usage"] = usage
                 r = getattr(m, "result", None)
                 if r:
                     final["text"] = str(r)
@@ -11088,6 +11326,24 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
                     partial="".join(parts), reason=f"{type(turn_exc).__name__}",
                 ) from turn_exc
             raise
+        if not timed_out:
+            prime_auto_compact.maybe_auto_compact_prime(
+                reg,
+                session_id="hermes-prime",
+                usage=final_usage.get("usage"),
+                idle=True,
+            )
+            # Cantiere 1 — cut a fine task: se task_done è stato chiamato nel
+            # turno, forza un compact extra (ignora cooldown e threshold).
+            if prime_auto_compact.pop_compact_after_task():
+                logger.info("prime_reply_claude: compact forzato per task_done")
+                prime_auto_compact.maybe_auto_compact_prime(
+                    reg,
+                    session_id="hermes-prime",
+                    usage=final_usage.get("usage"),
+                    idle=True,
+                    force=True,
+                )
         if timed_out:
             _reset_prime_session(reg, fut)
     finally:
@@ -11112,7 +11368,7 @@ def _handle_bridge_prime(handler, body):
     if not msg and not attachments:
         return bad(handler, "message is required")
     if not msg and attachments:
-        msg = "(L'utente ha allegato un'immagine senza testo.)"
+        msg = "(L'utente ha allegato file senza testo.)"
     workspace = Path(str(DEFAULT_WORKSPACE))
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -14224,13 +14480,20 @@ def _consume_claude_sdk_message(message, state, emit, *, session_id, clean_msg):
         emit(("reasoning", {"text": "Claude completato.\n"}))
 
 
-def _claude_attachment_note(session_id, attachments):
+def _claude_attachment_note(session_id, attachments, *, current_turn=None):
     """Build a prompt suffix listing attached files so Claude reads them.
 
     Chat attachments are saved outside the workspace (STATE_DIR/attachments), so
     the session attachment dir is also added to the client's add_dirs (factory).
-    Claude Code's Read tool handles text, code, images and PDFs.
+    Claude Code's Read tool handles text, code, images and PDFs. For Prime,
+    PDFs are represented as label/path/summary blocks only.
     """
+    if session_id == "hermes-prime":
+        from api.bridge_attachments import build_prime_attachment_note
+        return build_prime_attachment_note(
+            attachments or [],
+            current_turn=int(current_turn or 0),
+        )
     if not attachments:
         return ""
     try:
