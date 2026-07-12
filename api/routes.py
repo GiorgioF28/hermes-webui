@@ -13442,6 +13442,23 @@ def _cc_update_today_task_checkbox(path: Path, title: str, done: bool) -> dict:
     return {"path": str(path), "updated": False, "matches": matches}
 
 
+def _cc_mark_today_task_done(path: Path, title: str) -> dict:
+    result = _cc_update_today_task_checkbox(path, title, True)
+    if result.get("matches"):
+        return result
+    if not path.is_file() or not title:
+        return result
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    needle = title.strip().lower()
+    for line in text.splitlines():
+        match = re.match(r"^\s*[-*]\s+\[( |x|X)\]\s+(.*)$", line)
+        if match and match.group(2).strip().lower() == needle:
+            return result
+    updated = text.rstrip() + f"\n- [x] {title.strip()}\n"
+    path.write_text(updated, encoding="utf-8", errors="replace")
+    return {"path": str(path), "updated": True, "matches": 0, "appended": True}
+
+
 def _cc_update_markdown_heading(path: Path, heading: str, value: str) -> bool:
     if not path.is_file():
         return False
@@ -13612,14 +13629,18 @@ def _handle_projects_task(handler, body):
             result = _cc_update_today_task_checkbox(candidate, text, done)
             if not result.get("updated"):
                 return bad(handler, "task line not found in note", status=404)
+            today = None
+            if done:
+                today = _cc_mark_today_task_done(root / "tasks" / "today.md", text)
         else:
             result = _cc_add_project_note_task(candidate, text)
+            today = None
         try:
             from api import projects_overview
             projects_overview._cache.clear()
         except Exception:
             logger.debug("projects overview cache clear failed", exc_info=True)
-        return j(handler, {"ok": True, "action": action, "result": result, "audit": audit})
+        return j(handler, {"ok": True, "action": action, "result": result, "today": today, "audit": audit})
     except ValueError as exc:
         return bad(handler, str(exc), status=400)
     except Exception as exc:

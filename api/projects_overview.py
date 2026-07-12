@@ -1,7 +1,7 @@
 """Per-project overview for the Command Bridge "Projects Strip".
 
 Reads project notes from ``<vault>/01-Projects/*.md`` (direct fs) and rolls them
-up into THREE family cards (Hermes · VisionBuilts · Podcast Rap). Each single
+up into family cards (Hermes · VisionBuilts · Concorso INPS · Podcast Rap). Each single
 note in 01-Projects is a *sub-project* of one family; the card aggregates them.
 
 For each family the payload returns:
@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,19 +48,34 @@ FAMILIES = (
     {
         "id": "hermes",
         "name": "Hermes",
+        "priority": 2,
         "stem_keywords": ("hermes",),
         "keywords": ("hermes", "command bridge", "webui", "web ui", "prime", "voce", "voice", "planet", "pianeta"),
     },
     {
         "id": "visionbuilts",
         "name": "VisionBuilts",
+        "priority": 2,
         "stem_keywords": ("visionbuilts", "vision builts", "giorgiof28", "creator earning", "creator-earning"),
         "keywords": ("visionbuilts", "vision builts", "giorgiof28", "creator earning", "creator-earning",
                      "ebook", "e-book", "n8n", "console", "instagram", "crm", "webhook", "gotenberg"),
     },
     {
+        "id": "concorso-inps",
+        "name": "Concorso INPS",
+        "priority": 2,
+        "stem_keywords": ("concorso inps", "assistente informatico", "inps"),
+        "keywords": ("concorso inps", "assistente informatico", "inps", "studio",
+                     "quiz", "manuale", "cad", "gdpr", "office automation"),
+        "study": {
+            "course": "Concorso INPS",
+            "path": "07-Study/Concorso INPS/Indice.md",
+        },
+    },
+    {
         "id": "rap",
         "name": "Podcast Rap",
+        "priority": 0,
         "stem_keywords": ("rap", "album", "produzione musicale"),
         "keywords": ("rap", "album", "produzione musicale", "podcast", "beat", "lyrics",
                      "testo", "strofa", "ritornello", "mix", "master", "musica"),
@@ -99,6 +115,43 @@ def _mtime(path: Path) -> float:
 
 def _rel(path: Path, vault: Path) -> str:
     return str(path.relative_to(vault)).replace("\\", "/")
+
+
+def _subproject_id(path: str) -> str:
+    return re.sub(r"[^\w]+", "-", str(path or "").removesuffix(".md").lower()).strip("-")
+
+
+def _load_client_status(vault: Path) -> dict[str, list[dict]]:
+    """Read optional card client state from Hermes setup config, not frontend JS."""
+    root = vault.parent
+    path = root / "config" / "command-bridge-clients.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out: dict[str, list[dict]] = {}
+    cards = raw.get("cards") if isinstance(raw, dict) else None
+    if not isinstance(cards, dict):
+        return out
+    for family_id, clients in cards.items():
+        if not isinstance(clients, list):
+            continue
+        clean = []
+        for item in clients:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            clean.append({
+                "name": name[:80],
+                "status": str(item.get("status") or "").strip()[:220],
+                "waiting_on": str(item.get("waiting_on") or "").strip()[:280],
+            })
+        out[str(family_id)] = clean
+    return out
 
 
 def _rel_time(ts: float) -> str:
@@ -169,7 +222,7 @@ def _family_for_text(*texts: str) -> str | None:
     Hermes mention doesn't swallow a clearly-VisionBuilts task.
     """
     blob = " ".join(t.lower() for t in texts if t)
-    for fid in ("visionbuilts", "rap", "hermes"):
+    for fid in ("visionbuilts", "concorso-inps", "rap", "hermes"):
         fam = next(f for f in FAMILIES if f["id"] == fid)
         if any(k in blob for k in fam["keywords"]):
             return fid
@@ -201,8 +254,9 @@ def _latest_entries(notes, vault: Path) -> list[dict]:
 
 
 def _build_families(vault: Path, project_notes, stem_map) -> list[dict]:
-    """Roll the per-note projects up into the three family cards."""
+    """Roll the per-note projects up into Command Bridge family cards."""
     members: dict[str, list[Path]] = {f["id"]: [] for f in FAMILIES}
+    clients_by_family = _load_client_status(vault)
     for note in project_notes:
         fid = _family_for_stem(note.stem)
         if fid:
@@ -237,7 +291,10 @@ def _build_families(vault: Path, project_notes, stem_map) -> list[dict]:
         children_notes = sorted(
             mlist, key=lambda p: (p is not primary, p.stem.lower())
         )
-        children = [{"name": p.stem, "path": _rel(p, vault)} for p in children_notes]
+        children = [
+            {"id": _subproject_id(_rel(p, vault)), "name": p.stem, "path": _rel(p, vault)}
+            for p in children_notes
+        ]
 
         # Tasks: tasky-heading member tasks, then plain member tasks, then free
         # tasks; dedup by text (case-insensitive); each keeps its source path.
@@ -255,7 +312,12 @@ def _build_families(vault: Path, project_notes, stem_map) -> list[dict]:
             if key in seen:
                 continue
             seen.add(key)
-            tasks.append({"text": text, "path": rel})
+            tasks.append({
+                "text": text,
+                "path": rel,
+                "subproject_id": _subproject_id(rel),
+                "subproject": Path(rel).stem,
+            })
             if len(tasks) >= MAX_FAMILY_TASKS:
                 break
 
@@ -275,6 +337,9 @@ def _build_families(vault: Path, project_notes, stem_map) -> list[dict]:
             "tasks": tasks,
             "latest": _latest_entries(related, vault),
             "activity": _activity_buckets([_mtime(p) for p in related]),
+            "priority": int(fam.get("priority") if fam.get("priority") is not None else 1),
+            "clients_active": clients_by_family.get(fid, []),
+            "study": fam.get("study") or None,
         })
     return families
 

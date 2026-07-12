@@ -5022,9 +5022,8 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
     {id:'hermes', label:'Hermes', ids:['hermes','hermes-control-center','hermes-webui']},
     {id:'visionbuilts', label:'VisionBuilts', ids:['giorgiof28-creator-earning-engine','giorgiof28-visionbuilts-console','visionbuilts-ebook-platform']},
     {id:'podcast-rap', label:'Podcast e Produzione Rap', ids:['rap-music-production']},
-    {id:'concorso-inps', label:'Concorso INPS — Studio', ids:['concorso-inps-assistente-informatico']},
   ];
-  const CC_PROJECT_HIDDEN = new Set(['carol-company-application']);
+  const CC_PROJECT_HIDDEN = new Set(['carol-company-application', 'concorso-inps-assistente-informatico']);
   const _ccClusterMeta = (members) => {
     const tasks = members.reduce((n, item) => n + (Number(item.open_task_count) || 0), 0);
     const projects = members.length === 1 ? '1 progetto' : `${members.length} progetti`;

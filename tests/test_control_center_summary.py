@@ -98,6 +98,19 @@ def test_control_center_project_next_action_updates_inventory_and_note(monkeypat
     assert "## Asset o link" in note_text
 
 
+def test_mark_today_task_done_appends_when_project_card_task_was_not_in_today(tmp_path):
+    from api import routes
+
+    today = tmp_path / "today.md"
+    today.write_text("# Today\n\n- [x] Existing task\n", encoding="utf-8")
+
+    result = routes._cc_mark_today_task_done(today, "Project card task")
+
+    assert result["updated"] is True
+    assert result["appended"] is True
+    assert "- [x] Project card task" in today.read_text(encoding="utf-8")
+
+
 def test_control_center_frontend_is_wired():
     repo = Path(__file__).resolve().parent.parent
     html = (repo / "static" / "index.html").read_text(encoding="utf-8")
@@ -119,6 +132,9 @@ def test_control_center_frontend_is_wired():
     assert "project_cockpit" in panels
     assert "action_queue" in panels
     assert "risks" in panels
+    assert "'concorso-inps-assistente-informatico'" in panels
+    assert "CC_PROJECT_HIDDEN" in panels
+    assert "{id:'concorso-inps'" not in panels
     assert "data-cc-path" in panels
     assert "bringControlCenterTaskToChat" in panels
     assert "setControlCenterProjectNextAction" in panels

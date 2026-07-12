@@ -239,6 +239,12 @@
 '.cb-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:linear-gradient(180deg,#fff,var(--cb-accent));opacity:.0;transition:opacity .2s;}',
 '.cb-card:hover{border-color:rgba(255,138,61,.5);transform:translateY(-3px);box-shadow:0 14px 40px -22px rgba(255,106,0,.6);}',
 '.cb-card:hover::before{opacity:.9;}',
+'.cb-card.cb-low-priority{opacity:.58;order:20;}',
+'.cb-card.cb-low-priority:hover{opacity:.82;}',
+'.cb-card.cb-low-priority .cb-card-block{display:none;}',
+'.cb-card.cb-low-priority.cb-expanded .cb-card-block{display:block;}',
+'.cb-card.cb-low-priority .cb-low-toggle{display:inline-flex;}',
+'.cb-low-toggle{display:none;margin-top:10px;}',
 '.cb-card-top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;}',
 '.cb-card-name{font-family:var(--cb-disp);font-weight:600;font-size:16px;color:#fff;letter-spacing:.01em;min-width:0;',
 '  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
@@ -274,7 +280,14 @@
 '.cb-subs{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px;}',
 '.cb-sub{font-family:var(--cb-mono);font-size:10.5px;color:var(--cb-text);border:1px solid var(--cb-line);border-radius:999px;padding:4px 10px;background:rgba(255,255,255,.03);cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:border-color .15s,background .15s,color .15s;}',
 '.cb-sub:hover{border-color:rgba(255,138,61,.55);background:rgba(255,138,61,.08);color:#fff;}',
+'.cb-sub.cb-active{border-color:var(--cb-accent);background:rgba(255,106,0,.14);color:#fff;}',
+'.cb-task[hidden]{display:none;}',
 '.cb-tasks-scroll{max-height:230px;overflow:auto;margin:0 -4px;padding:0 4px;}',
+'.cb-clients{display:flex;flex-direction:column;gap:7px;}',
+'.cb-client{border:1px solid var(--cb-line2);border-radius:8px;background:rgba(0,0,0,.14);padding:7px 8px;}',
+'.cb-client strong{display:block;font-family:var(--cb-disp);font-size:12px;color:#fff;margin-bottom:3px;}',
+'.cb-client span{display:block;font-size:11.5px;line-height:1.35;color:var(--cb-text);}',
+'.cb-client em{display:block;margin-top:3px;font-style:normal;font-family:var(--cb-mono);font-size:10px;line-height:1.35;color:var(--cb-muted);}',
 /* white -> fluo-orange gradient on display titles (the accent the user wanted on TEXT) */
 '.cb-chat-name,.cb-sec-title,.cb-card-name{background:linear-gradient(90deg,#ffffff 0%,#ffffff 26%,#ffb673 62%,var(--cb-accent) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
 ''
@@ -1056,11 +1069,24 @@
     var html = (tasks || []).map(function (t) {
       var text = (t && t.text != null) ? t.text : t;
       var path = (t && t.path) ? t.path : '';
-      return '<div class="cb-task cb-task-do" data-text="' + esc(text) + '" data-path="' + esc(path) + '" role="button" tabindex="0" title="Segna come fatto">' +
+      var sub = (t && t.subproject_id) ? t.subproject_id : '';
+      return '<div class="cb-task cb-task-do" data-text="' + esc(text) + '" data-path="' + esc(path) + '" data-subproject="' + esc(sub) + '" role="button" tabindex="0" title="Segna come fatto">' +
         '<span class="box"></span><span class="cb-task-txt">' + esc(text) + '</span></div>';
     }).join('') || '<div class="cb-empty">nessun task aperto</div>';
     return '<div class="cb-tasks-scroll">' + html + '</div>' +
       '<div class="cb-task-add"><input type="text" class="cb-task-input" placeholder="+ aggiungi task" aria-label="Aggiungi task"></div>';
+  }
+
+  function clientsHtml(clients) {
+    clients = Array.isArray(clients) ? clients : [];
+    if (!clients.length) return '';
+    return '<div class="cb-card-block"><div class="cb-block-h">Clienti attivi</div><div class="cb-clients">' +
+      clients.map(function (c) {
+        return '<div class="cb-client"><strong>' + esc(c.name || '') + '</strong>' +
+          '<span>' + esc(c.status || '') + '</span>' +
+          (c.waiting_on ? '<em>In attesa: ' + esc(c.waiting_on) + '</em>' : '') +
+          '</div>';
+      }).join('') + '</div></div>';
   }
 
   // Wire task toggle/add on a card. defaultPath is where new tasks are written.
@@ -1073,7 +1099,13 @@
         var notePath = el.getAttribute('data-path') || defaultPath;
         el.classList.add('cb-task-done');
         apiPost('api/projects/task', { action: 'toggle', note_path: notePath, text: text, done: true })
-          .then(function () { setTimeout(refresh, 300); })
+          .then(function () {
+            el.remove();
+            var scroll = card.querySelector('.cb-tasks-scroll');
+            if (scroll && !scroll.querySelector('.cb-task-do')) scroll.innerHTML = '<div class="cb-empty">nessun task aperto</div>';
+            api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {});
+            setTimeout(refresh, 250);
+          })
           .catch(function () { el.classList.remove('cb-task-done'); });
       };
       el.addEventListener('click', done);
@@ -1095,6 +1127,79 @@
           .catch(function () { input.disabled = false; });
       });
     }
+  }
+
+
+  function filterCardTasks(card, subprojectId) {
+    subprojectId = subprojectId || '';
+    Array.prototype.forEach.call(card.querySelectorAll('.cb-sub:not(.cb-low-toggle)'), function (chip) {
+      chip.classList.toggle('cb-active', (chip.getAttribute('data-filter') || '') === subprojectId);
+    });
+    Array.prototype.forEach.call(card.querySelectorAll('.cb-task-do'), function (task) {
+      var taskSub = task.getAttribute('data-subproject') || '';
+      task.hidden = !!subprojectId && taskSub !== subprojectId;
+    });
+    var scroll = card.querySelector('.cb-tasks-scroll');
+    if (!scroll) return;
+    var empty = scroll.querySelector('.cb-filter-empty');
+    var visible = Array.prototype.some.call(scroll.querySelectorAll('.cb-task-do'), function (task) { return !task.hidden; });
+    if (!visible && subprojectId && !empty) {
+      scroll.insertAdjacentHTML('beforeend', '<div class="cb-empty cb-filter-empty">nessun task per questo sottoprogetto</div>');
+    } else if ((visible || !subprojectId) && empty) {
+      empty.remove();
+    }
+  }
+
+  function renderFamiliesV3(grid, families) {
+    var order = loadProjOrder();
+    families = families.slice().sort(function (a, b) {
+      var ia = order.indexOf(a.id), ib = order.indexOf(b.id);
+      if (ia !== ib) return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+      return Number(b.priority || 1) - Number(a.priority || 1);
+    });
+    grid.innerHTML = families.map(function (f) {
+      var children = f.children || [];
+      var subs = children.length
+        ? '<button type="button" class="cb-sub cb-active" data-filter="">Tutti</button>' + children.map(function (c) {
+          return '<button type="button" class="cb-sub" data-filter="' + esc(c.id || '') + '" data-path="' + esc(c.path) + '" title="' + esc(c.name) + '">' + esc(c.name) + '</button>';
+        }).join('')
+        : '<div class="cb-empty">nessuna sotto-parte</div>';
+      var low = Number(f.priority || 1) <= 0;
+      return '' +
+        '<article class="cb-card cb-fam' + (low ? ' cb-low-priority' : '') + '" data-family-id="' + esc(f.id) + '" data-primary="' + esc(f.primary_path || '') + '" tabindex="0" role="group" aria-roledescription="card progetto trascinabile">' +
+          '<div class="cb-card-head">' +
+            '<div class="cb-card-top" style="flex:1;min-width:0"><span class="cb-card-name">' + esc(f.name) + '</span>' + sparkDots(f.activity) + '</div>' +
+            '<span class="cb-drag" title="Tieni premuto e trascina per riordinare" aria-hidden="true">::</span>' +
+          '</div>' +
+          '<div class="cb-subs">' + subs + '</div>' +
+          '<button type="button" class="cb-sub cb-low-toggle">Espandi card</button>' +
+          '<div class="cb-card-block"><div class="cb-block-h">Latest changes</div>' + latestHtml(f.latest) + '</div>' +
+          clientsHtml(f.clients_active) +
+          '<div class="cb-card-block"><div class="cb-block-h">Up next</div>' + tasksHtml(f.tasks) + '</div>' +
+        '</article>';
+    }).join('');
+    Array.prototype.forEach.call(grid.querySelectorAll('.cb-card.cb-fam'), function (card) {
+      Array.prototype.forEach.call(card.querySelectorAll('.cb-sub:not(.cb-low-toggle)'), function (chip) {
+        chip.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+        chip.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var filter = chip.getAttribute('data-filter') || '';
+          if (filter && chip.classList.contains('cb-active')) filter = '';
+          filterCardTasks(card, filter);
+        });
+      });
+      var lowToggle = card.querySelector('.cb-low-toggle');
+      if (lowToggle) {
+        lowToggle.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+        lowToggle.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var expanded = card.classList.toggle('cb-expanded');
+          lowToggle.textContent = expanded ? 'Comprimi card' : 'Espandi card';
+        });
+      }
+      wireCardTasks(card, card.getAttribute('data-primary'));
+    });
+    enableDragReorder(grid);
   }
 
   // Drag-to-reorder the family cards (hold a card and move). Pointer-based so it
@@ -1147,7 +1252,7 @@
   function renderProjects(data) {
     var grid = $('cbGrid'); if (!grid) return;
     var families = (data && data.families) || [];
-    if (families.length) { renderFamilies(grid, families); return; }
+    if (families.length) { renderFamiliesV3(grid, families); return; }
     // Fallback: flat per-note cards (legacy backend without families).
     var projects = (data && data.projects) || [];
     if (!projects.length) {
