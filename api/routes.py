@@ -13137,19 +13137,17 @@ def _handle_study_save_memory(handler, body):
 
 def _handle_study_professor_start(handler, body, diag=None):
     try:
-        from api.study_section import build_professor_context
+        from api.study_section import autosave_professor_turn, build_professor_context
 
         message = str(body.get("message") or "").strip()
         if not message:
             return bad(handler, "message is required", status=400)
         course = str(body.get("course") or "Concorso INPS").strip() or "Concorso INPS"
-        subject = str(body.get("subject") or "").strip()
-        chapter = str(body.get("chapter") or "").strip()
-        tag = str(body.get("tag") or "").strip()
-        if not tag and subject and chapter:
-            from api.study_section import _tag_slug
-
-            tag = f"{_tag_slug(subject)}/{_tag_slug(chapter)}"
+        study_memory = autosave_professor_turn(course=course, message=message)
+        course = str(study_memory.get("course") or course)
+        subject = str(study_memory.get("subject") or "").strip()
+        chapter = str(study_memory.get("chapter") or "").strip()
+        tag = str(study_memory.get("tag") or "").strip()
 
         existing_session_id = str(body.get("session_id") or "").strip()
         if existing_session_id:
@@ -13194,7 +13192,11 @@ def _handle_study_professor_start(handler, body, diag=None):
             explicit_model_pick=bool(body.get("explicit_model_pick")),
         )
         focused_message = "\n".join([
-            f"[Studio Professore | corso={course} | materia={subject or '-'} | capitolo={chapter or '-'} | tag={tag or '-'}]",
+            (
+                f"[Studio Professore | corso={course} | materia={subject or '-'} | "
+                f"capitolo={chapter or '-'} | tag={tag or '-'} | "
+                f"modalita={study_memory.get('mode') or 'nota'} | autosalvato=si]"
+            ),
             message,
         ])
         response = _start_run(
@@ -13212,7 +13214,18 @@ def _handle_study_professor_start(handler, body, diag=None):
         status = int(response.pop("_status", 200) or 200)
         if response.get("error") and status >= 400:
             return j(handler, response, status=status)
-        payload = {"ok": True, "study": {"course": course, "subject": subject, "chapter": chapter, "tag": tag}, **response}
+        payload = {
+            "ok": True,
+            "study": {
+                "course": course,
+                "subject": subject,
+                "chapter": chapter,
+                "tag": tag,
+                "mode": study_memory.get("mode"),
+                "saved": study_memory.get("saved"),
+            },
+            **response,
+        }
         return j(handler, payload, status=status)
     finally:
         if diag:

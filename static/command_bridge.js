@@ -1227,12 +1227,14 @@
     }
     list.innerHTML = agents.map(function (a) {
       var last = a.last_used && a.last_used.rel ? a.last_used.rel : 'mai';
+      var status = a.status_label || ((a.state === 'attivo') ? 'live / task attivo' : 'idle / nessun task attivo');
       return '' +
         '<div class="cb-agent-row">' +
           '<span class="cb-agent-state ' + stateClass(a.state) + '"></span>' +
           '<div style="min-width:0">' +
             '<div class="cb-agent-name">' + esc(a.name || 'Agente') + '</div>' +
             '<div class="cb-agent-role">' + esc(a.role || '') + '</div>' +
+            '<div class="cb-agent-role">' + esc(status) + '</div>' +
           '</div>' +
           '<div class="cb-agent-meta">' + esc(a.model || 'auto') + '<br>' + esc(last) + '</div>' +
         '</div>';

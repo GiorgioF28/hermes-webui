@@ -14,6 +14,25 @@ DEFAULT_STUDY_ROOT = ROOT_DIR / "obsidian-vault" / "07-Study"
 DEFAULT_COURSE = "Concorso INPS"
 DEFAULT_STUDY_DIR = DEFAULT_STUDY_ROOT / DEFAULT_COURSE
 
+INPS_SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
+    "Informatica di base": ("informatica di base", "hardware", "software", "cpu", "ram", "memoria", "algoritmo", "bit", "byte"),
+    "Linguaggi di programmazione": ("programmazione", "linguaggio", "python", "java", "javascript", "c++", "oop", "classe", "funzione", "variabile"),
+    "Principi di Intelligenza Artificiale": ("intelligenza artificiale", " ai ", "machine learning", "deep learning", "rete neurale", "supervisionato", "chatgpt", "llm"),
+    "Data privacy e sicurezza informatica": ("gdpr", "privacy", "sicurezza informatica", "cyber", "crittografia", "hash", "firewall", "data breach", "malware"),
+    "Codice dell'Amministrazione Digitale (CAD)": ("cad", "codice amministrazione digitale", "spid", "pec", "firma digitale", "documento informatico", "conservazione"),
+    "Nozioni di diritto amministrativo": ("diritto amministrativo", "procedimento amministrativo", "legge 241", "atto amministrativo", "accesso agli atti", "silenzio assenso"),
+    "Sistemi operativi Linux e Windows": ("linux", "windows", "sistema operativo", "server", "client", "processo", "filesystem", "permessi", "bash", "powershell"),
+    "Database relazionali": ("database", "sql", "relazionale", "tabella", "join", "chiave primaria", "chiave esterna", "normalizzazione", "query"),
+    "Application server e middleware": ("application server", "middleware", "tomcat", "web server", "api gateway", "servlet", "runtime"),
+    "Strumenti per l'office automation": ("office", "office automation", "excel", "word", "powerpoint", "libreoffice", "foglio di calcolo", "spreadsheet"),
+    "Reti locali e geografiche": ("rete", "reti locali", "lan", "wan", "tcp", "ip", "subnet", "osi", "router", "switch", "dns"),
+    "Reti multimediali (smart working)": ("smart working", "voip", "videoconferenza", "multimediale", "streaming", "webrtc", "qos"),
+    "Backup e recovery": ("backup", "recovery", "restore", "disaster recovery", "rpo", "rto", "snapshot"),
+    "Ordinamento del lavoro alle dipendenze delle PA": ("lavoro pa", "pubblica amministrazione", "dlgs 165", "dipendenze delle pa", "codice comportamento"),
+    "Trasparenza, anticorruzione e privacy": ("trasparenza", "anticorruzione", "accesso civico", "anac", "whistleblowing", "foia"),
+    "Lingua inglese": ("inglese", "english", "b1", "grammar", "reading", "listening", "vocabulary"),
+}
+
 
 def _empty_dashboard() -> dict[str, Any]:
     return {
@@ -513,6 +532,170 @@ def retrieve_by_tag(course: str | None, tag: str, study_root: Path = DEFAULT_STU
     }
 
 
+def _message_words(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9àèéìòù]+", str(value or "").lower())
+        if len(token) > 2
+    }
+
+
+def _best_subject_from_message(message: str, course: str | None = None, study_root: Path = DEFAULT_STUDY_ROOT) -> str:
+    text = f" {str(message or '').lower()} "
+    words = _message_words(text)
+    scores: dict[str, int] = {}
+    canonical_scores: dict[str, int] = {}
+    for subject, aliases in INPS_SUBJECT_ALIASES.items():
+        score = 0
+        for alias in aliases:
+            alias_l = alias.lower()
+            if alias_l.strip() in text:
+                score += max(3, len(alias_l.split()) * 3)
+            else:
+                score += len(words.intersection(_message_words(alias_l)))
+        if score:
+            canonical_scores[subject] = score
+            scores[subject] = score
+
+    if canonical_scores:
+        return sorted(canonical_scores.items(), key=lambda item: (-item[1], item[0].lower()))[0][0]
+
+    try:
+        summary = build_summary(_course_dir(course, study_root))
+        for subject in summary.get("subjects") or []:
+            name = str(subject.get("name") or "")
+            if not name:
+                continue
+            score = scores.get(name, 0)
+            name_words = _message_words(name)
+            if name.lower() in text:
+                score += 10
+            score += len(words.intersection(name_words)) * 2
+            for chapter in subject.get("chapters") or []:
+                chapter_words = _message_words(chapter.get("name") or "")
+                overlap = len(words.intersection(chapter_words))
+                if overlap:
+                    score += overlap
+            if score:
+                scores[name] = score
+    except Exception:
+        pass
+
+    if not scores:
+        return "Informatica di base"
+    return sorted(scores.items(), key=lambda item: (-item[1], item[0].lower()))[0][0]
+
+
+def _candidate_chapter_from_message(
+    message: str,
+    subject: str,
+    course: str | None = None,
+    study_root: Path = DEFAULT_STUDY_ROOT,
+) -> str:
+    text = str(message or "").strip()
+    text_l = text.lower()
+    words = _message_words(text_l)
+    try:
+        summary = build_summary(_course_dir(course, study_root))
+        for row in summary.get("subjects") or []:
+            if str(row.get("name") or "").lower() != subject.lower():
+                continue
+            best: tuple[int, str] = (0, "")
+            for chapter in row.get("chapters") or []:
+                name = str(chapter.get("name") or "")
+                if not name:
+                    continue
+                score = 12 if name.lower() in text_l else len(words.intersection(_message_words(name))) * 3
+                tag = str(chapter.get("tag") or "")
+                score += len(words.intersection(_message_words(tag.replace("/", " "))))
+                if score > best[0]:
+                    best = (score, name)
+            if best[0] >= 3:
+                return best[1]
+    except Exception:
+        pass
+
+    topic_patterns = [
+        r"\b(?:su|sul|sulla|sulle|riguardo|circa|argomento|capitolo)\s+([A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9 '\-_/]{2,48})",
+        r"\b(?:cos[' ]?e|cosa sono|spiegami|riassumi|ripassiamo)\s+([A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9 '\-_/]{2,48})",
+    ]
+    for pattern in topic_patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            value = _clean_markdown(match.group(1)).strip(" ?.:;,-")
+            if value:
+                return value[:80]
+
+    for alias in INPS_SUBJECT_ALIASES.get(subject, ()):
+        alias_clean = alias.strip()
+        if len(alias_clean) >= 3 and alias_clean.lower() in text_l:
+            return alias_clean[:80].title() if alias_clean.islower() else alias_clean[:80]
+
+    if "?" in text:
+        before = _clean_markdown(text.split("?", 1)[0])
+        if before:
+            return before[:72].strip(" .,:;-") or "Domande ed errori"
+    return "Conversazione Professore"
+
+
+def classify_study_message(
+    message: str,
+    *,
+    course: str | None = None,
+    study_root: Path = DEFAULT_STUDY_ROOT,
+) -> dict[str, Any]:
+    subject = _best_subject_from_message(message, course=course, study_root=study_root)
+    chapter = _candidate_chapter_from_message(message, subject, course=course, study_root=study_root)
+    tag = f"{_tag_slug(subject)}/{_tag_slug(chapter)}"
+    text = str(message or "").strip()
+    lowered = text.lower()
+    is_question = "?" in text or bool(re.match(r"^\s*(come|cosa|cos[' ]?e|perche|perché|quando|quale|quali|a cosa)\b", lowered))
+    is_booklet = len(text) >= 700 or any(token in lowered for token in ("libricino", "manuale", "pagina", "estratto", "paragrafo", "capitolo del libro"))
+    mode = "libricino" if is_booklet else ("quiz" if is_question else "nota")
+    return {
+        "course": str(course or DEFAULT_COURSE).strip() or DEFAULT_COURSE,
+        "subject": subject,
+        "chapter": chapter,
+        "tag": tag,
+        "mode": mode,
+        "is_question": is_question,
+        "is_booklet": is_booklet,
+    }
+
+
+def autosave_professor_turn(
+    *,
+    course: str | None,
+    message: str,
+    study_root: Path = DEFAULT_STUDY_ROOT,
+) -> dict[str, Any]:
+    classification = classify_study_message(message, course=course, study_root=study_root)
+    mode = classification["mode"]
+    clean = str(message or "").strip()
+    if mode == "libricino":
+        summary = "Estratto/manuale incollato in chat Professore per ristudio."
+        explanation = clean
+        quiz = None
+    elif classification["is_question"]:
+        summary = "Domanda emersa nella chat Professore."
+        explanation = clean
+        quiz = {"question": clean[:500], "source": "Chat Professore"}
+    else:
+        summary = clean[:1200]
+        explanation = clean
+        quiz = None
+    saved = save_chapter_memory(
+        course=classification["course"],
+        subject=classification["subject"],
+        chapter=classification["chapter"],
+        summary=summary,
+        explanation=explanation,
+        quiz=quiz,
+        study_root=study_root,
+    )
+    return {**classification, "saved": saved}
+
+
 def _chapter_template(course: str, subject: str, chapter: str, tag: str) -> str:
     return f"""---
 course: {course}
@@ -631,7 +814,8 @@ def build_professor_context(course: str | None, tag: str | None = None) -> str:
     return "\n".join([
         "Sei il Professore di Hermes per lo studio del concorso INPS assistente informatico.",
         "Parla in italiano, spiega come un tutor, interroga, correggi, e resta nel contesto studio.",
-        "Quando proponi contenuti da salvare, chiedi conferma: il salvataggio avviene solo con il pulsante Salva in memoria.",
+        "Il backend classifica e salva automaticamente ogni turno nel DB studio: non chiedere a Giorgio di scegliere materia, capitolo o tag.",
+        "Se Giorgio incolla estratti dal manuale o pagine del libricino, trattali come materiale da ristudio e produci spiegazione, punti deboli e domande di controllo.",
         f"Corso attivo: {summary.get('course')}",
         f"Strategia: {dashboard.get('strategia') or '-'}",
         "Materie:",

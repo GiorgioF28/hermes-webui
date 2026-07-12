@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from api.study_section import build_summary, parse_subject, retrieve_by_tag, save_chapter_memory
+from api.study_section import (
+    autosave_professor_turn,
+    build_summary,
+    classify_study_message,
+    parse_subject,
+    retrieve_by_tag,
+    save_chapter_memory,
+)
 
 
 def test_parse_subject_sample_sections(tmp_path: Path) -> None:
@@ -97,6 +104,7 @@ def test_study_webui_is_wired() -> None:
     assert ".study-view" in css
     assert ".study-subject-card" in css
     assert ".study-professor" in css
+    assert "main.main > #mainBridge" in css
 
 
 def test_build_summary_includes_chapters_and_tags(tmp_path: Path) -> None:
@@ -219,3 +227,33 @@ def test_save_chapter_memory_is_additive_and_tagged(tmp_path: Path) -> None:
     assert "Ctrl+; inserisce la data corrente." in chapter_text
     assert "A cosa serve F2 in Excel?" in error_log
     assert "office_automation/excel_shortcuts" in error_log
+
+
+def test_professor_classifies_common_inps_subjects() -> None:
+    excel = classify_study_message("In Excel a cosa serve F2 nella cella?")
+    diritto = classify_study_message("Spiegami la legge 241 nel procedimento amministrativo")
+    database = classify_study_message("Differenza tra chiave primaria e chiave esterna in SQL")
+
+    assert excel["subject"] == "Strumenti per l'office automation"
+    assert "excel" in excel["tag"]
+    assert diritto["subject"] == "Nozioni di diritto amministrativo"
+    assert database["subject"] == "Database relazionali"
+
+
+def test_professor_autosaves_booklet_to_dynamic_chapter(tmp_path: Path) -> None:
+    root = tmp_path / "07-Study"
+    study_dir = root / "Concorso INPS"
+    study_dir.mkdir(parents=True)
+    (study_dir / "Indice.md").write_text("# Indice\n", encoding="utf-8")
+    (study_dir / "Strumenti per l'office automation.md").write_text("# Strumenti per l'office automation\n", encoding="utf-8")
+    excerpt = "Pagina manuale Excel. " + ("Le formule e i riferimenti assoluti in Excel sono importanti. " * 30)
+
+    result = autosave_professor_turn(course="Concorso INPS", message=excerpt, study_root=root)
+
+    assert result["mode"] == "libricino"
+    assert result["subject"] == "Strumenti per l'office automation"
+    note_path = study_dir / result["subject"] / f"{result['chapter']}.md"
+    assert note_path.exists()
+    text = note_path.read_text(encoding="utf-8")
+    assert "Estratto/manuale incollato" in text
+    assert "riferimenti assoluti" in text

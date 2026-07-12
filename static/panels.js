@@ -5181,15 +5181,12 @@ function _studyFlatChapters() {
 }
 
 function _studySelectedContext() {
-  const subjectSel = $('studySubjectSelect');
-  const chapterSel = $('studyChapterSelect');
   const courseSel = $('studyCourseSelect');
-  const subject = subjectSel ? subjectSel.value : '';
-  const tag = chapterSel ? chapterSel.value : '';
-  const chapter = _studyFlatChapters().find(row => row.tag === tag && (!subject || row.subject === subject));
+  const tag = window._studySelectedTag || '';
+  const chapter = _studyFlatChapters().find(row => row.tag === tag);
   return {
     course: courseSel ? (courseSel.value || 'Concorso INPS') : ((_studyData && _studyData.course) || 'Concorso INPS'),
-    subject: subject || (chapter && chapter.subject) || '',
+    subject: (window._studySelectedSubject || '') || (chapter && chapter.subject) || '',
     chapter: (chapter && chapter.chapter) || '',
     tag,
   };
@@ -5198,53 +5195,43 @@ function _studySelectedContext() {
 function _studyProfessorControls(subjects) {
   const data = _studyData || {};
   const courses = Array.isArray(data.courses) && data.courses.length ? data.courses : [{name:data.course || 'Concorso INPS'}];
-  const chapters = _studyFlatChapters();
-  const firstSubject = subjects[0] && subjects[0].name || '';
-  const selectedSubject = (window._studySelectedSubject && subjects.some(s => s.name === window._studySelectedSubject))
-    ? window._studySelectedSubject
-    : firstSubject;
-  const subjectChapters = chapters.filter(row => row.subject === selectedSubject);
-  const selectedTag = (window._studySelectedTag && subjectChapters.some(row => row.tag === window._studySelectedTag))
-    ? window._studySelectedTag
-    : (subjectChapters[0] && subjectChapters[0].tag) || '';
-  window._studySelectedSubject = selectedSubject;
-  window._studySelectedTag = selectedTag;
   const courseOptions = courses.map(course => `<option value="${esc(course.name || '')}" ${(course.name || '') === (data.course || 'Concorso INPS') ? 'selected' : ''}>${esc(course.name || '')}</option>`).join('');
-  const subjectOptions = subjects.map(subject => `<option value="${esc(subject.name || '')}" ${(subject.name || '') === selectedSubject ? 'selected' : ''}>${esc(subject.name || '')}</option>`).join('');
-  const chapterOptions = subjectChapters.length
-    ? subjectChapters.map(chapter => `<option value="${esc(chapter.tag || '')}" ${(chapter.tag || '') === selectedTag ? 'selected' : ''}>${esc(chapter.chapter || chapter.tag || '')}</option>`).join('')
-    : `<option value="">Nessun capitolo</option>`;
-  const activeChapter = subjectChapters.find(row => row.tag === selectedTag);
-  const ripassi = activeChapter && activeChapter.da_ripassare.length
-    ? `<ul class="study-ripasso-list">${activeChapter.da_ripassare.slice(0, 4).map(item => `<li>${esc(item)}</li>`).join('')}</ul>`
-    : `<div class="study-empty">Nessun ripasso aperto per questo capitolo.</div>`;
+  const chapters = _studyFlatChapters();
+  const recentChapters = chapters.slice(-5).reverse();
+  const recentHtml = recentChapters.length
+    ? `<div class="study-auto-tags">${recentChapters.map(row => `<span title="${esc(row.subject || '')}">${esc(row.tag || row.chapter || '')}</span>`).join('')}</div>`
+    : `<div class="study-empty">I capitoli verranno creati quando emergono in chat.</div>`;
   return `
-    <section class="cc-panel cc-panel-wide study-professor">
-      <div class="cc-panel-head">
-        <h3>Professore</h3>
-        <span class="study-muted">Chat dedicata allo studio</span>
+    <section class="cc-panel cc-panel-wide study-professor study-professor-prime">
+      <div class="study-professor-top">
+        <div>
+          <div class="cc-eyebrow">Professore</div>
+          <h3>Chat Studio</h3>
+        </div>
+        <label class="study-course-pill">Corso<select id="studyCourseSelect" onchange="studyCourseChanged(this.value)">${courseOptions}</select></label>
       </div>
       <div class="study-professor-grid">
         <div class="study-professor-main">
-          <div class="study-select-row">
-            <label>Corso<select id="studyCourseSelect" onchange="studyCourseChanged(this.value)">${courseOptions}</select></label>
-            <label>Materia<select id="studySubjectSelect" onchange="studySubjectChanged(this.value)">${subjectOptions}</select></label>
-            <label>Capitolo<select id="studyChapterSelect" onchange="studyChapterChanged(this.value)">${chapterOptions}</select></label>
+          <div class="study-chat-window" id="studyProfessorLog">
+            <div class="study-chat-msg professor">
+              <div class="study-chat-who">Professore</div>
+              <div class="study-chat-bubble">Incolla domande, errori o pagine del manuale. Classifico materia e argomento da solo e aggiorno il DB studio.</div>
+            </div>
           </div>
-          <textarea id="studyProfessorPrompt" class="study-professor-textarea" placeholder="Incolla una domanda quiz o chiedi una spiegazione sul capitolo selezionato."></textarea>
-          <div class="study-professor-actions">
-            <button type="button" class="btn primary" onclick="startStudyProfessorChat()">${li('message-square',14)} Chiedi al Professore</button>
-            <button type="button" class="cc-mini-btn" onclick="loadStudySection(true)">${li('refresh-cw',12)}<span>Refresh</span></button>
+          <div class="study-professor-composer">
+            <textarea id="studyProfessorPrompt" class="study-professor-textarea" placeholder="Chiedi una spiegazione, incolla una domanda quiz o usa la modalità libricino con pagine del manuale."></textarea>
+            <button type="button" class="study-send-btn" onclick="startStudyProfessorChat()" title="Invia al Professore" aria-label="Invia al Professore">${li('arrow-up',17)}</button>
           </div>
         </div>
         <div class="study-professor-side">
-          <strong>${esc(activeChapter ? activeChapter.chapter : 'Capitolo non selezionato')}</strong>
-          <code>${esc(activeChapter ? activeChapter.tag : '')}</code>
-          ${ripassi}
+          <strong>Auto-classificazione attiva</strong>
+          <div class="study-auto-status" id="studyAutoStatus">idle / nessun turno in corso</div>
+          <p>Materia, capitolo, tag e modalità libricino sono determinati dal backend a ogni messaggio.</p>
+          ${recentHtml}
         </div>
       </div>
       <details class="study-save-memory">
-        <summary>${li('save',14)} Salva in memoria</summary>
+        <summary>${li('save',14)} Salvataggio manuale avanzato</summary>
         <div class="study-save-grid">
           <textarea id="studyMemorySummary" placeholder="Riassunto da salvare nella pagina capitolo"></textarea>
           <textarea id="studyMemoryExplanation" placeholder="Spiegazione da appendere alla pagina capitolo"></textarea>
@@ -5427,9 +5414,16 @@ async function startStudyProfessorChat() {
     return;
   }
   const ctx = _studySelectedContext();
+  const status = $('studyAutoStatus');
+  const log = $('studyProfessorLog');
+  if (log) {
+    log.insertAdjacentHTML('beforeend', `<div class="study-chat-msg user"><div class="study-chat-who">Giorgio</div><div class="study-chat-bubble">${esc(message)}</div></div>`);
+    log.scrollTop = log.scrollHeight;
+  }
+  if (status) status.textContent = 'classificazione e salvataggio in corso...';
   const modelState = (typeof _chatPayloadModelState === 'function') ? _chatPayloadModelState() : {};
   const payload = {
-    ...ctx,
+    course: ctx.course,
     message,
     session_id: _studyProfessorSessionId || undefined,
     profile: (typeof S !== 'undefined' && S && S.activeProfile) ? S.activeProfile : 'default',
@@ -5439,6 +5433,12 @@ async function startStudyProfessorChat() {
   try {
     const data = await api('/api/study/professor/start', {method:'POST', body:JSON.stringify(payload)});
     _studyProfessorSessionId = data.session_id || _studyProfessorSessionId;
+    const study = data.study || {};
+    if (status) status.textContent = `${study.subject || 'materia rilevata'} / ${study.chapter || 'capitolo dinamico'} / ${study.mode || 'nota'}`;
+    if (log) {
+      log.insertAdjacentHTML('beforeend', `<div class="study-chat-msg professor"><div class="study-chat-who">Professore</div><div class="study-chat-bubble">Salvato nel DB Studio: <strong>${esc(study.subject || '-')}</strong> / ${esc(study.chapter || '-')} <code>${esc(study.tag || '')}</code>. Apro la risposta live nella chat.</div></div>`);
+      log.scrollTop = log.scrollHeight;
+    }
     if (data.session_id && typeof loadSession === 'function') {
       await switchPanel('chat');
       await loadSession(data.session_id);
@@ -5449,6 +5449,7 @@ async function startStudyProfessorChat() {
     if (prompt) prompt.value = '';
     if (typeof renderSessionList === 'function') void renderSessionList();
   } catch (e) {
+    if (status) status.textContent = 'errore / salvataggio non completato';
     if (typeof showToast === 'function') showToast((e && e.message) || 'Errore avvio Professore', 3000);
   }
 }

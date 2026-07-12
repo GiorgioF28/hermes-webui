@@ -265,6 +265,14 @@ def build_agent_registry(workspace_path) -> dict:
         else:
             state = "vivo" if usage_live else "dormiente"
         agent["state"] = state
+        if state == "attivo":
+            agent["status_label"] = "live / task attivo"
+        elif state == "in_attesa":
+            agent["status_label"] = "idle / nessun task attivo"
+        elif state == "vivo":
+            agent["status_label"] = "idle / nessun task attivo"
+        else:
+            agent["status_label"] = "offline / nessun task attivo"
         agent["gateway"] = gateway or {
             "profile": next((profile for profile, slug in PROFILE_TO_AGENT_SLUG.items() if slug == agent["id"]), None),
             "running": False,
