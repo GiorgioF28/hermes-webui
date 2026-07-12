@@ -245,7 +245,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','command','bridge','work','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+    ['settings','skills','memory','command','bridge','study','work','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -253,6 +253,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'command') await loadCommandCenter();
   if (nextPanel === 'bridge' && typeof loadCommandBridge === 'function') await loadCommandBridge();
   if (nextPanel === 'work') await loadWorkMode();
+  if (nextPanel === 'study') await loadStudySection();
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
@@ -3449,12 +3450,14 @@ async function loadInsights(animate) {
   }
   const period = ($('insightsPeriod') || {}).value || '30';
   try {
-    const [data, wikiStatus, skillUsage] = await Promise.all([
+    const [data, wikiStatus, skillUsage, tokenUsage, tokenBreakdown] = await Promise.all([
       api(`/api/insights?days=${period}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
+      api(`/api/insights/tokens?days=${period}`).catch(() => null),
+      api(`/api/insights/tokens/breakdown?days=${period}`).catch(() => null),
     ]);
-    _renderInsights(data, box, wikiStatus, skillUsage);
+    _renderInsights(data, box, wikiStatus, skillUsage, tokenUsage, tokenBreakdown);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
@@ -3626,7 +3629,127 @@ function _renderSkillUsage(d) {
   return `<div class="insights-card" id="skillUsageCard"><div class="insights-card-title">${esc(t('insights_skill_usage_title'))}</div><div class="skill-usage-grid" style="margin-bottom:8px"><div><span>${esc(t('insights_skill_usage_total'))}</span><strong>${totalInvocations.toLocaleString()}</strong></div><div><span>${esc(t('insights_skill_usage_skills_used'))}</span><strong>${uniqueUsed}/${skillNames.length}</strong></div></div><div class="insights-table skill-usage-table"><div class="insights-table-head"><span>${esc(t('insights_skill_usage_col_skill'))}</span><span>${esc(t('insights_skill_usage_col_uses'))}</span><span>${esc(t('insights_skill_usage_col_views'))}</span><span>${esc(t('insights_skill_usage_col_patches'))}</span><span>${esc(t('insights_skill_usage_col_share'))}</span></div>${rows}</div><div class="wiki-status-footer" style="margin-top:8px">${esc(t('insights_skill_usage_footer'))}</div></div>`;
 }
 
-function _renderInsights(d, box, wikiStatus, skillUsage) {
+function _formatInsightTimestamp(value) {
+  const n = Number(value || 0);
+  if (!n) return '';
+  try { return new Date(n < 1e12 ? n * 1000 : n).toLocaleString(); }
+  catch (_) { return String(value || ''); }
+}
+
+function _renderContextBreakdown(d, fmtTokens, fmtNum) {
+  if(!d) return '';
+  const initial = d.initial_context || {};
+  const perTurn = d.per_turn || {};
+  const mcp = d.mcp_estimate || {};
+  const drag = d.drag || {};
+  const heavyRows = (Array.isArray(d.heavy_turns) ? d.heavy_turns : []).slice(0, 10).map(r =>
+    `<div class="token-usage-top-row"><span class="insights-model-name" title="${esc(r.tool || '')}">${esc(r.tool || 'unknown')}</span><span>${fmtTokens(r.cache_creation || 0)}</span><span class="insights-model-name" title="${esc(r.session || '')}">${esc(r.session || '')}</span><span>${esc(_formatInsightTimestamp(r.ts))}</span></div>`
+  ).join('');
+  const toolRows = (Array.isArray(d.by_tool_cache_creation) ? d.by_tool_cache_creation : []).slice(0, 10).map(r =>
+    `<div class="token-usage-model-row"><span class="insights-model-name" title="${esc(r.tool || '')}">${esc(r.tool || 'unknown')}</span><span>${fmtTokens(r.tokens || 0)}</span><span>${Number(r.tokens || 0) ? Math.round(Number(r.tokens || 0) / Math.max(Number(drag.total_cache_read || 0), 1) * 100) : 0}%</span></div>`
+  ).join('');
+  const sessionRows = (Array.isArray(drag.sessions) ? drag.sessions : []).slice(0, 10).map(r =>
+    `<div class="token-usage-agent-row"><span class="insights-model-name" title="${esc(r.session || '')}">${esc(r.session || '')}</span><span>${fmtNum(r.turns || 0)}</span><span>${fmtTokens(r.cache_read || 0)}</span><span>${fmtTokens(r.est_saving_if_split || 0)}</span></div>`
+  ).join('');
+  const mcpServers = Array.isArray(mcp.servers) ? mcp.servers.length : 0;
+  return `
+    <div class="token-usage-subcard token-context-breakdown">
+      <div class="token-usage-subtitle">${esc(t('insights_context_breakdown_title'))}</div>
+      <div class="wiki-status-footer" style="margin-bottom:8px">${esc(t('insights_context_breakdown_note'))}</div>
+      <div class="token-usage-totals">
+        <div><span>${esc(t('insights_initial_context_avg'))}</span><strong>${fmtTokens(initial.avg || 0)}</strong><small>${esc(t('insights_min'))} ${fmtTokens(initial.min || 0)} &middot; ${esc(t('insights_max'))} ${fmtTokens(initial.max || 0)}</small></div>
+        <div><span>${esc(t('insights_live_input_per_turn'))}</span><strong>${fmtTokens(perTurn.input_avg || 0)}</strong><small>${esc(t('insights_median'))} ${fmtTokens(perTurn.input_median || 0)} &middot; ${esc(t('insights_output_tokens'))} ${fmtTokens(perTurn.output_avg || 0)}</small></div>
+        <div><span>${esc(t('insights_mcp_estimate'))}</span><strong>${fmtTokens(mcp.total_est || 0)}</strong><small>${fmtNum(mcpServers)} server MCP &middot; ${esc(t('insights_estimate'))}</small></div>
+        <div><span>${esc(t('insights_drag_cost'))}</span><strong>${fmtTokens(drag.total_cache_read || 0)}</strong><small>${esc(t('insights_cache_read_total'))}</small></div>
+      </div>
+      <div class="token-usage-subgrid">
+        <div class="token-usage-subcard">
+          <div class="token-usage-subtitle">${esc(t('insights_heavy_turns'))}</div>
+          <div class="token-usage-top-table"><div class="token-usage-top-head"><span>Tool</span><span>Cache</span><span>${esc(t('insights_session'))}</span><span>${esc(t('insights_when'))}</span></div>${heavyRows || `<div class="insights-empty">${esc(t('insights_no_usage_data'))}</div>`}</div>
+        </div>
+        <div class="token-usage-subcard">
+          <div class="token-usage-subtitle">${esc(t('insights_cache_creation_by_tool'))}</div>
+          <div class="token-usage-model-table"><div class="token-usage-model-head"><span>Tool</span><span>${esc(t('insights_model_tokens'))}</span><span>%</span></div>${toolRows || `<div class="insights-empty">${esc(t('insights_no_usage_data'))}</div>`}</div>
+        </div>
+      </div>
+      <div class="token-usage-subcard token-usage-top">
+        <div class="token-usage-subtitle">${esc(t('insights_drag_sessions'))}</div>
+        <div class="token-usage-agent-table"><div class="token-usage-agent-head"><span>${esc(t('insights_session'))}</span><span>${esc(t('insights_turns'))}</span><span>Cache read</span><span>${esc(t('insights_est_split_saving'))}</span></div>${sessionRows || `<div class="insights-empty">${esc(t('insights_no_usage_data'))}</div>`}</div>
+      </div>
+      <div class="wiki-status-footer" style="margin-top:8px">${esc(t('insights_context_breakdown_tip'))}</div>
+    </div>`;
+}
+
+function _renderTokenUsageInsights(d, fmtTokens, fmtNum, tokenBreakdown) {
+  if(!d || !d.totals) return '';
+  const claude = d.totals.claude || {};
+  const codex = d.totals.codex || {};
+  const claudeTokens = Number(claude.tokens || 0);
+  const codexTokens = Number(codex.tokens || 0);
+  const totalTokens = claudeTokens + codexTokens;
+  const cost = Number(claude.cost_usd || 0);
+  const costText = cost > 0 ? '$' + cost.toFixed(cost < 1 ? 4 : 2) : t('insights_no_cost');
+  const daily = Array.isArray(d.daily) ? d.daily : [];
+  const chartRows = _bucketDailyTokensForChart(daily.map(r => ({
+    date: r.date,
+    input_tokens: Number(r.claude || 0),
+    output_tokens: Number(r.codex || 0),
+    sessions: 0,
+    cost: 0,
+  })));
+  let chart = '';
+  if(chartRows.length){
+    const maxTokens = Math.max(...chartRows.map(r => Number(r.input_tokens || 0) + Number(r.output_tokens || 0)), 1);
+    const labelEvery = Math.max(Math.ceil(chartRows.length / 7), 1);
+    chart = `<div class="token-usage-chart">` + chartRows.map((r, idx) => {
+      const claudeVal = Number(r.input_tokens || 0);
+      const codexVal = Number(r.output_tokens || 0);
+      const claudePct = Math.max((claudeVal / maxTokens) * 100, claudeVal ? 2 : 0).toFixed(1);
+      const codexPct = Math.max((codexVal / maxTokens) * 100, codexVal ? 2 : 0).toFixed(1);
+      const label = r.label !== undefined ? r.label : String(r.date || '').slice(5);
+      const title = `${r.title || r.date} · Claude ${fmtTokens(claudeVal)} · Codex ${fmtTokens(codexVal)}`;
+      const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
+      return `<div class="token-usage-bar" title="${esc(title)}"><div class="token-usage-stack"><div class="token-usage-codex" style="height:${codexPct}%"></div><div class="token-usage-claude" style="height:${claudePct}%"></div></div><span>${showLabel ? esc(label) : ''}</span></div>`;
+    }).join('') + `</div><div class="insights-daily-legend"><span><i class="token-usage-legend-claude"></i>Claude</span><span><i class="token-usage-legend-codex"></i>Codex</span></div>`;
+  } else {
+    chart = `<div class="insights-empty">${esc(t('insights_no_usage_data'))}</div>`;
+  }
+  const agentRows = (Array.isArray(d.by_agent) ? d.by_agent : []).slice(0, 8).map(r =>
+    `<div class="token-usage-agent-row"><span class="insights-model-name" title="${esc(r.agent || '')}">${esc(r.agent || 'unknown')}</span><span>${esc(r.runtime || '')}</span><span>${fmtNum(r.deleghe || 0)}</span><span>${fmtTokens(r.tokens || 0)}</span></div>`
+  ).join('');
+  const modelRows = (Array.isArray(d.by_model) ? d.by_model : []).slice(0, 8).map(r =>
+    `<div class="token-usage-model-row"><span class="insights-model-name" title="${esc(r.model || '')}">${esc(r.model || 'unknown')}</span><span>${esc(r.runtime || '')}</span><span>${fmtTokens(r.tokens || 0)}</span></div>`
+  ).join('');
+  const topRows = (Array.isArray(d.top_sessions) ? d.top_sessions : []).slice(0, 5).map(r =>
+    `<div class="token-usage-top-row"><span class="insights-model-name" title="${esc(r.title || r.task || '')}">${esc(r.title || r.task || 'session')}</span><span>${esc(r.runtime || '')}</span><span>${esc(r.date || '')}</span><span>${fmtTokens(r.tokens || 0)}</span></div>`
+  ).join('');
+  return `
+    <section class="insights-card token-usage-card">
+      <div class="insights-card-title">${esc(t('insights_token_usage_title'))}</div>
+      <div class="token-usage-totals">
+        <div><span>Claude</span><strong>${fmtTokens(claudeTokens)}</strong><small>${esc(t('insights_input_tokens'))} ${fmtTokens(claude.input || 0)} · ${esc(t('insights_output_tokens'))} ${fmtTokens(claude.output || 0)} · cache ${fmtTokens(claude.cache_read || 0)}</small><small>${esc(t('insights_cost'))}: ${esc(costText)}</small></div>
+        <div><span>Codex</span><strong>${fmtTokens(codexTokens)}</strong><small>${esc(t('insights_input_tokens'))} ${fmtTokens(codex.input || 0)} · ${esc(t('insights_output_tokens'))} ${fmtTokens(codex.output || 0)} · cached ${fmtTokens(codex.cached || 0)}</small><small>Flat plan · ${esc(t('insights_tokens'))} ${fmtTokens(totalTokens)}</small></div>
+      </div>
+      ${chart}
+      ${_renderContextBreakdown(tokenBreakdown, fmtTokens, fmtNum)}
+      <div class="token-usage-subgrid">
+        <div class="token-usage-subcard">
+          <div class="token-usage-subtitle">${esc(t('insights_agents'))}</div>
+          <div class="token-usage-agent-table"><div class="token-usage-agent-head"><span>${esc(t('insights_agent'))}</span><span>Runtime</span><span>Deleghe</span><span>${esc(t('insights_model_tokens'))}</span></div>${agentRows || `<div class="insights-empty">${esc(t('insights_no_usage_data'))}</div>`}</div>
+        </div>
+        <div class="token-usage-subcard">
+          <div class="token-usage-subtitle">${esc(t('insights_models'))}</div>
+          <div class="token-usage-model-table"><div class="token-usage-model-head"><span>${esc(t('insights_model_name'))}</span><span>Runtime</span><span>${esc(t('insights_model_tokens'))}</span></div>${modelRows || `<div class="insights-empty">${esc(t('insights_no_usage_data'))}</div>`}</div>
+        </div>
+      </div>
+      <div class="token-usage-subcard token-usage-top">
+        <div class="token-usage-subtitle">${esc(t('insights_top_sessions'))}</div>
+        <div class="token-usage-top-table"><div class="token-usage-top-head"><span>${esc(t('insights_session'))}</span><span>Runtime</span><span>Date</span><span>${esc(t('insights_model_tokens'))}</span></div>${topRows || `<div class="insights-empty">${esc(t('insights_no_usage_data'))}</div>`}</div>
+      </div>
+    </section>`;
+}
+
+function _renderInsights(d, box, wikiStatus, skillUsage, tokenUsage, tokenBreakdown) {
   const fmtNum = n => Number(n || 0).toLocaleString();
   const fmtCost = c => {
     const value = Number(c || 0);
@@ -3731,6 +3854,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
     ${_renderSystemHealthPanel()}
     ${_renderLlmWikiStatus(wikiStatus)}
     ${_renderSkillUsage(skillUsage)}
+    ${_renderTokenUsageInsights(tokenUsage, fmtTokens, fmtNum, tokenBreakdown)}
     <div class="insights-grid">
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
     </div>
@@ -4173,6 +4297,8 @@ async function deleteCurrentSkill() {
 let _memoryData = null;
 let _controlCenterData = null;
 let _controlCenterAgents = null;
+let _studyData = null;
+let _studyProfessorSessionId = null;
 let _workData = null;
 let _workTimer = null;
 let _notesSourcesData = null;
@@ -4199,6 +4325,7 @@ function _memorySectionMeta(key) {
 function _memorySectionContent(key) {
   if (!_memoryData) return '';
   if (key === 'daily_command') return '';
+  if (key === 'study') return '';
   if (key === 'user') return _memoryData.user || '';
   if (key === 'soul') return _memoryData.soul || '';
   return _memoryData.memory || '';
@@ -4207,6 +4334,7 @@ function _memorySectionContent(key) {
 function _memorySectionMtime(key) {
   if (!_memoryData) return 0;
   if (key === 'daily_command') return _controlCenterData ? _controlCenterData.generated_at || 0 : 0;
+  if (key === 'study') return _studyData && _studyData.generated_at ? Date.parse(_studyData.generated_at) / 1000 : 0;
   if (key === 'user') return _memoryData.user_mtime || 0;
   if (key === 'soul') return _memoryData.soul_mtime || 0;
   return _memoryData.memory_mtime || 0;
@@ -4218,7 +4346,7 @@ function _setMemoryHeaderButtons(mode) {
   const editBtn = $('btnEditMemoryDetail');
   const cancelBtn = $('btnCancelMemoryDetail');
   const saveBtn = $('btnSaveMemoryDetail');
-  if (mode === 'read' && _currentMemorySection !== 'external_notes' && _currentMemorySection !== 'daily_command') { show(editBtn); hide(cancelBtn); hide(saveBtn); }
+  if (mode === 'read' && _currentMemorySection !== 'external_notes' && _currentMemorySection !== 'daily_command' && _currentMemorySection !== 'study') { show(editBtn); hide(cancelBtn); hide(saveBtn); }
   else if (mode === 'edit') { hide(editBtn); show(cancelBtn); show(saveBtn); }
   else { hide(editBtn); hide(cancelBtn); hide(saveBtn); }
 }
@@ -4894,6 +5022,7 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
     {id:'hermes', label:'Hermes', ids:['hermes','hermes-control-center','hermes-webui']},
     {id:'visionbuilts', label:'VisionBuilts', ids:['giorgiof28-creator-earning-engine','giorgiof28-visionbuilts-console','visionbuilts-ebook-platform']},
     {id:'podcast-rap', label:'Podcast e Produzione Rap', ids:['rap-music-production']},
+    {id:'concorso-inps', label:'Concorso INPS — Studio', ids:['concorso-inps-assistente-informatico']},
   ];
   const CC_PROJECT_HIDDEN = new Set(['carol-company-application']);
   const _ccClusterMeta = (members) => {
@@ -5011,6 +5140,354 @@ function _renderControlCenterSummaryInto(titleId, bodyId, emptyId, opts = {}) {
 
 function _renderControlCenterSummary() {
   _renderControlCenterSummaryInto('memoryDetailTitle', 'memoryDetailBody', 'memoryDetailEmpty', { memory: true });
+}
+
+function _studyProgress(subject) {
+  const argomenti = subject && subject.argomenti ? subject.argomenti : {};
+  const done = Number(argomenti.done || 0);
+  const total = Number(argomenti.total || 0);
+  return {
+    done,
+    total,
+    pct: total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0,
+  };
+}
+
+function _studyRows(rows, columns, emptyLabel) {
+  if (!Array.isArray(rows) || !rows.length) return `<div class="study-empty">${esc(emptyLabel)}</div>`;
+  const head = columns.map(col => `<th>${esc(col.label)}</th>`).join('');
+  const body = rows.map(row => `<tr>${columns.map(col => `<td>${esc(row[col.key] || '')}</td>`).join('')}</tr>`).join('');
+  return `<table class="study-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function _studyFlatChapters() {
+  const data = _studyData || {};
+  const subjects = Array.isArray(data.subjects) ? data.subjects : [];
+  const rows = [];
+  subjects.forEach(subject => {
+    (Array.isArray(subject.chapters) ? subject.chapters : []).forEach(chapter => {
+      rows.push({
+        course: data.course || 'Concorso INPS',
+        subject: subject.name || chapter.subject || '',
+        chapter: chapter.name || '',
+        tag: chapter.tag || '',
+        status: chapter.status || '',
+        note_path: chapter.note_path || '',
+        da_ripassare: Array.isArray(chapter.da_ripassare) ? chapter.da_ripassare : [],
+      });
+    });
+  });
+  return rows;
+}
+
+function _studySelectedContext() {
+  const subjectSel = $('studySubjectSelect');
+  const chapterSel = $('studyChapterSelect');
+  const courseSel = $('studyCourseSelect');
+  const subject = subjectSel ? subjectSel.value : '';
+  const tag = chapterSel ? chapterSel.value : '';
+  const chapter = _studyFlatChapters().find(row => row.tag === tag && (!subject || row.subject === subject));
+  return {
+    course: courseSel ? (courseSel.value || 'Concorso INPS') : ((_studyData && _studyData.course) || 'Concorso INPS'),
+    subject: subject || (chapter && chapter.subject) || '',
+    chapter: (chapter && chapter.chapter) || '',
+    tag,
+  };
+}
+
+function _studyProfessorControls(subjects) {
+  const data = _studyData || {};
+  const courses = Array.isArray(data.courses) && data.courses.length ? data.courses : [{name:data.course || 'Concorso INPS'}];
+  const chapters = _studyFlatChapters();
+  const firstSubject = subjects[0] && subjects[0].name || '';
+  const selectedSubject = (window._studySelectedSubject && subjects.some(s => s.name === window._studySelectedSubject))
+    ? window._studySelectedSubject
+    : firstSubject;
+  const subjectChapters = chapters.filter(row => row.subject === selectedSubject);
+  const selectedTag = (window._studySelectedTag && subjectChapters.some(row => row.tag === window._studySelectedTag))
+    ? window._studySelectedTag
+    : (subjectChapters[0] && subjectChapters[0].tag) || '';
+  window._studySelectedSubject = selectedSubject;
+  window._studySelectedTag = selectedTag;
+  const courseOptions = courses.map(course => `<option value="${esc(course.name || '')}" ${(course.name || '') === (data.course || 'Concorso INPS') ? 'selected' : ''}>${esc(course.name || '')}</option>`).join('');
+  const subjectOptions = subjects.map(subject => `<option value="${esc(subject.name || '')}" ${(subject.name || '') === selectedSubject ? 'selected' : ''}>${esc(subject.name || '')}</option>`).join('');
+  const chapterOptions = subjectChapters.length
+    ? subjectChapters.map(chapter => `<option value="${esc(chapter.tag || '')}" ${(chapter.tag || '') === selectedTag ? 'selected' : ''}>${esc(chapter.chapter || chapter.tag || '')}</option>`).join('')
+    : `<option value="">Nessun capitolo</option>`;
+  const activeChapter = subjectChapters.find(row => row.tag === selectedTag);
+  const ripassi = activeChapter && activeChapter.da_ripassare.length
+    ? `<ul class="study-ripasso-list">${activeChapter.da_ripassare.slice(0, 4).map(item => `<li>${esc(item)}</li>`).join('')}</ul>`
+    : `<div class="study-empty">Nessun ripasso aperto per questo capitolo.</div>`;
+  return `
+    <section class="cc-panel cc-panel-wide study-professor">
+      <div class="cc-panel-head">
+        <h3>Professore</h3>
+        <span class="study-muted">Chat dedicata allo studio</span>
+      </div>
+      <div class="study-professor-grid">
+        <div class="study-professor-main">
+          <div class="study-select-row">
+            <label>Corso<select id="studyCourseSelect" onchange="studyCourseChanged(this.value)">${courseOptions}</select></label>
+            <label>Materia<select id="studySubjectSelect" onchange="studySubjectChanged(this.value)">${subjectOptions}</select></label>
+            <label>Capitolo<select id="studyChapterSelect" onchange="studyChapterChanged(this.value)">${chapterOptions}</select></label>
+          </div>
+          <textarea id="studyProfessorPrompt" class="study-professor-textarea" placeholder="Incolla una domanda quiz o chiedi una spiegazione sul capitolo selezionato."></textarea>
+          <div class="study-professor-actions">
+            <button type="button" class="btn primary" onclick="startStudyProfessorChat()">${li('message-square',14)} Chiedi al Professore</button>
+            <button type="button" class="cc-mini-btn" onclick="loadStudySection(true)">${li('refresh-cw',12)}<span>Refresh</span></button>
+          </div>
+        </div>
+        <div class="study-professor-side">
+          <strong>${esc(activeChapter ? activeChapter.chapter : 'Capitolo non selezionato')}</strong>
+          <code>${esc(activeChapter ? activeChapter.tag : '')}</code>
+          ${ripassi}
+        </div>
+      </div>
+      <details class="study-save-memory">
+        <summary>${li('save',14)} Salva in memoria</summary>
+        <div class="study-save-grid">
+          <textarea id="studyMemorySummary" placeholder="Riassunto da salvare nella pagina capitolo"></textarea>
+          <textarea id="studyMemoryExplanation" placeholder="Spiegazione da appendere alla pagina capitolo"></textarea>
+          <input id="studyQuizQuestion" type="text" placeholder="Domanda quiz / errore da registrare">
+          <input id="studyQuizError" type="text" placeholder="Errore o punto da ripassare">
+          <button type="button" class="btn primary" onclick="saveStudyMemory()">${li('save',14)} Salva nel vault</button>
+        </div>
+      </details>
+    </section>`;
+}
+
+function _studySubjectCard(subject) {
+  const progress = _studyProgress(subject);
+  const learned = Array.isArray(subject.imparate) ? subject.imparate.slice(0, 4) : [];
+  const ripassi = Array.isArray(subject.da_ripassare) ? subject.da_ripassare.slice(0, 6) : [];
+  const topics = subject.argomenti && Array.isArray(subject.argomenti.items) ? subject.argomenti.items.slice(0, 8) : [];
+  const chapters = Array.isArray(subject.chapters) ? subject.chapters.slice(0, 12) : [];
+  const topicRows = topics.length
+    ? `<ul class="study-topic-list">${topics.map(item => `<li class="${item.done ? 'done' : ''}">${li(item.done ? 'check' : 'square', 13)}<span>${esc(item.text || '')}</span></li>`).join('')}</ul>`
+    : `<div class="study-empty">Nessun argomento tracciato.</div>`;
+  const learnedRows = learned.length
+    ? learned.map(item => `<div class="study-note-row"><strong>${esc(item.titolo || '')}</strong>${item.testo ? `<span>${esc(item.testo)}</span>` : ''}</div>`).join('')
+    : `<div class="study-empty">Nessuna nota sintetica.</div>`;
+  const ripassoRows = ripassi.length
+    ? `<ul class="study-ripasso-list">${ripassi.map(item => `<li>${esc(item)}</li>`).join('')}</ul>`
+    : `<div class="study-empty">Nessun ripasso aperto.</div>`;
+  const chapterRows = chapters.length
+    ? `<div class="study-chapter-list">${chapters.map(chapter => `<button type="button" onclick="studyPickChapter('${esc(subject.name || '')}','${esc(chapter.tag || '')}')"><span>${esc(chapter.name || '')}</span><code>${esc(chapter.tag || '')}</code></button>`).join('')}</div>`
+    : `<div class="study-empty">Nessun capitolo tracciato.</div>`;
+  return `
+    <details class="study-subject-card">
+      <summary>
+        <div class="study-subject-main">
+          <strong>${esc(subject.name || '')}</strong>
+          <div class="study-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(String(progress.pct))}">
+            <span style="width:${esc(String(progress.pct))}%"></span>
+          </div>
+        </div>
+        <div class="study-subject-meta">
+          <span>${esc(String(progress.pct))}%</span>
+          <small>${esc(String(progress.done))}/${esc(String(progress.total))}</small>
+        </div>
+      </summary>
+      <div class="study-subject-detail">
+        <section>
+          <h4>Argomenti</h4>
+          ${topicRows}
+        </section>
+        <section>
+          <h4>Capitoli</h4>
+          ${chapterRows}
+        </section>
+        <section>
+          <h4>Quiz</h4>
+          ${_studyRows(subject.quiz || [], [
+            {key:'data', label:'Data'},
+            {key:'fonte', label:'Fonte'},
+            {key:'punteggio', label:'Score'},
+            {key:'errori', label:'Errori'},
+          ], 'Nessun quiz registrato.')}
+        </section>
+        <section>
+          <h4>Cose imparate</h4>
+          ${learnedRows}
+        </section>
+        <section>
+          <h4>Da ripassare</h4>
+          ${ripassoRows}
+        </section>
+      </div>
+    </details>`;
+}
+
+function _renderStudySection() {
+  const title = $('studyDetailTitle');
+  const body = $('studyDetailBody');
+  const empty = $('studyDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = 'Studio';
+  const data = _studyData || {};
+  const dashboard = data.dashboard || {};
+  const subjects = Array.isArray(data.subjects) ? data.subjects : [];
+  const quizLinks = Array.isArray(dashboard.quiz_links) ? dashboard.quiz_links : [];
+  const calendar = Array.isArray(dashboard.calendario) ? dashboard.calendario : [];
+  const sessions = Array.isArray(dashboard.sessioni) ? dashboard.sessioni : [];
+  const avgProgress = subjects.length
+    ? Math.round(subjects.reduce((sum, subject) => sum + _studyProgress(subject).pct, 0) / subjects.length)
+    : 0;
+  const linksHtml = quizLinks.length
+    ? quizLinks.map(link => `<a class="study-link" href="${esc(link.url || '#')}" target="_blank" rel="noreferrer">${li('target',14)}<span>${esc(link.label || link.url || 'Quiz')}</span></a>`).join('')
+    : `<div class="study-empty">Nessun link quiz trovato.</div>`;
+  const calendarHtml = calendar.length
+    ? calendar.slice(0, 8).map(item => `<li>${esc(item)}</li>`).join('')
+    : `<li class="study-muted">Calendario non ancora trovato.</li>`;
+  body.innerHTML = `
+    <div class="main-view-content study-view">
+      <section class="study-hero">
+        <div>
+          <div class="cc-eyebrow">Concorso INPS</div>
+          <h2>Studio operativo</h2>
+          <p>${esc(dashboard.strategia || 'Strategia non ancora trovata nell indice studio.')}</p>
+        </div>
+        <button type="button" class="cc-mini-btn" onclick="loadStudySection(true)">${li('refresh-cw',12)}<span>Refresh</span></button>
+      </section>
+      <section class="study-dashboard">
+        <div class="cc-panel primary">
+          <div class="cc-panel-head"><h3>Quiz</h3></div>
+          <div class="study-links">${linksHtml}</div>
+        </div>
+        <div class="cc-panel">
+          <div class="cc-panel-head"><h3>Calendario 2h/giorno</h3></div>
+          <ol class="study-calendar">${calendarHtml}</ol>
+        </div>
+        <div class="cc-panel study-stats-panel">
+          <div class="study-stat"><span>${esc(String(subjects.length))}</span><label>materie</label></div>
+          <div class="study-stat"><span>${esc(String(avgProgress))}%</span><label>copertura media</label></div>
+          <div class="study-stat"><span>${esc(String(dashboard.quiz_totali || 0))}</span><label>quiz totali</label></div>
+          <div class="study-stat"><span>${esc(String(sessions.length))}</span><label>sessioni</label></div>
+        </div>
+      </section>
+      ${_studyProfessorControls(subjects)}
+      <section class="cc-panel cc-panel-wide">
+        <div class="cc-panel-head"><h3>Materie</h3><span class="study-muted">${esc(data.source_dir || '')}</span></div>
+        <div class="study-subject-grid">${subjects.length ? subjects.map(_studySubjectCard).join('') : `<div class="study-empty">Nessuna materia trovata.</div>`}</div>
+      </section>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+}
+
+async function loadStudySection(force) {
+  try {
+    if (force || !_studyData) _studyData = await api('/api/study/summary');
+  } catch (e) {
+    _studyData = {
+      generated_at: new Date().toISOString(),
+      dashboard: { quiz_links: [], strategia: '', calendario: [], sessioni: [], quiz_totali: 0 },
+      subjects: [],
+      parse_ok: false,
+      parse_error: e && e.message ? e.message : String(e),
+    };
+  }
+  _renderStudySection();
+}
+
+function studySubjectChanged(value) {
+  window._studySelectedSubject = value || '';
+  window._studySelectedTag = '';
+  _renderStudySection();
+}
+
+function studyChapterChanged(value) {
+  window._studySelectedTag = value || '';
+}
+
+async function studyCourseChanged(value) {
+  try {
+    _studyData = await api('/api/study/chapters?course=' + encodeURIComponent(value || 'Concorso INPS'));
+  } catch (_) {
+    _studyData = await api('/api/study/summary');
+  }
+  window._studySelectedSubject = '';
+  window._studySelectedTag = '';
+  _renderStudySection();
+}
+
+function studyPickChapter(subject, tag) {
+  window._studySelectedSubject = subject || '';
+  window._studySelectedTag = tag || '';
+  _renderStudySection();
+  const prompt = $('studyProfessorPrompt');
+  if (prompt) prompt.focus();
+}
+
+async function startStudyProfessorChat() {
+  const prompt = $('studyProfessorPrompt');
+  const message = prompt ? prompt.value.trim() : '';
+  if (!message) {
+    if (typeof showToast === 'function') showToast('Scrivi una domanda per il Professore.', 1800);
+    return;
+  }
+  const ctx = _studySelectedContext();
+  const modelState = (typeof _chatPayloadModelState === 'function') ? _chatPayloadModelState() : {};
+  const payload = {
+    ...ctx,
+    message,
+    session_id: _studyProfessorSessionId || undefined,
+    profile: (typeof S !== 'undefined' && S && S.activeProfile) ? S.activeProfile : 'default',
+    model: modelState.model || undefined,
+    model_provider: modelState.model_provider || undefined,
+  };
+  try {
+    const data = await api('/api/study/professor/start', {method:'POST', body:JSON.stringify(payload)});
+    _studyProfessorSessionId = data.session_id || _studyProfessorSessionId;
+    if (data.session_id && typeof loadSession === 'function') {
+      await switchPanel('chat');
+      await loadSession(data.session_id);
+    }
+    if (data.session_id && data.stream_id && typeof attachLiveStream === 'function') {
+      attachLiveStream(data.session_id, data.stream_id, []);
+    }
+    if (prompt) prompt.value = '';
+    if (typeof renderSessionList === 'function') void renderSessionList();
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((e && e.message) || 'Errore avvio Professore', 3000);
+  }
+}
+
+async function saveStudyMemory() {
+  const ctx = _studySelectedContext();
+  if (!ctx.subject || !ctx.chapter) {
+    if (typeof showToast === 'function') showToast('Seleziona materia e capitolo.', 1800);
+    return;
+  }
+  const summary = $('studyMemorySummary') ? $('studyMemorySummary').value.trim() : '';
+  const explanation = $('studyMemoryExplanation') ? $('studyMemoryExplanation').value.trim() : '';
+  const question = $('studyQuizQuestion') ? $('studyQuizQuestion').value.trim() : '';
+  const error = $('studyQuizError') ? $('studyQuizError').value.trim() : '';
+  if (!summary && !explanation && !question) {
+    if (typeof showToast === 'function') showToast('Niente da salvare.', 1800);
+    return;
+  }
+  try {
+    const saved = await api('/api/study/save-memory', {
+      method:'POST',
+      body:JSON.stringify({
+        course: ctx.course,
+        subject: ctx.subject,
+        chapter: ctx.chapter,
+        summary,
+        explanation,
+        quiz: question ? {question, error, source:'Studio Professore'} : undefined,
+      })
+    });
+    if ($('studyMemorySummary')) $('studyMemorySummary').value = '';
+    if ($('studyMemoryExplanation')) $('studyMemoryExplanation').value = '';
+    if ($('studyQuizQuestion')) $('studyQuizQuestion').value = '';
+    if ($('studyQuizError')) $('studyQuizError').value = '';
+    await loadStudySection(true);
+    if (typeof showToast === 'function') showToast('Salvato nel vault: ' + (saved.note_path || saved.tag || ''), 2400);
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((e && e.message) || 'Errore salvataggio studio', 3000);
+  }
 }
 
 async function loadCommandCenter(force) {
@@ -5245,6 +5722,10 @@ function _renderMemoryDetail(section) {
     _renderControlCenterSummary();
     return;
   }
+  if (section === 'study') {
+    _renderStudySection();
+    return;
+  }
   if (section === 'external_notes') {
     _renderExternalNotesSources();
     return;
@@ -5368,6 +5849,10 @@ async function openMemorySection(section, el) {
     try { _controlCenterAgents = await api('/api/agents'); }
     catch (_) { _controlCenterAgents = {}; }
   }
+  if (section === 'study' && !_studyData) {
+    try { _studyData = await api('/api/study/summary'); }
+    catch (_) { _studyData = {}; }
+  }
   if (section === 'external_notes') {
     await loadNotesSources(false);
   }
@@ -5375,7 +5860,7 @@ async function openMemorySection(section, el) {
 }
 
 function editCurrentMemory() {
-  if (!_currentMemorySection || _currentMemorySection === 'external_notes' || _currentMemorySection === 'daily_command') return;
+  if (!_currentMemorySection || _currentMemorySection === 'external_notes' || _currentMemorySection === 'daily_command' || _currentMemorySection === 'study') return;
   _renderMemoryEdit(_currentMemorySection);
 }
 
@@ -5391,6 +5876,7 @@ function closeMemoryEdit() { cancelMemoryEdit(); }
 async function submitMemorySave() {
   if (!_currentMemorySection) return;
   if (_currentMemorySection === 'daily_command') return;
+  if (_currentMemorySection === 'study') return;
   const ta = $('memEditContent');
   const errEl = $('memEditError');
   if (!ta) return;
@@ -6774,12 +7260,14 @@ async function deleteProfile(name) {
 async function loadMemory(force) {
   const panel = $('memoryPanel');
   try {
-    const [data, controlCenter] = await Promise.all([
+    const [data, controlCenter, study] = await Promise.all([
       api('/api/memory'),
       api('/api/control-center/summary').catch(() => null),
+      api('/api/study/summary').catch(() => null),
     ]);
     _memoryData = data;
     if (controlCenter || force) _controlCenterData = controlCenter || {};
+    if (study || force) _studyData = study || {};
     if (_currentMemorySection === 'external_notes' && !data.external_notes_enabled) {
       _currentMemorySection = null;
     }

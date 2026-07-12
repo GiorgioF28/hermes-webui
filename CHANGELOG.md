@@ -4,13 +4,20 @@
 ## [Unreleased]
 
 ### Added
+- Added the Studio Professor flow: study courses/chapters/tag retrieval APIs, a Study-panel Professor launcher with course/subject/chapter selectors, confirmable vault saves, and an Office automation chapter pilot for the Concorso INPS vault.
+- Added a "Nuova sessione / chiudi chat" control that starts a clean session with a compact handoff summary from the previous chat.
+- Added a Claude-only Token Usage context breakdown with initial-context, per-turn, MCP estimate, heavy tool-result, cache-creation-by-tool, and drag-cost views.
+- Added Command Bridge token usage insights from Claude Code transcripts and Codex rollout sessions, plus a Codex quota pill and live current-turn token counter.
 - Added Hermes Night Shift offline utilities: a deterministic briefing packet builder, safe `tasks/today.md` archive-before-write plan writer, daily worklog detail archive, PowerShell runner with `-DryRun`, and Task Scheduler command output for a 05:00 local schedule.
 - Added a local `Work` view for 60-minute Deep Focus sessions. It prioritizes urgent P0 work, rotates projects using recent focus time, shows floating project bubbles and project tasks, persists session history in `tasks/work-sessions.json`, and can create or reopen a project-specific chat.
 - Added a Command Bridge agent registry backed by `obsidian-vault/06-Agents` and a best-effort `tasks/agent-usage.jsonl` ledger, showing live/dormant agents, model, role, and last use.
 - Added a Command Bridge Work Log flex panel backed by `/api/bridge/worklog`, aggregating recent git commits and completed markdown tasks into daily wins, project tallies, records, streaks, and concise recent activity.
 - Hermes Prime delegation can now load an optional worker persona from `obsidian-vault/06-Agents`, and successful delegated Agent Results enqueue a best-effort Memory Librarian pass with the workspace memory MCP servers (`hermes-memory`, `notion`) plus `sync-hermes-brain`.
+- Command Bridge Prime now accepts PDF attachments, stores them in `attachments/hermes-prime`, writes an attachment index and `.summary.md`, and sends only label/path/summary text into the persistent SDK session for on-demand Read retrieval.
 
 ### Changed
+- WebUI model-facing history now replaces image attachments older than two user turns with a short Read-tool placeholder, without rewriting saved session transcripts.
+- Command Bridge Prime now keeps image attachments as disk paths and emits stale-image Read placeholders after two Prime turns instead of reinjecting old attachments into new prompts.
 - Hermes Prime replies in the Command Bridge now stream token-by-token over SSE instead of appearing only after the full Claude turn completes. The existing Vault Planet state, TTS playback, and asynchronous delegation polling remain unchanged.
 
 ## [v0.51.347] — 2026-06-09 — Release LK (streaming & render reliability cluster)

@@ -6595,6 +6595,18 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/control-center/summary":
         return _handle_control_center_summary(handler)
 
+    if parsed.path == "/api/study/summary":
+        return _handle_study_summary(handler)
+
+    if parsed.path == "/api/study/courses":
+        return _handle_study_courses(handler)
+
+    if parsed.path == "/api/study/chapters":
+        return _handle_study_chapters(handler, parsed)
+
+    if parsed.path == "/api/study/retrieval":
+        return _handle_study_retrieval(handler, parsed)
+
     if parsed.path == "/api/work/state":
         return _handle_work_state(handler)
 
@@ -7982,6 +7994,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/bg-task-complete-ack":
         return _handle_bg_task_complete_ack(handler, body)
+
+    if parsed.path == "/api/study/save-memory":
+        return _handle_study_save_memory(handler, body)
+
+    if parsed.path == "/api/study/professor/start":
+        return _handle_study_professor_start(handler, body, diag=diag)
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
@@ -13044,6 +13062,161 @@ def _handle_control_center_summary(handler):
     except Exception as exc:
         logger.exception("control center summary failed")
         return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_study_summary(handler):
+    try:
+        from api.study_section import build_summary
+
+        return j(handler, build_summary())
+    except Exception as exc:
+        logger.exception("study summary failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_study_courses(handler):
+    try:
+        from api.study_section import list_courses
+
+        return j(handler, {"courses": list_courses()})
+    except Exception as exc:
+        logger.exception("study courses failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_study_chapters(handler, parsed):
+    try:
+        from api.study_section import build_summary
+
+        qs = parse_qs(parsed.query or "")
+        course = qs.get("course", [""])[0] or None
+        return j(handler, build_summary(course=course))
+    except Exception as exc:
+        logger.exception("study chapters failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_study_retrieval(handler, parsed):
+    try:
+        from api.study_section import retrieve_by_tag
+
+        qs = parse_qs(parsed.query or "")
+        tag = qs.get("tag", [""])[0].strip()
+        if not tag:
+            return bad(handler, "tag is required", status=400)
+        course = qs.get("course", [""])[0] or None
+        return j(handler, retrieve_by_tag(course, tag))
+    except Exception as exc:
+        logger.exception("study retrieval failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_study_save_memory(handler, body):
+    try:
+        from api.study_section import save_chapter_memory
+
+        subject = str(body.get("subject") or "").strip()
+        chapter = str(body.get("chapter") or "").strip()
+        if not subject or not chapter:
+            return bad(handler, "subject and chapter are required", status=400)
+        result = save_chapter_memory(
+            course=body.get("course") or None,
+            subject=subject,
+            chapter=chapter,
+            explanation=str(body.get("explanation") or ""),
+            summary=str(body.get("summary") or ""),
+            quiz=body.get("quiz") if isinstance(body.get("quiz"), dict) else None,
+        )
+        return j(handler, result)
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400)
+    except Exception as exc:
+        logger.exception("study save memory failed")
+        return bad(handler, _sanitize_error(exc), status=500)
+
+
+def _handle_study_professor_start(handler, body, diag=None):
+    try:
+        from api.study_section import build_professor_context
+
+        message = str(body.get("message") or "").strip()
+        if not message:
+            return bad(handler, "message is required", status=400)
+        course = str(body.get("course") or "Concorso INPS").strip() or "Concorso INPS"
+        subject = str(body.get("subject") or "").strip()
+        chapter = str(body.get("chapter") or "").strip()
+        tag = str(body.get("tag") or "").strip()
+        if not tag and subject and chapter:
+            from api.study_section import _tag_slug
+
+            tag = f"{_tag_slug(subject)}/{_tag_slug(chapter)}"
+
+        existing_session_id = str(body.get("session_id") or "").strip()
+        if existing_session_id:
+            try:
+                s = get_session(existing_session_id)
+            except KeyError:
+                return bad(handler, "Session not found", status=404)
+        else:
+            model, model_provider = _session_model_state_from_request(
+                body.get("model"),
+                body.get("model_provider"),
+            )
+            webui_root = Path(__file__).resolve().parents[1]
+            s = new_session(
+                workspace=str(webui_root),
+                model=model,
+                model_provider=model_provider,
+                profile=body.get("profile") or None,
+            )
+            context = build_professor_context(course, tag)
+            s.title = "Professore Studio"
+            if subject:
+                s.title = f"Professore - {subject[:42]}"
+            s.context_messages = [{"role": "system", "content": context}]
+            s.messages = []
+            s.source_tag = "study_professor"
+            s.save()
+            publish_session_list_changed("study_professor_new", profile=getattr(s, "profile", None))
+
+        try:
+            workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace") or str(Path(__file__).resolve().parents[1]))
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
+        requested_model = body.get("model") or s.model
+        requested_provider = body.get("model_provider") if "model_provider" in body else getattr(s, "model_provider", None)
+        _pp_provider, _pp_default = _read_profile_model_config(s, requested_provider)
+        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+            requested_model,
+            requested_provider,
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
+            explicit_model_pick=bool(body.get("explicit_model_pick")),
+        )
+        focused_message = "\n".join([
+            f"[Studio Professore | corso={course} | materia={subject or '-'} | capitolo={chapter or '-'} | tag={tag or '-'}]",
+            message,
+        ])
+        response = _start_run(
+            s,
+            msg=focused_message,
+            attachments=[],
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            source="webui",
+            route="/api/study/professor/start",
+            diag=diag,
+        )
+        status = int(response.pop("_status", 200) or 200)
+        if response.get("error") and status >= 400:
+            return j(handler, response, status=status)
+        payload = {"ok": True, "study": {"course": course, "subject": subject, "chapter": chapter, "tag": tag}, **response}
+        return j(handler, payload, status=status)
+    finally:
+        if diag:
+            diag.finish()
 
 
 def _agent_slug(name: str) -> str:
