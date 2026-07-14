@@ -174,7 +174,11 @@ def _load_bg_tasks(workspace: str) -> None:
             # marcala interrotta cosi' si vede che si era bloccata (token/crash).
             if rec.get("status") == "in_corso":
                 rec["status"] = "interrotta"
-                rec.setdefault("finished", rec.get("started"))
+                # NB: la riga persistita ha "finished": null (chiave PRESENTE),
+                # quindi setdefault non la sostituirebbe mai e la delega
+                # resterebbe visibile per sempre come card fantasma (bug d53/d81).
+                if not rec.get("finished"):
+                    rec["finished"] = rec.get("started") or time.time()
             _BG_TASKS[tid] = dict(rec)
         # Riallinea il contatore id per non riusare un "dN" gia' presente.
         used = [int(str(k)[1:]) for k in _BG_TASKS if str(k).startswith("d") and str(k)[1:].isdigit()]
