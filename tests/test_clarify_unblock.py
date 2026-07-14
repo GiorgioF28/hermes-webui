@@ -16,6 +16,8 @@ try:
         unregister_gateway_notify,
         resolve_clarify,
         clear_pending,
+        format_response_for_agent,
+        normalize_prompt_payload,
         _gateway_queues,
         _gateway_notify_cbs,
         _lock,
@@ -114,6 +116,70 @@ class TestClarifyUnblocking:
         )
 
         clear_pending(sid)
+
+    def test_normalize_ask_user_question_payload_preserves_options_and_multiselect(self):
+        payload = normalize_prompt_payload(
+            {
+                "questions": [
+                    {
+                        "id": "scope",
+                        "header": "Scope",
+                        "question": "Which scope should I implement?",
+                        "multiSelect": True,
+                        "options": [
+                            {"label": "Backend", "description": "API and persistence"},
+                            {"label": "Frontend", "description": "Interactive card"},
+                        ],
+                    }
+                ]
+            },
+            session_id="sess-ask-user",
+            timeout_seconds=90,
+        )
+
+        assert payload["kind"] == "ask_user_question"
+        assert payload["session_id"] == "sess-ask-user"
+        assert payload["timeout_seconds"] == 90
+        assert payload["questions"][0]["id"] == "scope"
+        assert payload["questions"][0]["multiSelect"] is True
+        assert payload["questions"][0]["options"] == [
+            {"label": "Backend", "description": "API and persistence"},
+            {"label": "Frontend", "description": "Interactive card"},
+        ]
+
+    def test_ask_user_question_response_formats_as_question_answer_map(self):
+        prompt = normalize_prompt_payload(
+            {
+                "questions": [
+                    {
+                        "id": "scope",
+                        "question": "Which scope should I implement?",
+                        "options": [{"label": "Backend"}, {"label": "Frontend"}],
+                    },
+                    {
+                        "id": "tests",
+                        "question": "Which tests should run?",
+                        "multiSelect": True,
+                        "options": [{"label": "Unit"}, {"label": "Smoke"}],
+                    },
+                ]
+            }
+        )
+
+        result = format_response_for_agent(
+            prompt,
+            {
+                "answers": {
+                    "Which scope should I implement?": "Frontend",
+                    "Which tests should run?": ["Unit", "Smoke"],
+                }
+            },
+        )
+
+        assert json.loads(result) == {
+            "Which scope should I implement?": "Frontend",
+            "Which tests should run?": ["Unit", "Smoke"],
+        }
 
 
 class TestClarifyModuleExports:

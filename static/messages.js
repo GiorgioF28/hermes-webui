@@ -4408,6 +4408,9 @@ let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
 let _clarifyPendingBySession = new Map();
+let _clarifyStructuredMode = false;
+let _clarifyCurrentPending = null;
+let _clarifySelections = {};
 const CLARIFY_MIN_VISIBLE_MS = 30000;
 
 function _clarifyPromptBelongsToActiveSession(sid) {
@@ -4646,6 +4649,9 @@ function _resetClarifyCardState() {
   _clarifyVisibleSince = 0;
   _clarifySignature = '';
   _clarifyId = null;
+  _clarifyStructuredMode = false;
+  _clarifyCurrentPending = null;
+  _clarifySelections = {};
 }
 
 function hideClarifyCard(force=false, reason="dismissed") {
@@ -4679,6 +4685,7 @@ function hideClarifyCard(force=false, reason="dismissed") {
   $("clarifyChoices").innerHTML = "";
   $("clarifyInput").value = "";
   $("clarifyInput").disabled = false;
+  $("clarifyInput").style.display = "";
   $("clarifyInput").onkeydown = null;
   const submit = $("clarifySubmit");
   if (submit) { submit.disabled = false; submit.classList.remove("loading"); }
@@ -4700,18 +4707,187 @@ function _clarifySetControlsDisabled(disabled, loading=false) {
         btn.classList.toggle("loading", false);
       }
     });
+    choices.querySelectorAll("input").forEach(inputEl => {
+      inputEl.disabled = disabled;
+    });
   }
+}
+
+function _clarifyQuestionKey(q, idx) {
+  return String((q && (q.question || q.id || q.header)) || `Question ${idx + 1}`);
+}
+
+function _clarifyQuestionId(q, idx) {
+  return String((q && q.id) || `question_${idx + 1}`);
+}
+
+function _clarifyNormalizeOptions(q) {
+  const options = Array.isArray(q && q.options)
+    ? q.options
+    : (Array.isArray(q && q.choices) ? q.choices : []);
+  return options.map((option) => {
+    if (option && typeof option === "object") {
+      return {
+        label: String(option.label || option.value || option.text || "").trim(),
+        description: String(option.description || option.detail || option.help || "").trim(),
+      };
+    }
+    return {label: String(option || "").trim(), description: ""};
+  }).filter(option => option.label);
+}
+
+function _clarifyToggleStructuredChoice(qid, label, multi, btn) {
+  if (!_clarifySelections[qid]) _clarifySelections[qid] = multi ? [] : "";
+  if (multi) {
+    const next = Array.isArray(_clarifySelections[qid]) ? [..._clarifySelections[qid]] : [];
+    const idx = next.indexOf(label);
+    if (idx >= 0) next.splice(idx, 1);
+    else next.push(label);
+    _clarifySelections[qid] = next;
+    if (btn) btn.classList.toggle("selected", idx < 0);
+    return;
+  }
+  _clarifySelections[qid] = label;
+  const group = btn && btn.closest(".clarify-question-block");
+  if (group) {
+    group.querySelectorAll(".clarify-choice").forEach(item => item.classList.remove("selected"));
+  }
+  if (btn) btn.classList.add("selected");
+}
+
+function _renderStructuredClarifyQuestions(choicesEl, questions) {
+  choicesEl.innerHTML = "";
+  choicesEl.style.display = "";
+  _clarifySelections = {};
+  questions.forEach((q, idx) => {
+    const qid = _clarifyQuestionId(q, idx);
+    const block = document.createElement("div");
+    block.className = "clarify-question-block";
+    block.dataset.questionId = qid;
+    const title = document.createElement("div");
+    title.className = "clarify-question-title";
+    const header = String((q && q.header) || "").trim();
+    if (header) {
+      const chip = document.createElement("span");
+      chip.className = "clarify-question-chip";
+      chip.textContent = header;
+      title.appendChild(chip);
+    }
+    const text = document.createElement("span");
+    text.textContent = _clarifyQuestionKey(q, idx);
+    title.appendChild(text);
+    block.appendChild(title);
+
+    const options = _clarifyNormalizeOptions(q);
+    options.forEach((option, optionIdx) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "clarify-choice";
+      btn.dataset.choice = option.label;
+      btn.onclick = () => _clarifyToggleStructuredChoice(qid, option.label, !!q.multiSelect, btn);
+      const badge = document.createElement("span");
+      badge.className = "clarify-choice-badge";
+      badge.textContent = String(optionIdx + 1);
+      const textWrap = document.createElement("span");
+      textWrap.className = "clarify-choice-text";
+      const label = document.createElement("span");
+      label.className = "clarify-option-label";
+      label.textContent = option.label;
+      textWrap.appendChild(label);
+      if (option.description) {
+        const desc = document.createElement("span");
+        desc.className = "clarify-option-description";
+        desc.textContent = option.description;
+        textWrap.appendChild(desc);
+      }
+      btn.appendChild(badge);
+      btn.appendChild(textWrap);
+      block.appendChild(btn);
+    });
+
+    const otherRow = document.createElement("label");
+    otherRow.className = "clarify-other-row";
+    const otherLabel = document.createElement("span");
+    otherLabel.textContent = t("clarify_other") || "Other";
+    const otherInput = document.createElement("input");
+    otherInput.type = "text";
+    otherInput.className = "clarify-input clarify-other-input";
+    otherInput.dataset.questionId = qid;
+    otherInput.placeholder = t("clarify_input_placeholder") || "Type your response...";
+    otherInput.onkeydown = (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        respondClarify();
+      }
+    };
+    otherRow.appendChild(otherLabel);
+    otherRow.appendChild(otherInput);
+    block.appendChild(otherRow);
+
+    if (q.multiSelect) {
+      const hint = document.createElement("div");
+      hint.className = "clarify-question-hint";
+      hint.textContent = "Multiple selections allowed.";
+      block.appendChild(hint);
+    }
+    choicesEl.appendChild(block);
+  });
+}
+
+function _collectStructuredClarifyResponse() {
+  const pending = _clarifyCurrentPending || {};
+  const questions = Array.isArray(pending.questions) ? pending.questions : [];
+  const answers = {};
+  questions.forEach((q, idx) => {
+    const qid = _clarifyQuestionId(q, idx);
+    const key = _clarifyQuestionKey(q, idx);
+    let otherInput = null;
+    document.querySelectorAll(".clarify-other-input").forEach((candidate) => {
+      if (!otherInput && candidate.dataset && candidate.dataset.questionId === qid) otherInput = candidate;
+    });
+    const other = String((otherInput && otherInput.value) || "").trim();
+    const selected = _clarifySelections[qid];
+    if (q && q.multiSelect) {
+      const values = Array.isArray(selected) ? [...selected] : (selected ? [selected] : []);
+      if (other) values.push(other);
+      answers[key] = values;
+    } else {
+      answers[key] = other || (Array.isArray(selected) ? (selected[0] || "") : (selected || ""));
+    }
+  });
+  return {answers};
+}
+
+function _structuredClarifyHasAnswer(response) {
+  const answers = response && response.answers;
+  if (!answers || typeof answers !== "object") return false;
+  return Object.values(answers).some(value => {
+    if (Array.isArray(value)) return value.some(item => String(item || "").trim());
+    return String(value || "").trim();
+  });
+}
+
+function _structuredClarifyEcho(response) {
+  const answers = response && response.answers;
+  if (!answers || typeof answers !== "object") return "";
+  return Object.entries(answers).map(([question, answer]) => {
+    const rendered = Array.isArray(answer) ? answer.join(", ") : String(answer || "");
+    return `${question}: ${rendered}`;
+  }).join("\n");
 }
 
 function showClarifyCard(pending) {
   const sid = _rememberClarifyPending(pending);
   if (!_clarifyPromptBelongsToActiveSession(sid)) return;
   const question = pending.question || pending.description || '';
+  const structuredQuestions = Array.isArray(pending.questions) ? pending.questions : [];
+  const isStructured = structuredQuestions.length > 0;
   const choices = Array.isArray(pending.choices_offered)
     ? pending.choices_offered
     : (Array.isArray(pending.choices) ? pending.choices : []);
   const sig = JSON.stringify({
     question,
+    questions: structuredQuestions,
     choices,
     sid: pending._session_id || (S.session && S.session.session_id) || null,
     clarify_id: pending.clarify_id || null,
@@ -4725,6 +4901,8 @@ function showClarifyCard(pending) {
   _clarifySessionId = sid;
   _clarifyId = pending.clarify_id || null;
   _clarifySignature = sig;
+  _clarifyStructuredMode = isStructured;
+  _clarifyCurrentPending = pending;
   _startClarifyCountdown(pending);
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
@@ -4733,9 +4911,15 @@ function showClarifyCard(pending) {
   }
   if (questionEl) questionEl.textContent = question;
   if (choicesEl) {
-    choicesEl.innerHTML = '';
-    choicesEl.style.display = choices.length ? '' : 'none';
-    if (choices.length) {
+    if (isStructured && sameClarify) {
+      choicesEl.style.display = "";
+    } else if (isStructured) {
+      choicesEl.innerHTML = '';
+      _renderStructuredClarifyQuestions(choicesEl, structuredQuestions);
+    } else {
+      choicesEl.innerHTML = '';
+      choicesEl.style.display = choices.length ? '' : 'none';
+      if (choices.length) {
       choices.forEach((choice, idx) => {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -4773,12 +4957,14 @@ function showClarifyCard(pending) {
         }
       };
       choicesEl.appendChild(other);
+      }
     }
   }
   if (input) {
     if (!sameClarify) input.value = '';
     input.disabled = false;
     input.removeAttribute('readonly');
+    input.style.display = isStructured ? 'none' : '';
     input.onkeydown = (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -4797,8 +4983,9 @@ function showClarifyCard(pending) {
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   // Move focus to clarify input synchronously (not in setTimeout) and
   // only if the user wasn't mid-type in the composer textarea.
-  if (input && !sameClarify && document.activeElement !== $('msg')) {
-    input.focus({preventScroll: true});
+  const focusTarget = isStructured ? document.querySelector(".clarify-other-input") : input;
+  if (focusTarget && !sameClarify && document.activeElement !== $('msg')) {
+    focusTarget.focus({preventScroll: true});
   }
 }
 
@@ -4806,13 +4993,21 @@ async function respondClarify(response) {
   const sid = _clarifySessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const input = $("clarifyInput");
-  let value = typeof response === 'string' ? response : (input ? input.value : '');
-  value = String(value || '').trim();
-  if (!value) {
-    if (input) input.focus();
+  let value;
+  if (_clarifyStructuredMode) {
+    value = _collectStructuredClarifyResponse();
+  } else {
+    value = typeof response === 'string' ? response : (input ? input.value : '');
+    value = String(value || '').trim();
+  }
+  if (_clarifyStructuredMode ? !_structuredClarifyHasAnswer(value) : !value) {
+    const target = _clarifyStructuredMode ? document.querySelector(".clarify-other-input") : input;
+    if (target) target.focus();
     return;
   }
   const clarifyId = _clarifyId;
+  const structuredAtSubmit = _clarifyStructuredMode;
+  const echoValue = structuredAtSubmit ? _structuredClarifyEcho(value) : value;
   // Keep a draft copy so we can restore the input on failure (issue #2639).
   const draft = value;
   _clarifySetControlsDisabled(true, true);
@@ -4835,7 +5030,7 @@ async function respondClarify(response) {
         if (S.session && S.session.session_id === sid) {
           S.messages.push({
             role: 'user',
-            content: value,
+            content: echoValue,
             _clarify_response: true,
             _ts: Date.now() / 1000,
           });
@@ -4846,7 +5041,7 @@ async function respondClarify(response) {
       // Stale / expired / wrong session — keep the card and draft visible.
       _clarifySetControlsDisabled(false, false);
       if (input) {
-        input.value = draft;
+        if (!_clarifyStructuredMode) input.value = draft;
         input.focus();
       }
       const errMsg = (result && result.error) || "Clarification response not accepted — the agent may have already proceeded.";
@@ -4857,7 +5052,7 @@ async function respondClarify(response) {
     // Stale (409) or network error — keep the card and draft visible so the user can retry.
     _clarifySetControlsDisabled(false, false);
     if (input) {
-      input.value = draft;
+      if (!_clarifyStructuredMode) input.value = draft;
       input.focus();
     }
     const errMsg = (e && e.status === 409)

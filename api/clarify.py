@@ -6,16 +6,21 @@ clarification string instead of an approval decision.
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from api.session_events import publish_session_list_changed
 
 
 DEFAULT_TIMEOUT_SECONDS = 120
+NO_RESPONSE_FALLBACK = (
+    "The user did not provide a response within the time limit. "
+    "Use your best judgement to make the choice and proceed."
+)
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _gateway_queues: dict[str, list] = {}
@@ -33,8 +38,152 @@ class _ClarifyEntry:
     def __init__(self, data: dict):
         self.event = threading.Event()
         self.data = data
-        self.result: Optional[str] = None
+        self.result: Optional[Any] = None
         self.clarify_id: str = data.get("clarify_id", "") or uuid.uuid4().hex[:12]
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_options(raw_options: Any) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    if not isinstance(raw_options, list):
+        return options
+    for item in raw_options[:4]:
+        if isinstance(item, dict):
+            label = _clean_text(item.get("label") or item.get("value") or item.get("text"))
+            description = _clean_text(item.get("description") or item.get("detail") or item.get("help"))
+        else:
+            label = _clean_text(item)
+            description = ""
+        if label:
+            options.append({"label": label, "description": description})
+    return options
+
+
+def _normalize_questions(raw_questions: Any, multi_select: Any = None) -> list[dict[str, Any]]:
+    if isinstance(raw_questions, dict):
+        raw_items = [raw_questions]
+    elif isinstance(raw_questions, list):
+        raw_items = raw_questions[:4]
+    else:
+        raw_items = []
+    questions: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            continue
+        text = _clean_text(item.get("question") or item.get("text") or item.get("prompt"))
+        if not text:
+            continue
+        q_multi = item.get("multiSelect")
+        if q_multi is None:
+            q_multi = item.get("multi_select")
+        if q_multi is None:
+            q_multi = bool(multi_select)
+        questions.append(
+            {
+                "id": _clean_text(item.get("id")) or f"question_{idx + 1}",
+                "header": _clean_text(item.get("header") or item.get("label")),
+                "question": text,
+                "options": _normalize_options(item.get("options") or item.get("choices")),
+                "multiSelect": bool(q_multi),
+            }
+        )
+    return questions
+
+
+def normalize_prompt_payload(
+    question: Any,
+    choices: Any = None,
+    *,
+    session_id: str = "",
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Build the pending-prompt payload used by the clarify UI.
+
+    The legacy Hermes clarify tool passes ``question: str`` and ``choices:
+    list[str]``. Plan/design tools can pass an AskUserQuestion-style payload
+    with ``questions[]``, option labels/descriptions, and ``multiSelect``.
+    """
+    if isinstance(question, dict):
+        payload = dict(question)
+        raw_questions = payload.get("questions")
+        if raw_questions is None and any(k in payload for k in ("question", "prompt", "text")):
+            raw_questions = payload
+        questions = _normalize_questions(raw_questions, payload.get("multiSelect") or payload.get("multi_select"))
+        if questions:
+            title = _clean_text(payload.get("title") or payload.get("question") or payload.get("prompt"))
+            if not title:
+                title = "Answer the following questions" if len(questions) > 1 else questions[0]["question"]
+            return {
+                "question": title,
+                "questions": questions,
+                "choices_offered": [opt["label"] for opt in questions[0].get("options", [])],
+                "session_id": session_id,
+                "kind": "ask_user_question",
+                "requested_at": time.time(),
+                "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+            }
+
+    if isinstance(question, list):
+        questions = _normalize_questions(question)
+        if questions:
+            return {
+                "question": "Answer the following questions" if len(questions) > 1 else questions[0]["question"],
+                "questions": questions,
+                "choices_offered": [opt["label"] for opt in questions[0].get("options", [])],
+                "session_id": session_id,
+                "kind": "ask_user_question",
+                "requested_at": time.time(),
+                "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+            }
+
+    structured_choices = _normalize_options(choices)
+    if structured_choices and any(opt.get("description") for opt in structured_choices):
+        text = _clean_text(question)
+        questions = [
+            {
+                "id": "question_1",
+                "header": "",
+                "question": text,
+                "options": structured_choices,
+                "multiSelect": False,
+            }
+        ]
+        return {
+            "question": text,
+            "questions": questions,
+            "choices_offered": [opt["label"] for opt in structured_choices],
+            "session_id": session_id,
+            "kind": "ask_user_question",
+            "requested_at": time.time(),
+            "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+        }
+
+    choices_list = [_clean_text(choice) for choice in (choices or []) if _clean_text(choice)]
+    return {
+        "question": _clean_text(question),
+        "choices_offered": choices_list,
+        "session_id": session_id,
+        "kind": "clarify",
+        "requested_at": time.time(),
+        "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+    }
+
+
+def format_response_for_agent(prompt: dict[str, Any] | None, response: Any) -> str:
+    """Return the string sent back to the blocked tool call."""
+    if response is None:
+        return NO_RESPONSE_FALLBACK
+    if isinstance(prompt, dict) and prompt.get("kind") == "ask_user_question":
+        answers = response.get("answers") if isinstance(response, dict) else response
+        if isinstance(answers, dict) and answers:
+            return json.dumps(answers, ensure_ascii=False)
+    if isinstance(response, (dict, list)):
+        return json.dumps(response, ensure_ascii=False)
+    text = _clean_text(response)
+    return text or NO_RESPONSE_FALLBACK
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -187,7 +336,7 @@ def pending_count(session_key: str) -> int:
         return 1 if _pending.get(session_key) else 0
 
 
-def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) -> int:
+def resolve_clarify(session_key: str, response: Any, resolve_all: bool = False) -> int:
     """Resolve the oldest pending clarify request for a session."""
     with _lock:
         q = _gateway_queues.get(session_key)
@@ -210,7 +359,7 @@ def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) 
     return count
 
 
-def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> bool:
+def resolve_clarify_by_id(session_key: str, clarify_id: str, response: Any) -> bool:
     """Resolve a specific pending clarify request by its stable id.
 
     Returns True if the id was found and resolved, False otherwise.

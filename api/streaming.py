@@ -5395,46 +5395,35 @@ def _run_agent_streaming(
         def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
             """Bridge Hermes clarify prompts to the WebUI."""
             timeout = _clarify_timeout_seconds()
-            choices_list = [str(choice) for choice in (choices or [])]
-            data = {
-                'question': str(question or ''),
-                'choices_offered': choices_list,
-                'session_id': sid,
-                'kind': 'clarify',
-                'requested_at': time.time(),
-                'timeout_seconds': timeout,
-            }
             try:
-                from api.clarify import submit_pending as _submit_clarify_pending, clear_pending as _clear_clarify_pending
-            except ImportError:
-                return (
-                    "The user did not provide a response within the time limit. "
-                    "Use your best judgement to make the choice and proceed."
+                from api.clarify import (
+                    NO_RESPONSE_FALLBACK as _clarify_no_response,
+                    clear_pending as _clear_clarify_pending,
+                    format_response_for_agent as _format_clarify_response,
+                    normalize_prompt_payload as _normalize_clarify_payload,
+                    submit_pending as _submit_clarify_pending,
                 )
+            except ImportError:
+                return "The user did not provide a response within the time limit. Use your best judgement to make the choice and proceed."
 
+            data = _normalize_clarify_payload(
+                question,
+                choices,
+                session_id=sid,
+                timeout_seconds=timeout,
+            )
             entry = _submit_clarify_pending(sid, data)
             deadline = time.monotonic() + timeout
             while True:
                 if cancel_evt.is_set():
                     _clear_clarify_pending(sid)
-                    return (
-                        "The user did not provide a response within the time limit. "
-                        "Use your best judgement to make the choice and proceed."
-                    )
+                    return _clarify_no_response
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     _clear_clarify_pending(sid)
-                    return (
-                        "The user did not provide a response within the time limit. "
-                        "Use your best judgement to make the choice and proceed."
-                    )
+                    return _clarify_no_response
                 if entry.event.wait(timeout=min(1.0, remaining)):
-                    response = str(entry.result or "").strip()
-                    return (
-                        response
-                        or "The user did not provide a response within the time limit. "
-                           "Use your best judgement to make the choice and proceed."
-                    )
+                    return _format_clarify_response(entry.data, entry.result)
 
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent

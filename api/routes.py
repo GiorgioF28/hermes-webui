@@ -17319,7 +17319,7 @@ def _handle_approval_respond(handler, body):
     return j(handler, {"ok": ok, "choice": choice})
 
 
-def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:
+def _resolve_clarify_legacy(sid: str, clarify_id: str, response) -> bool:
     """Resolve clarify through the existing callback path without new state."""
     # When a stable clarify_id is provided, match the specific entry so stale
     # or late responses from the frontend are reliably rejected (issue #2639).
@@ -17342,7 +17342,12 @@ def _handle_clarify_respond(handler, body):
         response = body.get("answer")
     if response is None:
         response = body.get("choice")
-    response = str(response or "").strip()
+    if isinstance(response, str):
+        response = response.strip()
+    elif isinstance(response, (dict, list)):
+        response = response
+    else:
+        response = str(response or "").strip()
     if not response:
         return bad(handler, "response is required")
     clarify_id = body.get("clarify_id", "")
