@@ -446,29 +446,46 @@ def codex_fallback_cooldown_seconds() -> float:
     return _env_float(_CODEX_FALLBACK_COOLDOWN_ENV, _DEFAULT_CODEX_FALLBACK_COOLDOWN_SECONDS)
 
 
+# Frasi inequivocabili che il CLI Codex/OpenAI emette SOLO a crediti esauriti.
+_CODEX_QUOTA_STRICT_MARKERS = (
+    "usage_limit_exceeded",
+    "usage_limit_reached",
+    "usage limit exceeded",
+    "hit your usage limit",
+    "plan limit reached",
+    "limit of messages per 5 hours",
+    "used up your usage",
+    "out of credit",
+    "credit balance",
+    "credit_balance",
+    "insufficient_quota",
+)
+
+# Marker generici: sicuri solo su errori "corti" (exit code + stderr), NON su
+# testi che incorporano l'output del task.
+_CODEX_QUOTA_BROAD_MARKERS = _CODEX_QUOTA_STRICT_MARKERS + (
+    "usage limit",
+    "quota",
+    "rate limit",
+    "rate_limit",
+)
+
+
 def is_codex_quota_error(exc: Any) -> bool:
     """True when Codex CLI failed because account credits/usage are exhausted."""
     text = f"{type(exc).__name__}: {exc}".lower()
     if "codex" not in text:
         return False
-    markers = (
-        "usage_limit_exceeded",
-        "usage_limit_reached",
-        "usage limit exceeded",
-        "hit your usage limit",
-        "usage limit",
-        "plan limit reached",
-        "limit of messages per 5 hours",
-        "used up your usage",
-        "quota",
-        "rate limit",
-        "rate_limit",
-        "out of credit",
-        "credit balance",
-        "credit_balance",
-        "insufficient_quota",
-    )
-    if any(marker in text for marker in markers):
+    if "codex cli timeout dopo" in text:
+        # Errore timeout: il testo incorpora l'output parziale del task, che
+        # puo' contenere parole generiche come "quota"/"usage"/"rate limit"
+        # come CONTENUTO del lavoro (es. feature usage/quota nel Bridge).
+        # Senza questo filtro un semplice timeout viene scambiato per crediti
+        # esauriti e il cooldown sticky di 1h manda tutte le deleghe
+        # successive su Sonnet anche con crediti Codex disponibili
+        # (regressione osservata 2026-07-17 con crediti al 48%).
+        return any(marker in text for marker in _CODEX_QUOTA_STRICT_MARKERS)
+    if any(marker in text for marker in _CODEX_QUOTA_BROAD_MARKERS):
         return True
     return "http 429" in text and any(marker in text for marker in ("limit", "usage", "quota", "credit"))
 
