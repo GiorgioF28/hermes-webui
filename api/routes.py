@@ -6433,6 +6433,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/prime/live":
         return _handle_bridge_prime_live(handler)
 
+    if parsed.path == "/api/bridge/prime/todos":
+        return _handle_bridge_prime_todos(handler)
+
     if parsed.path == "/api/approval/stream":
         return _handle_approval_sse_stream(handler, parsed)
 
@@ -8166,6 +8169,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/bridge/prime/workspace":
         return _handle_bridge_prime_workspace(handler, body)
+
+    if parsed.path == "/api/bridge/prime/goal":
+        return _handle_bridge_prime_goal(handler, body)
+
+    if parsed.path == "/api/bridge/prime/tools":
+        return _handle_bridge_prime_tools(handler, body)
 
     if parsed.path == "/api/bridge/prime":
         return _handle_bridge_prime(handler, body)
@@ -11686,6 +11695,53 @@ def _handle_bridge_prime_workspace(handler, body):
     return j(handler, {"ok": True, "workspace": workspace, "settings": settings})
 
 
+def _handle_bridge_prime_todos(handler):
+    """GET /api/bridge/prime/todos -- current Prime todo snapshot (P2-B cold-load)."""
+    try:
+        from api.prime_session_store import get_prime_session_store
+        snapshot = get_prime_session_store().get_todo_snapshot()
+        if snapshot is None:
+            return j(handler, {"ok": True, "todo_state": None}, extra_headers={"Cache-Control": "no-store"}) or True
+        return j(handler, {"ok": True, "todo_state": snapshot}, extra_headers={"Cache-Control": "no-store"}) or True
+    except Exception as exc:
+        logger.exception("bridge prime todos failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
+def _handle_bridge_prime_goal(handler, body):
+    """POST /api/bridge/prime/goal -- get/set the Prime session goal (P2-A)."""
+    from api.prime_session_store import get_prime_session_store
+    store = get_prime_session_store()
+    action = str((body or {}).get("action") or "get").strip().lower()
+    if action == "set":
+        goal = str((body or {}).get("goal") or "").strip()
+        store.update_settings(goal=goal or None)
+        return j(handler, {"ok": True, "goal": goal or None})
+    settings = store.get_settings()
+    return j(handler, {"ok": True, "goal": settings.get("goal")})
+
+
+def _handle_bridge_prime_tools(handler, body):
+    """POST /api/bridge/prime/tools -- get/set Prime toolset preset (P3-C)."""
+    from api.prime_session_store import get_prime_session_store
+    from api.prime_lean_preset import VALID_TOOLSETS, TOOLSET_DEFAULT, resolve_prime_toolset
+    store = get_prime_session_store()
+    action = str((body or {}).get("action") or "get").strip().lower()
+    if action == "set":
+        requested = str((body or {}).get("toolset") or "").strip().lower()
+        if requested not in VALID_TOOLSETS:
+            return bad(handler, f"toolset must be one of: {', '.join(sorted(VALID_TOOLSETS))}", 400)
+        store.update_settings(toolset=requested)
+        try:
+            _get_claude_registry().close("hermes-prime")
+        except Exception:
+            logger.debug("prime toolset change close failed", exc_info=True)
+        return j(handler, {"ok": True, "toolset": requested, "presets": sorted(VALID_TOOLSETS)})
+    settings = store.get_settings()
+    current = resolve_prime_toolset(settings)
+    return j(handler, {"ok": True, "toolset": current, "presets": sorted(VALID_TOOLSETS)})
+
+
 def _call_hermes_prime_reply_for_bridge(msg, workspace, *, attachments, on_token, on_status, model_state, stream_id):
     import inspect
 
@@ -11841,6 +11897,14 @@ def _handle_bridge_prime(handler, body):
         store.append_token(stream_id, text)
         emit("token", {"text": text})
 
+    def _on_tool_call(tool_name: str, result_summary: str = "") -> None:
+        """Emit SSE tool event and journal the tool call (P2-C)."""
+        try:
+            store.append_tool_event(stream_id, tool_name, result_summary)
+            emit("tool", {"tool": tool_name, "summary": result_summary, "stream_id": stream_id})
+        except Exception:
+            logger.debug("bridge prime tool event emit failed", exc_info=True)
+
     stop_attention_relays = _bridge_prime_start_attention_relays(emit)
 
     try:
@@ -11888,6 +11952,15 @@ def _handle_bridge_prime(handler, body):
             emit("usage", {"usage": usage})
         reply = result["reply"] or "Ricevuto."
         store.finish_turn(stream_id, reply, usage=usage)
+        # P2-B: try to extract and persist todo state from the standard session
+        try:
+            from api.todo_state import derive_todo_state
+            hist = store.history()
+            snap = derive_todo_state(hist.get("messages") or [])
+            if snap is not None:
+                store.update_todo_snapshot(snap)
+        except Exception:
+            logger.debug("bridge prime todo snapshot update failed", exc_info=True)
         emit(
             "done",
             {

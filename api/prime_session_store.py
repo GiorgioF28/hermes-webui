@@ -230,6 +230,86 @@ class PrimeSessionStore:
             self._write_locked(data)
             return dict(settings)
 
+    def update_todo_snapshot(self, snapshot: dict | None) -> None:
+        """Store the latest todo snapshot in settings for cold-load (P2-B)."""
+        with self._lock:
+            data = self._read_locked()
+            settings = dict(data.get("settings") or {})
+            if snapshot is None:
+                settings.pop("todo_snapshot", None)
+            else:
+                settings["todo_snapshot"] = snapshot
+            data["settings"] = settings
+            self._write_locked(data)
+
+    def get_todo_snapshot(self) -> dict | None:
+        """Return the last stored todo snapshot, or None (P2-B)."""
+        with self._lock:
+            return dict(self._read_locked().get("settings") or {}).get("todo_snapshot")
+
+    def append_tool_event(self, stream_id: str, tool_name: str, result_summary: str = "") -> None:
+        """Journal a tool call event for replay on cold-load (P2-C).
+
+        Appended to journal as event='tool_call' alongside the existing token/
+        turn events. Kept to 200 tool events per journal (older ones pruned).
+        """
+        with self._lock:
+            data = self._read_locked()
+            journal = data.setdefault("journal", [])
+            journal.append({
+                "ts": time.time(),
+                "event": "tool_call",
+                "stream_id": stream_id,
+                "tool": tool_name,
+                "summary": str(result_summary or "")[:500],
+            })
+            # Keep tool events bounded: prune oldest beyond 500 total (existing limit)
+            if len(journal) > 500:
+                del journal[:-500]
+            self._write_locked(data)
+
+    def get_tool_events(self, stream_id: str | None = None) -> list[dict]:
+        """Return tool events from the journal, optionally filtered by stream_id (P2-C)."""
+        with self._lock:
+            journal = list(self._read_locked().get("journal") or [])
+        events = [e for e in journal if isinstance(e, dict) and e.get("event") == "tool_call"]
+        if stream_id:
+            events = [e for e in events if e.get("stream_id") == stream_id]
+        return events
+
+    def history_with_tool_events(self) -> dict:
+        """Like history() but also includes recent tool events for cold-load (P2-C)."""
+        with self._lock:
+            data = self._read_locked()
+            pending = data.get("pending_turn")
+            if pending and pending.get("partial_output"):
+                pending = dict(pending)
+                pending["recovered"] = True
+            journal = list(data.get("journal") or [])
+        tool_events = [e for e in journal if isinstance(e, dict) and e.get("event") == "tool_call"]
+        # Only return tool events for the current or most recent stream
+        if pending:
+            sid = pending.get("stream_id", "")
+        else:
+            # Find most recent stream_id from journal
+            sid = ""
+            for e in reversed(journal):
+                if isinstance(e, dict) and e.get("stream_id"):
+                    sid = e["stream_id"]
+                    break
+        if sid:
+            tool_events = [e for e in tool_events if e.get("stream_id") == sid]
+        else:
+            tool_events = tool_events[-20:]  # last 20 if no stream_id
+        return {
+            "session_id": "hermes-prime",
+            "messages": list(data.get("messages") or []),
+            "pending_turn": pending,
+            "settings": dict(data.get("settings") or {}),
+            "updated_at": data.get("updated_at"),
+            "tool_events": tool_events,
+        }
+
 
 _STORE = PrimeSessionStore()
 
