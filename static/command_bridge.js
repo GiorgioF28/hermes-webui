@@ -397,6 +397,18 @@
 '.cb-client em{display:block;margin-top:3px;font-style:normal;font-family:var(--cb-mono);font-size:10px;line-height:1.35;color:var(--cb-muted);}',
 /* white -> fluo-orange gradient on display titles (the accent the user wanted on TEXT) */
 '.cb-chat-name,.cb-sec-title,.cb-card-name{background:linear-gradient(90deg,#ffffff 0%,#ffffff 26%,#ffb673 62%,var(--cb-accent) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
+/* todos strip (P2-B) */
+'.cb-todos{border-top:1px solid var(--cb-line2);padding:10px 14px;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;}',
+'.cb-todos-head{font-family:var(--cb-mono);font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--cb-faint);margin-bottom:4px;}',
+'.cb-todo-row{display:flex;align-items:baseline;gap:6px;font-size:11.5px;line-height:1.3;}',
+'.cb-todo-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto;margin-top:4px;}',
+'.cb-todo-dot.pending{background:#f5c518;}.cb-todo-dot.in_progress{background:#48c774;}.cb-todo-dot.completed{background:var(--cb-faint);text-decoration:line-through;}.cb-todo-dot.cancelled{background:var(--cb-faint);opacity:.4;}',
+'.cb-todo-txt{color:var(--cb-text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+'.cb-todo-status{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);white-space:nowrap;}',
+/* tool cards (P2-C) */
+'.cb-tool-card{align-self:flex-start;max-width:96%;border:1px solid rgba(100,180,255,.22);border-left:2px solid rgba(100,180,255,.5);border-radius:6px;padding:6px 10px;background:rgba(40,60,80,.28);font-family:var(--cb-mono);font-size:10.5px;line-height:1.35;}',
+'.cb-tool-name{color:rgba(140,210,255,.9);font-weight:600;letter-spacing:.08em;}',
+'.cb-tool-summary{color:var(--cb-muted);margin-top:2px;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px;}',
 ''
     ].join('\n');
     var s = el('style'); s.id = 'cb-styles'; s.textContent = css;
@@ -428,6 +440,10 @@
               '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg></button>' +
           '</div>' +
           '<div class="cb-chat-log" id="cbLog"></div>' +
+          '<div class="cb-todos" id="cbTodos" hidden>' +
+            '<div class="cb-todos-head">Todo attivi</div>' +
+            '<div id="cbTodoList"></div>' +
+          '</div>' +
           '<div class="cb-attbar" id="cbAtt"></div>' +
           '<form class="cb-chat-input" id="cbForm" autocomplete="off">' +
             '<textarea id="cbInput" rows="1" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime"></textarea>' +
@@ -648,7 +664,68 @@
         .catch(function (e) { sysNote('/workspace: ' + (e && e.message ? e.message : 'errore')); });
       return true;
     }
-    return false;
+    if (cmd === '/interrupt') {
+      cancelPrimeTurn();
+      sysNote('Turno interrotto.');
+      return true;
+    }
+    if (cmd === '/compress') {
+      return handlePrimeSlashCommand('/compact');
+    }
+    if (cmd === '/steer') {
+      if (!args) { sysNote('/steer: inserisci il nuovo messaggio di ridirezionamento.'); return true; }
+      if (_primeStreaming) {
+        cancelPrimeTurn();
+        setTimeout(function () {
+          var inp = $('cbInput');
+          if (inp) { inp.value = args; if (window.__cbAutoGrow) window.__cbAutoGrow(); onPrimeSubmit({ preventDefault: function () {} }); }
+        }, 200);
+      } else {
+        var inp = $('cbInput');
+        if (inp) { inp.value = args; if (window.__cbAutoGrow) window.__cbAutoGrow(); onPrimeSubmit({ preventDefault: function () {} }); }
+      }
+      return true;
+    }
+    if (cmd === '/retry') {
+      api('/api/bridge/prime/history').then(function (data) {
+        var msgs = (data && data.messages) || [];
+        var lastUser = null;
+        for (var i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === 'user') { lastUser = msgs[i].content; break; }
+        }
+        if (!lastUser) { sysNote('/retry: nessun messaggio utente nella storia.'); return; }
+        var inp = $('cbInput');
+        if (inp) { inp.value = lastUser; if (window.__cbAutoGrow) window.__cbAutoGrow(); onPrimeSubmit({ preventDefault: function () {} }); }
+      }).catch(function () { sysNote('/retry: impossibile leggere la storia.'); });
+      return true;
+    }
+    if (cmd === '/goal') {
+      if (!args) {
+        apiPost('/api/bridge/prime/goal', { action: 'get' })
+          .then(function (d) { sysNote('Goal attivo: ' + (d.goal || '(non impostato)')); })
+          .catch(function (e) { sysNote('/goal: ' + (e && e.message ? e.message : 'errore')); });
+      } else {
+        apiPost('/api/bridge/prime/goal', { action: 'set', goal: args })
+          .then(function (d) { sysNote('Goal impostato: ' + (d.goal || args)); })
+          .catch(function (e) { sysNote('/goal: ' + (e && e.message ? e.message : 'errore')); });
+      }
+      return true;
+    }
+    if (cmd === '/tools') {
+      if (!args) {
+        apiPost('/api/bridge/prime/tools', { action: 'get' })
+          .then(function (d) { sysNote('Toolset: ' + (d.toolset || 'lean') + ' · preset disponibili: ' + ((d.presets || []).join(', '))); })
+          .catch(function (e) { sysNote('/tools: ' + (e && e.message ? e.message : 'errore')); });
+      } else {
+        apiPost('/api/bridge/prime/tools', { action: 'set', toolset: args })
+          .then(function (d) { sysNote('Toolset impostato: ' + d.toolset + ' (attivo dal prossimo turno)'); })
+          .catch(function (e) { sysNote('/tools: ' + (e && e.message ? e.message : 'errore')); });
+      }
+      return true;
+    }
+    // Unknown /command → help (NOT sent to Prime)
+    sysNote('Comandi disponibili: /compact, /compress, /model, /workspace, /interrupt, /steer <testo>, /retry, /goal [testo], /tools [preset]');
+    return true;
   }
 
   // The central petal-core is the primary Voice Orb; the memory planet on the
@@ -669,6 +746,39 @@
     m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
   }
+
+  // ── Todos panel (P2-B) ──────────────────────────────────────────────────
+  function renderTodos(snapshot) {
+    var panel = $('cbTodos'), list = $('cbTodoList');
+    if (!panel || !list) return;
+    var todos = (snapshot && snapshot.todos) || [];
+    if (!todos.length) { panel.hidden = true; return; }
+    var active = todos.filter(function (t) { return t && t.status !== 'cancelled' && t.status !== 'completed'; });
+    if (!active.length) { panel.hidden = true; return; }
+    panel.hidden = false;
+    list.innerHTML = active.slice(0, 12).map(function (t) {
+      var status = String(t.status || 'pending');
+      var dot = 'cb-todo-dot ' + status;
+      return '<div class="cb-todo-row"><span class="' + dot + '"></span><span class="cb-todo-txt">' + esc(t.content || t.id || '') + '</span><span class="cb-todo-status">' + esc(status) + '</span></div>';
+    }).join('');
+  }
+
+  function loadPrimeTodos() {
+    api('/api/bridge/prime/todos').then(function (d) {
+      if (d && d.todo_state) renderTodos(d.todo_state);
+    }).catch(function () {});
+  }
+
+  // ── Tool cards (P2-C) ──────────────────────────────────────────────────
+  function renderToolCard(toolName, summary) {
+    var log = $('cbLog'); if (!log) return;
+    var card = el('div', 'cb-tool-card');
+    card.innerHTML = '<span class="cb-tool-name">' + esc(toolName || 'tool') + '</span>' +
+      (summary ? '<div class="cb-tool-summary">' + esc(summary) + '</div>' : '');
+    var _sb = nearBottom(log); log.appendChild(card); if (_sb) log.scrollTop = log.scrollHeight;
+    return card;
+  }
+
   // delegation cards: update-in-place by id (in_corso -> ok/errore), background-aware
   var _cbTasks = {};
   function renderTask(t) {
@@ -1126,6 +1236,9 @@
         if (node) node.classList.add('cb-recovered');
         if (node) startPrimeLivePolling(node.querySelector('.cb-bubble') || node);
       }
+      (data.tool_events || []).forEach(function (ev) {
+        if (ev && ev.tool) renderToolCard(ev.tool, ev.summary || '');
+      });
     }).catch(function () {});
   }
   /* ── Allegati foto per Hermes Prime ─────────────────────────────────────── */
@@ -1335,6 +1448,8 @@
         usage: function (d) { showUsage(d && d.usage); },
         approval: function (d) { renderBridgeApprovalCard(d); },
         clarify: function (d) { renderBridgeClarifyCard(d); },
+        todo: function (d) { renderTodos(d); },
+        tool: function (d) { if (d && d.tool) renderToolCard(d.tool, d.summary || ''); },
         done: function (d) {
           if (d && d.usage) showUsage(d.usage);
           if (!reply && d && d.reply) showToken(d.reply);
@@ -1956,6 +2071,7 @@
   window.loadCommandBridge = function () {
     if (!BUILT) { if (!build()) return Promise.resolve(); }
     loadPrimeHistory();
+    loadPrimeTodos();
     refresh();
     startTaskPolling();
     startAgentsPolling();
