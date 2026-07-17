@@ -1,4 +1,4 @@
-let _currentPanel = 'chat';
+let _currentPanel = 'bridge';
 let _renamingAppTitlebar = false;  // guard against re-entrant rename
 let _kanbanBoard = null;
 let _kanbanLatestEventId = 0;

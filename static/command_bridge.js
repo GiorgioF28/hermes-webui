@@ -49,6 +49,94 @@
     }
     node.textContent = String(text || '');
   }
+  function _fmtCompactTokens(value) {
+    var n = Number(value) || 0;
+    if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
+    return String(Math.max(0, Math.round(n)));
+  }
+  function _usageInputTokens(usage) { usage = usage || {}; return Number(usage.input_tokens || 0); }
+  function _usageOutputTokens(usage) { usage = usage || {}; return Number(usage.output_tokens || 0); }
+  function _usageCacheReadTokens(usage) { usage = usage || {}; return Number(usage.cache_read_tokens || usage.cache_read_input_tokens || 0); }
+  function _usageCacheWriteTokens(usage) { usage = usage || {}; return Number(usage.cache_write_tokens || usage.cache_creation_input_tokens || 0); }
+  function _usageCost(usage) {
+    usage = usage || {};
+    var n = Number(usage.estimated_cost_usd != null ? usage.estimated_cost_usd : usage.estimated_cost);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  function _hasBridgeUsage(usage) {
+    return !!(usage && (_usageInputTokens(usage) || _usageOutputTokens(usage) || _usageCacheReadTokens(usage) || _usageCacheWriteTokens(usage) || _usageCost(usage)));
+  }
+  function _formatAssistantUsageBadge(usage) {
+    if (!_hasBridgeUsage(usage)) return '';
+    var parts = ['in ' + _fmtCompactTokens(_usageInputTokens(usage)), 'out ' + _fmtCompactTokens(_usageOutputTokens(usage))];
+    var cacheRead = _usageCacheReadTokens(usage), cacheWrite = _usageCacheWriteTokens(usage);
+    if (cacheRead || cacheWrite) parts.push('cache ' + _fmtCompactTokens(cacheRead) + '/' + _fmtCompactTokens(cacheWrite));
+    var cost = _usageCost(usage);
+    if (cost) parts.push('~$' + (cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)));
+    return parts.join(' · ');
+  }
+  function _formatLiveUsage(usage) {
+    if (!_hasBridgeUsage(usage)) return '';
+    return 'in ' + _fmtCompactTokens(_usageInputTokens(usage)) + ' · out ' + _fmtCompactTokens(_usageOutputTokens(usage));
+  }
+  function _formatQuotaMoneyShort(value) {
+    var n = Number(value);
+    if (!Number.isFinite(n)) return '';
+    if (Math.abs(n) >= 100) return '$' + n.toFixed(0);
+    if (Math.abs(n) >= 10) return '$' + n.toFixed(1);
+    return '$' + n.toFixed(2);
+  }
+  function _formatQuotaPercentShort(value) {
+    var n = Number(value);
+    if (!Number.isFinite(n)) return '';
+    return Math.max(0, Math.min(100, n)).toFixed(0) + '%';
+  }
+  function _renderTokenQuotaPill(status) {
+    var pill = $('cbQuotaPill');
+    if (!pill) return;
+    if (window._showQuotaChip !== true || !status) {
+      pill.hidden = true; pill.textContent = ''; pill.removeAttribute('title'); return;
+    }
+    var label = '';
+    var title = status.message || 'Provider usage loaded';
+    if (Number.isFinite(Number(status.primary_used_percent))) {
+      var usedPct = Math.max(0, Math.min(100, Number(status.primary_used_percent)));
+      label = 'Codex ' + Math.max(0, 100 - usedPct).toFixed(0) + '%';
+      title = 'Codex quota';
+      if (status.plan) title += ' - ' + status.plan;
+      if (status.primary_resets_at) title += ' - resets ' + status.primary_resets_at;
+    }
+    var accountLimits = status.account_limits || null;
+    if (!label && accountLimits && Array.isArray(accountLimits.windows) && accountLimits.windows.length) {
+      var w = accountLimits.windows.find(function (x) { return x && Number.isFinite(Number(x.remaining_percent)); }) || accountLimits.windows[0];
+      var remainingPct = _formatQuotaPercentShort(w && w.remaining_percent);
+      if (remainingPct) label = (status.display_name || status.provider || 'Codex') + ' ' + remainingPct;
+    }
+    if (!label && status.quota) {
+      var remainingMoney = _formatQuotaMoneyShort(status.quota.limit_remaining);
+      if (remainingMoney) {
+        label = (status.display_name || status.provider || 'Codex') + ' ' + remainingMoney;
+        var used = _formatQuotaMoneyShort(status.quota.usage), limit = _formatQuotaMoneyShort(status.quota.limit);
+        var bits = [];
+        if (used) bits.push('used ' + used);
+        if (limit) bits.push('limit ' + limit);
+        if (bits.length) title += ' - ' + bits.join(' · ');
+      }
+    }
+    if (!label) { pill.hidden = true; pill.textContent = ''; pill.removeAttribute('title'); return; }
+    pill.textContent = label; pill.title = title; pill.hidden = false;
+  }
+  var _cbQuotaRefreshInFlight = false;
+  function pollTokenQuota() {
+    if (window._showQuotaChip !== true) { _renderTokenQuotaPill(null); return Promise.resolve(); }
+    if (_cbQuotaRefreshInFlight) return Promise.resolve();
+    _cbQuotaRefreshInFlight = true;
+    return api('/api/usage/limits')
+      .then(function (d) { _renderTokenQuotaPill(d && (d.codex || d.provider || d)); })
+      .catch(function () { _renderTokenQuotaPill(null); })
+      .then(function () { _cbQuotaRefreshInFlight = false; });
+  }
 
   /* ── fonts + scoped styles ─────────────────────────────────────────────── */
   function injectFonts() {
@@ -102,6 +190,8 @@
 '.cb-dot{width:9px;height:9px;border-radius:50%;background:var(--cb-accent);box-shadow:0 0 10px var(--cb-accent);flex:0 0 auto;}',
 '.cb-chat-name{font-family:var(--cb-disp);font-weight:700;letter-spacing:.14em;font-size:13px;text-transform:uppercase;}',
 '.cb-chat-role{font-family:var(--cb-mono);font-size:10px;color:var(--cb-muted);letter-spacing:.08em;margin-top:1px;}',
+'.cb-quota{font-family:var(--cb-mono);font-size:9px;color:var(--cb-accent-2);border:1px solid var(--cb-accent-dim);border-radius:999px;padding:4px 7px;background:rgba(255,106,0,.07);white-space:nowrap;}',
+'.cb-quota[hidden]{display:none;}',
 '.cb-voicetoggle{background:transparent;border:1px solid var(--cb-line);color:var(--cb-faint);border-radius:8px;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;transition:.15s;}',
 '.cb-voicetoggle:hover{color:var(--cb-text);}',
 '.cb-voicetoggle.cb-on{color:var(--cb-accent);border-color:var(--cb-accent-dim);}',
@@ -118,6 +208,8 @@
 '.cb-msg.cb-from-user{align-self:flex-end;text-align:right;color:#fff;}',
 '.cb-msg.cb-from-prime .cb-bubble{color:var(--cb-text);}',
 '.cb-prime-status{margin-top:5px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.06em;color:var(--cb-faint);}',
+'.cb-msg-foot{margin-top:7px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.04em;color:var(--cb-faint);}',
+'.cb-msg-foot[hidden]{display:none;}',
 '.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:2px solid var(--cb-accent);',
 '  border-radius:8px;padding:9px 12px;background:rgba(255,106,0,.05);font-family:var(--cb-mono);font-size:11px;}',
 '.cb-deleg b{color:var(--cb-accent-2);font-weight:600;}',
@@ -127,6 +219,8 @@
 '  color:var(--cb-text);font-family:var(--cb-sans);font-size:13.5px;line-height:1.45;padding:11px 14px;outline:none;',
 '  resize:none;display:block;min-height:44px;max-height:46vh;overflow-y:auto;}',
 '.cb-chat-input textarea:focus{border-color:var(--cb-accent);box-shadow:0 0 0 3px rgba(255,106,0,.12);}',
+'.cb-live-usage{align-self:center;margin-left:10px;font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-faint);white-space:nowrap;}',
+'.cb-live-usage[hidden]{display:none;}',
 /* action buttons: floating just OUTSIDE the chat card, to its right */
 '.cb-actions{position:absolute;z-index:4;left:calc(22px + min(430px,40vw) + 14px);bottom:30px;display:flex;flex-direction:column;gap:9px;}',
 '.cb-hero.cb-collapsed .cb-actions{opacity:0;pointer-events:none;}',
@@ -311,6 +405,7 @@
             '<div class="cb-chat-name">Hermes Prime</div>' +
             '<div class="cb-chat-role">chief of staff · voce attiva</div>' +
           '</div>' +
+            '<span class="cb-quota" id="cbQuotaPill" hidden></span>' +
             '<div class="cb-brainctl" id="cbBrainCtl" aria-label="Seleziona brain di Hermes Prime">' +
               '<button type="button" class="cb-brainbtn" id="cbBrainClaude" data-lead="claude" title="Usa Claude cloud e pinna la scelta">CLOUD</button>' +
               '<button type="button" class="cb-brainbtn" id="cbBrainAuto" data-action="auto" title="Riabilita il failover automatico">AUTO</button>' +
@@ -323,6 +418,7 @@
           '<div class="cb-attbar" id="cbAtt"></div>' +
           '<form class="cb-chat-input" id="cbForm" autocomplete="off">' +
             '<textarea id="cbInput" rows="1" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime"></textarea>' +
+            '<span class="cb-live-usage" id="cbLiveUsage" hidden></span>' +
           '</form>' +
         '</aside>' +
         '<div class="cb-actions" id="cbActions">' +
@@ -542,6 +638,8 @@
     api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {});
   }
   function startWorklogPolling() { if (!_cbWorklogTimer) _cbWorklogTimer = setInterval(pollWorklog, 60000); }
+  var _cbQuotaTimer = null;
+  function startQuotaPolling() { if (!_cbQuotaTimer) _cbQuotaTimer = setInterval(pollTokenQuota, 120000); }
   // Strip markdown so the TTS doesn't read "asterisco asterisco" etc.
   function cleanForSpeech(t) {
     return String(t || '')
@@ -564,7 +662,7 @@
   function pendingBubble() {
     var log = $('cbLog'); if (!log) return null;
     var m = el('div', 'cb-msg cb-from-prime');
-    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status">in corso</div>';
+    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status">in corso</div><div class="cb-msg-foot" hidden></div>';
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight; return m;
   }
   function streamPrimeResponse(response, handlers) {
@@ -809,7 +907,8 @@
       label = imgs ? '<em style="opacity:.6">foto allegata</em>' : '';
     }
     m.innerHTML = '<div class="cb-who">' + (who === 'user' ? 'tu' : 'hermes prime') + '</div>' +
-      '<div class="cb-bubble">' + label + imgs + '</div>';
+      '<div class="cb-bubble">' + label + imgs + '</div>' +
+      (who === 'prime' ? '<div class="cb-msg-foot" hidden></div>' : '');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
     if (who === 'prime' && userEngaged) speak(text);
   }
@@ -940,7 +1039,20 @@
     var ph = pendingBubble();
     var bubble = ph ? ph.querySelector('.cb-bubble') : null;
     var statusLine = ph ? ph.querySelector('.cb-prime-status') : null;
-    var reply = '', settled = false, speech = { spokenLen: 0 };
+    var footLine = ph ? ph.querySelector('.cb-msg-foot') : null;
+    var liveUsage = $('cbLiveUsage');
+    if (liveUsage) { liveUsage.hidden = true; liveUsage.textContent = ''; }
+    var reply = '', settled = false, speech = { spokenLen: 0 }, finalUsage = null;
+    var showUsage = function (usage) {
+      if (!_hasBridgeUsage(usage)) return;
+      finalUsage = usage;
+      var liveText = _formatLiveUsage(usage);
+      if (liveUsage && liveText) { liveUsage.textContent = liveText; liveUsage.hidden = false; }
+      if (footLine && window._showTokenUsage === true) {
+        var badge = _formatAssistantUsageBadge(usage);
+        if (badge) { footLine.textContent = badge; footLine.hidden = false; }
+      }
+    };
     var showStatus = function (state, tool) {
       var labels = {
         queued: 'in coda\u2026',
@@ -959,6 +1071,8 @@
       settled = true;
       if (statusLine) statusLine.textContent = label || '\u2713 completato';
       if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
+      if (finalUsage) showUsage(finalUsage);
+      if (liveUsage) liveUsage.hidden = true;
       flushSpokenSentences(reply, speech, true);
       if (!_ttsActive) setOrb('idle', 0);
     };
@@ -976,6 +1090,7 @@
     var fail = function (text) {
       if (settled) return;
       settled = true;
+      if (liveUsage) liveUsage.hidden = true;
       if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
       ph = null; bubble = null; statusLine = null;
       sysNote(text);
@@ -990,7 +1105,9 @@
       return streamPrimeResponse(r, {
         status: function (d) { showStatus(d && d.state, d && d.tool); },
         token: function (d) { showToken(d && d.text); },
+        usage: function (d) { showUsage(d && d.usage); },
         done: function (d) {
+          if (d && d.usage) showUsage(d.usage);
           if (!reply && d && d.reply) showToken(d.reply);
           if (!reply) showToken('Ricevuto.');
           finish('\u2713 completato');
@@ -1608,6 +1725,8 @@
     startTaskPolling();
     startAgentsPolling();
     startWorklogPolling();
+    startQuotaPolling();
+    pollTokenQuota();
     return Promise.resolve();
   };
 })();

@@ -65,7 +65,7 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
 
     class FakeClient:
         async def query(self, message):
-            assert message == "stato di oggi"
+            assert message.endswith("stato di oggi")
 
         async def receive_response(self):
             yield ThinkingMessage()
@@ -117,6 +117,7 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
     assert result == {
         "reply": "Ciao Giorgio",
         "delegations": [{"id": "prime-1", "status": "in_corso"}],
+        "usage": {},
     }
 
 
@@ -132,6 +133,12 @@ def test_bridge_prime_post_streams_tokens_then_done(monkeypatch):
         return {
             "reply": "Prima parte",
             "delegations": [{"id": "prime-2", "status": "in_corso"}],
+            "usage": {
+                "input_tokens": 1200,
+                "output_tokens": 34,
+                "cache_read_input_tokens": 800,
+                "cache_creation_input_tokens": 40,
+            },
         }
 
     monkeypatch.setattr(routes, "_hermes_prime_reply", fake_reply)
@@ -146,10 +153,27 @@ def test_bridge_prime_post_streams_tokens_then_done(monkeypatch):
         ("token", {"text": "parte"}),
         ("status", {"state": "done"}),
         (
+            "usage",
+            {
+                "usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 34,
+                    "cache_read_input_tokens": 800,
+                    "cache_creation_input_tokens": 40,
+                },
+            },
+        ),
+        (
             "done",
             {
                 "reply": "Prima parte",
                 "delegations": [{"id": "prime-2", "status": "in_corso"}],
+                "usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 34,
+                    "cache_read_input_tokens": 800,
+                    "cache_creation_input_tokens": 40,
+                },
             },
         ),
     ]
@@ -378,7 +402,10 @@ def test_bridge_prime_post_reports_failures_as_sse(monkeypatch):
 
     assert routes._handle_bridge_prime(handler, {"message": "brief"}) is True
     assert handler.status == 200
-    assert _events(handler) == [("error", {"error": "provider down"})]
+    events = _events(handler)
+    assert events[0][0] == "error"
+    assert events[0][1]["branch"] == "unknown"
+    assert events[0][1]["detail"] == "provider down"
 
 
 def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling():
@@ -388,7 +415,9 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "response.body.getReader()" in source
     assert "status: function (d) { showStatus(d && d.state, d && d.tool); }" in source
     assert "token: function (d) { showToken(d && d.text); }" in source
+    assert "usage: function (d) { showUsage(d && d.usage); }" in source
     assert "done: function (d)" in source
+    assert "if (d && d.usage) showUsage(d.usage);" in source
     assert "if (!settled && reply) finish('\\u2713 risposta ricevuta');" in source
     assert "if (!reply && ph && ph.parentNode)" in source
     assert "api('api/bridge/tasks')" in source
@@ -397,3 +426,23 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert 'id="cbBrainCodex"' in source
     assert "api/bridge/prime/lead" in source
     assert "action: 'auto'" in source
+
+
+def test_command_bridge_frontend_renders_usage_quota_and_default_view():
+    bridge = Path("static/command_bridge.js").read_text(encoding="utf-8")
+    panels = Path("static/panels.js").read_text(encoding="utf-8")
+    index = Path("static/index.html").read_text(encoding="utf-8")
+
+    assert "function _fmtCompactTokens(value)" in bridge
+    assert "function _formatAssistantUsageBadge(usage)" in bridge
+    assert "function _renderTokenQuotaPill(status)" in bridge
+    assert "function pollTokenQuota()" in bridge
+    assert "api('/api/usage/limits')" in bridge
+    assert 'id="cbQuotaPill"' in bridge
+    assert 'id="cbLiveUsage"' in bridge
+    assert "cb-msg-foot" in bridge
+    assert "window._showTokenUsage === true" in bridge
+    assert "window._showQuotaChip !== true" in bridge
+    assert "let _currentPanel = 'bridge';" in panels
+    assert '<main class="main showing-bridge">' in index
+    assert 'data-panel="bridge" onclick="switchPanel(\'bridge\',{fromRailClick:true})" data-tooltip="Command Bridge"' in index

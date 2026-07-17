@@ -11194,7 +11194,11 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
         raise RuntimeError(f"Codex CLI non ha completato il turno: {detail}") from exc
     if reply and on_token is not None:
         on_token(reply)
-    return {"reply": reply, "delegations": get_background_tasks()}
+    return {
+        "reply": reply,
+        "delegations": get_background_tasks(),
+        "usage": {},
+    }
 
 
 def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=None, on_status=None):
@@ -11363,7 +11367,11 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         )
     if reply and not parts and on_token is not None:
         on_token(reply)
-    return {"reply": reply, "delegations": get_background_tasks()}
+    return {
+        "reply": reply,
+        "delegations": get_background_tasks(),
+        "usage": final_usage.get("usage") or {},
+    }
 
 
 def _handle_bridge_prime(handler, body):
@@ -11395,12 +11403,16 @@ def _handle_bridge_prime(handler, body):
             on_status=lambda status: _sse(handler, "status", status),
         )
         _sse(handler, "status", {"state": "done"})
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        if usage:
+            _sse(handler, "usage", {"usage": usage})
         _sse(
             handler,
             "done",
             {
                 "reply": result["reply"] or "Ricevuto.",
                 "delegations": result.get("delegations", []),
+                "usage": usage,
             },
         )
     except _CLIENT_DISCONNECT_ERRORS:
