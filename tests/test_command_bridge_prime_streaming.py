@@ -408,6 +408,94 @@ def test_bridge_prime_post_reports_failures_as_sse(monkeypatch):
     assert events[0][1]["detail"] == "provider down"
 
 
+def test_bridge_prime_history_persists_successful_turn(monkeypatch, tmp_path):
+    from api import prime_session_store
+
+    monkeypatch.setattr(
+        prime_session_store,
+        "_STORE",
+        prime_session_store.PrimeSessionStore(tmp_path / "prime-session.json"),
+    )
+    handler = _Handler()
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+
+    def fake_reply(message, workspace, attachments=None, on_token=None, on_status=None):
+        on_token("Persistita")
+        return {"reply": "Persistita", "delegations": [], "usage": {"input_tokens": 1}}
+
+    monkeypatch.setattr(routes, "_hermes_prime_reply", fake_reply)
+
+    assert routes._handle_bridge_prime(handler, {"message": "salva"}) is True
+
+    hist_handler = _Handler()
+    assert routes._handle_bridge_prime_history(hist_handler) is True
+    history = json.loads(hist_handler.wfile.getvalue().decode("utf-8"))
+    assert history["session_id"] == "hermes-prime"
+    assert history["pending_turn"] is None
+    assert [m["role"] for m in history["messages"]] == ["user", "assistant"]
+    assert history["messages"][1]["content"] == "Persistita"
+
+
+def test_bridge_prime_history_recovers_pending_partial_on_disconnect(monkeypatch, tmp_path):
+    from api import prime_session_store
+
+    monkeypatch.setattr(
+        prime_session_store,
+        "_STORE",
+        prime_session_store.PrimeSessionStore(tmp_path / "prime-session.json"),
+    )
+    handler = _Handler()
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+
+    def broken_reply(message, workspace, attachments=None, on_token=None, on_status=None):
+        on_token("parziale recuperabile")
+        raise TimeoutError("bridge cut")
+
+    monkeypatch.setattr(routes, "_hermes_prime_reply", broken_reply)
+
+    assert routes._handle_bridge_prime(handler, {"message": "crasha"}) is True
+
+    hist_handler = _Handler()
+    routes._handle_bridge_prime_history(hist_handler)
+    history = json.loads(hist_handler.wfile.getvalue().decode("utf-8"))
+    pending = history["pending_turn"]
+    assert pending["stream_id"]
+    assert pending["partial_output"] == "parziale recuperabile"
+    assert pending["recovered"] is True
+
+
+def test_bridge_prime_stream_forwards_approval_and_clarify_events(monkeypatch, tmp_path):
+    from api import clarify, prime_session_store
+
+    monkeypatch.setattr(
+        prime_session_store,
+        "_STORE",
+        prime_session_store.PrimeSessionStore(tmp_path / "prime-session.json"),
+    )
+    handler = _Handler()
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+
+    def fake_reply(message, workspace, attachments=None, on_token=None, on_status=None):
+        routes.submit_pending(
+            "hermes-prime",
+            {"command": "Remove-Item x", "pattern_key": "danger", "description": "Danger"},
+        )
+        clarify.submit_pending(
+            "hermes-prime",
+            {"question": "Scegli?", "choices_offered": ["A", "B"]},
+        )
+        time.sleep(0.25)
+        on_token("ok")
+        return {"reply": "ok", "delegations": [], "usage": {}}
+
+    monkeypatch.setattr(routes, "_hermes_prime_reply", fake_reply)
+
+    assert routes._handle_bridge_prime(handler, {"message": "serve input"}) is True
+    events = _events(handler)
+    assert any(event == "approval" and data["pending"]["command"] == "Remove-Item x" for event, data in events)
+    assert any(event == "clarify" and data["pending"]["question"] == "Scegli?" for event, data in events)
+
+
 def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling():
     source = Path("static/command_bridge.js").read_text(encoding="utf-8")
 
@@ -416,6 +504,8 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "status: function (d) { showStatus(d && d.state, d && d.tool); }" in source
     assert "token: function (d) { showToken(d && d.text); }" in source
     assert "usage: function (d) { showUsage(d && d.usage); }" in source
+    assert "approval: function (d) { renderBridgeApprovalCard(d); }" in source
+    assert "clarify: function (d) { renderBridgeClarifyCard(d); }" in source
     assert "done: function (d)" in source
     assert "if (d && d.usage) showUsage(d.usage);" in source
     assert "if (!settled && reply) finish('\\u2713 risposta ricevuta');" in source
@@ -426,6 +516,18 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert 'id="cbBrainCodex"' in source
     assert "api/bridge/prime/lead" in source
     assert "action: 'auto'" in source
+
+
+def test_command_bridge_frontend_loads_history_and_renders_attention_cards():
+    source = Path("static/command_bridge.js").read_text(encoding="utf-8")
+
+    assert "function loadPrimeHistory()" in source
+    assert "api('/api/bridge/prime/history')" in source
+    assert "function renderBridgeApprovalCard(payload)" in source
+    assert "function renderBridgeClarifyCard(payload)" in source
+    assert "apiPost('/api/approval/respond'" in source
+    assert "apiPost('/api/clarify/respond'" in source
+    assert "cb-recovered" in source
 
 
 def test_command_bridge_frontend_renders_usage_quota_and_default_view():

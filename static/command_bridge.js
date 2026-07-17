@@ -210,6 +210,17 @@
 '.cb-prime-status{margin-top:5px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.06em;color:var(--cb-faint);}',
 '.cb-msg-foot{margin-top:7px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.04em;color:var(--cb-faint);}',
 '.cb-msg-foot[hidden]{display:none;}',
+'.cb-attention-card{align-self:stretch;max-width:100%;border:1px solid rgba(255,160,92,.34);background:rgba(36,24,14,.86);border-radius:8px;padding:12px;color:var(--cb-text);box-shadow:0 16px 34px rgba(0,0,0,.26);}',
+'.cb-attention-k{font-family:var(--cb-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--cb-accent);margin-bottom:6px;}',
+'.cb-attention-title{font-size:13px;font-weight:700;color:#fff;margin-bottom:7px;}',
+'.cb-attention-body{font-size:12px;line-height:1.45;color:var(--cb-muted);white-space:pre-wrap;word-break:break-word;}',
+'.cb-attention-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px;}',
+'.cb-attention-actions button{border:1px solid var(--cb-line);background:rgba(255,255,255,.06);color:#fff;border-radius:7px;padding:7px 9px;font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;cursor:pointer;}',
+'.cb-attention-actions button:hover{border-color:rgba(255,255,255,.28);background:rgba(255,255,255,.1);}',
+'.cb-attention-actions button.deny{color:#ffb4a8;border-color:rgba(255,107,92,.34);}',
+'.cb-attention-input{width:100%;box-sizing:border-box;margin-top:9px;border:1px solid var(--cb-line);border-radius:8px;background:rgba(0,0,0,.2);color:#fff;padding:9px;font-size:12px;}',
+'.cb-choice.selected{border-color:var(--cb-accent);box-shadow:0 0 0 2px rgba(255,106,0,.16) inset;}',
+'.cb-recovered .cb-who:after{content:" · recuperato";color:var(--cb-accent);}',
 '.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:2px solid var(--cb-accent);',
 '  border-radius:8px;padding:9px 12px;background:rgba(255,106,0,.05);font-family:var(--cb-mono);font-size:11px;}',
 '.cb-deleg b{color:var(--cb-accent-2);font-weight:600;}',
@@ -911,6 +922,119 @@
       (who === 'prime' ? '<div class="cb-msg-foot" hidden></div>' : '');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
     if (who === 'prime' && userEngaged) speak(text);
+    return m;
+  }
+
+  var _cbHistoryLoaded = false;
+  function normalizeAttentionPending(payload) {
+    if (!payload) return null;
+    return payload.pending || payload;
+  }
+  function appendAttentionCard(kind, pending) {
+    var log = $('cbLog'); if (!log || !pending) return null;
+    var card = el('div', 'cb-attention-card cb-' + kind + '-card');
+    var label = kind === 'approval' ? 'approval richiesta' : 'chiarimento richiesto';
+    var title = kind === 'approval'
+      ? (pending.description || 'Conferma azione richiesta')
+      : (pending.question || 'Serve una scelta');
+    var body = kind === 'approval'
+      ? (pending.command || pending.pattern_key || '')
+      : ((pending.choices_offered || []).join('\n') || '');
+    card.innerHTML =
+      '<div class="cb-attention-k">' + esc(label) + '</div>' +
+      '<div class="cb-attention-title">' + esc(title) + '</div>' +
+      (body ? '<div class="cb-attention-body">' + esc(body) + '</div>' : '') +
+      '<div class="cb-attention-actions"></div>';
+    var _sb = nearBottom(log); log.appendChild(card); if (_sb) log.scrollTop = log.scrollHeight;
+    return card;
+  }
+  function renderBridgeApprovalCard(payload) {
+    var pending = normalizeAttentionPending(payload);
+    if (!pending) { sysNote('Approval bridge risolta o scaduta.'); return; }
+    var card = appendAttentionCard('approval', pending); if (!card) return;
+    var actions = card.querySelector('.cb-attention-actions');
+    [
+      ['once', 'Allow once', ''],
+      ['session', 'Allow session', ''],
+      ['deny', 'Deny', 'deny']
+    ].forEach(function (item) {
+      var b = el('button', item[2]); b.type = 'button'; b.textContent = item[1];
+      b.addEventListener('click', function () {
+        actions.querySelectorAll('button').forEach(function (btn) { btn.disabled = true; });
+        apiPost('/api/approval/respond', {
+          session_id: 'hermes-prime',
+          approval_id: pending.approval_id || '',
+          choice: item[0]
+        }).then(function () {
+          card.querySelector('.cb-attention-k').textContent = 'approval inviata';
+        }).catch(function (e) {
+          sysNote('Approval: ' + (e && e.message ? e.message : 'errore risposta'));
+          actions.querySelectorAll('button').forEach(function (btn) { btn.disabled = false; });
+        });
+      });
+      actions.appendChild(b);
+    });
+  }
+  function renderBridgeClarifyCard(payload) {
+    var pending = normalizeAttentionPending(payload);
+    if (!pending) { sysNote('Clarify bridge risolto o scaduto.'); return; }
+    var card = appendAttentionCard('clarify', pending); if (!card) return;
+    var actions = card.querySelector('.cb-attention-actions');
+    var selected = [];
+    var questions = Array.isArray(pending.questions) ? pending.questions : null;
+    var choices = questions && questions.length ? (questions[0].options || []).map(function (o) { return o.label || o.value || o.text || ''; }) : (pending.choices_offered || []);
+    choices.filter(Boolean).forEach(function (choice) {
+      var b = el('button', 'cb-choice'); b.type = 'button'; b.textContent = choice;
+      b.addEventListener('click', function () {
+        var multi = questions && questions[0] && questions[0].multiSelect;
+        if (multi) {
+          var idx = selected.indexOf(choice);
+          if (idx >= 0) selected.splice(idx, 1); else selected.push(choice);
+          b.classList.toggle('selected', selected.indexOf(choice) >= 0);
+        } else {
+          selected = [choice];
+          actions.querySelectorAll('.cb-choice').forEach(function (btn) { btn.classList.remove('selected'); });
+          b.classList.add('selected');
+        }
+      });
+      actions.appendChild(b);
+    });
+    var input = el('input', 'cb-attention-input');
+    input.type = 'text';
+    input.placeholder = 'Risposta libera';
+    card.appendChild(input);
+    var send = el('button', ''); send.type = 'button'; send.textContent = 'Send';
+    send.addEventListener('click', function () {
+      var answer = input.value.trim() || selected.join(', ');
+      if (!answer) { input.focus(); return; }
+      send.disabled = true;
+      apiPost('/api/clarify/respond', {
+        session_id: 'hermes-prime',
+        clarify_id: pending.clarify_id || '',
+        response: answer
+      }).then(function () {
+        card.querySelector('.cb-attention-k').textContent = 'chiarimento inviato';
+      }).catch(function (e) {
+        send.disabled = false;
+        sysNote('Clarify: ' + (e && e.message ? e.message : 'errore risposta'));
+      });
+    });
+    actions.appendChild(send);
+  }
+  function loadPrimeHistory() {
+    if (_cbHistoryLoaded) return Promise.resolve();
+    _cbHistoryLoaded = true;
+    return api('/api/bridge/prime/history').then(function (data) {
+      var log = $('cbLog'); if (!log) return;
+      (data.messages || []).forEach(function (m) {
+        primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '');
+      });
+      var pending = data.pending_turn;
+      if (pending && pending.partial_output) {
+        var node = primeSay('prime', pending.partial_output || '');
+        if (node) node.classList.add('cb-recovered');
+      }
+    }).catch(function () {});
   }
   /* ── Allegati foto per Hermes Prime ─────────────────────────────────────── */
   var pendingAttachments = []; // { name, path, url, type, size }
@@ -1106,6 +1230,8 @@
         status: function (d) { showStatus(d && d.state, d && d.tool); },
         token: function (d) { showToken(d && d.text); },
         usage: function (d) { showUsage(d && d.usage); },
+        approval: function (d) { renderBridgeApprovalCard(d); },
+        clarify: function (d) { renderBridgeClarifyCard(d); },
         done: function (d) {
           if (d && d.usage) showUsage(d.usage);
           if (!reply && d && d.reply) showToken(d.reply);
@@ -1721,6 +1847,7 @@
   /* ── entry point (called by switchPanel) ───────────────────────────────── */
   window.loadCommandBridge = function () {
     if (!BUILT) { if (!build()) return Promise.resolve(); }
+    loadPrimeHistory();
     refresh();
     startTaskPolling();
     startAgentsPolling();

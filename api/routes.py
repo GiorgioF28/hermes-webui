@@ -6426,6 +6426,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/approval/pending":
         return _handle_approval_pending(handler, parsed)
 
+    if parsed.path == "/api/bridge/prime/history":
+        return _handle_bridge_prime_history(handler)
+
     if parsed.path == "/api/approval/stream":
         return _handle_approval_sse_stream(handler, parsed)
 
@@ -11374,8 +11377,107 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     }
 
 
+
+def _handle_bridge_prime_history(handler):
+    """GET /api/bridge/prime/history -- persisted Command Bridge transcript."""
+    try:
+        from api.prime_session_store import get_prime_session_store
+        return j(handler, get_prime_session_store().history(), extra_headers={"Cache-Control": "no-store"}) or True
+    except Exception as exc:
+        logger.exception("bridge prime history failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
+def _bridge_prime_subscribe_queue(kind: str):
+    if kind == "approval":
+        try:
+            return _approval_sse_subscribe("hermes-prime")
+        except Exception:
+            return None
+    if kind == "clarify" and clarify_sse_subscribe is not None:
+        try:
+            return clarify_sse_subscribe("hermes-prime")
+        except Exception:
+            return None
+    return None
+
+
+def _bridge_prime_unsubscribe_queue(kind: str, q) -> None:
+    if q is None:
+        return
+    try:
+        if kind == "approval":
+            _approval_sse_unsubscribe("hermes-prime", q)
+        elif kind == "clarify" and clarify_sse_unsubscribe is not None:
+            clarify_sse_unsubscribe("hermes-prime", q)
+    except Exception:
+        logger.debug("bridge prime %s unsubscribe failed", kind, exc_info=True)
+
+
+def _bridge_prime_register_gateway_approval(emit):
+    """Register the existing tools.approval gateway callback for Prime."""
+    try:
+        from tools.approval import register_gateway_notify, unregister_gateway_notify
+    except Exception:
+        return None
+
+    def _notify(approval_data):
+        pending = dict(approval_data or {})
+        emit("approval", {"pending": pending, "pending_count": 1})
+
+    try:
+        register_gateway_notify("hermes-prime", _notify)
+    except Exception:
+        logger.debug("bridge prime approval notify registration failed", exc_info=True)
+        return None
+    return unregister_gateway_notify
+
+
+def _bridge_prime_start_attention_relays(emit):
+    """Forward existing approval/clarify queues into the bridge POST SSE stream."""
+    stop_event = threading.Event()
+    relays = []
+
+    def _start(kind: str):
+        q = _bridge_prime_subscribe_queue(kind)
+        if q is None:
+            return
+
+        def _drain():
+            try:
+                while not stop_event.is_set():
+                    try:
+                        payload = q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if payload is None:
+                        break
+                    emit(kind, payload)
+            finally:
+                _bridge_prime_unsubscribe_queue(kind, q)
+
+        t = threading.Thread(target=_drain, name=f"bridge-prime-{kind}-relay", daemon=True)
+        t.start()
+        relays.append(t)
+
+    _start("approval")
+    _start("clarify")
+    unregister_gateway_approval = _bridge_prime_register_gateway_approval(emit)
+
+    def _stop():
+        stop_event.set()
+        for t in relays:
+            t.join(timeout=1.0)
+        if unregister_gateway_approval is not None:
+            try:
+                unregister_gateway_approval("hermes-prime")
+            except Exception:
+                logger.debug("bridge prime approval notify unregister failed", exc_info=True)
+
+    return _stop
+
 def _handle_bridge_prime(handler, body):
-    """POST /api/bridge/prime — stream Hermes Prime tokens, then delegations."""
+    """POST /api/bridge/prime -- stream Hermes Prime tokens, then delegations."""
     msg = str((body or {}).get("message") or "").strip()
     raw_atts = (body or {}).get("attachments")
     attachments = [a for a in raw_atts if isinstance(a, dict)] if isinstance(raw_atts, list) else []
@@ -11393,47 +11495,74 @@ def _handle_bridge_prime(handler, body):
     _sse_set_write_deadline(handler)
 
     from api.streaming import _sse
+    from api.prime_session_store import get_prime_session_store
+
+    store = get_prime_session_store()
+    stream_id = store.begin_turn(msg, attachments)
+    write_lock = threading.Lock()
+
+    def emit(event, payload):
+        with write_lock:
+            _sse(handler, event, payload)
+
+    def _token(text):
+        store.append_token(stream_id, text)
+        emit("token", {"text": text})
+
+    stop_attention_relays = _bridge_prime_start_attention_relays(emit)
 
     try:
-        result = _hermes_prime_reply(
-            msg,
-            workspace,
-            attachments=attachments,
-            on_token=lambda text: _sse(handler, "token", {"text": text}),
-            on_status=lambda status: _sse(handler, "status", status),
-        )
-        _sse(handler, "status", {"state": "done"})
+        try:
+            from api.streaming import _bind_turn_session_identity
+        except Exception:
+            _bind_turn_session_identity = None
+        if _bind_turn_session_identity is None:
+            result = _hermes_prime_reply(
+                msg,
+                workspace,
+                attachments=attachments,
+                on_token=_token,
+                on_status=lambda status: emit("status", status),
+            )
+        else:
+            with _bind_turn_session_identity("hermes-prime"):
+                result = _hermes_prime_reply(
+                    msg,
+                    workspace,
+                    attachments=attachments,
+                    on_token=_token,
+                    on_status=lambda status: emit("status", status),
+                )
+        emit("status", {"state": "done"})
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         if usage:
-            _sse(handler, "usage", {"usage": usage})
-        _sse(
-            handler,
+            emit("usage", {"usage": usage})
+        reply = result["reply"] or "Ricevuto."
+        store.finish_turn(stream_id, reply, usage=usage)
+        emit(
             "done",
             {
-                "reply": result["reply"] or "Ricevuto.",
+                "reply": reply,
                 "delegations": result.get("delegations", []),
                 "usage": usage,
             },
         )
     except _CLIENT_DISCONNECT_ERRORS:
-        # Può essere il browser che se ne va (non possiamo farci nulla) oppure il
-        # bridge/sottoprocesso che chiude la pipe mentre il client è ancora lì.
-        # Proviamo comunque a chiudere lo stream con un evento terminale: se il
-        # socket è davvero morto la write fallisce e la ignoriamo. Così l'utente
-        # non resta col generico "risposta interrotta".
+        store.mark_error(stream_id, "client disconnected", keep_pending=True)
         try:
-            _sse(handler, "error", {
-                "error": "La sessione di Hermes Prime si è interrotta. Riprova tra poco.",
+            emit("error", {
+                "error": "La sessione di Hermes Prime si e interrotta. Riprova tra poco.",
                 "branch": bridge_errors.TRANSPORT_CUT,
                 "hint": bridge_errors.classify(bridge_errors.TRANSPORT_CUT)["hint"],
             })
         except _CLIENT_DISCONNECT_ERRORS:
             pass
     except Exception as exc:
+        store.mark_error(stream_id, _sanitize_error(exc), keep_pending=True)
         logger.exception("hermes prime reply failed")
         info = bridge_errors.classify(exc)
         try:
-            _sse(handler, "error", {
+            emit("error", {
                 "error": info["message"],
                 "branch": info["branch"],
                 "hint": info["hint"],
@@ -11441,6 +11570,8 @@ def _handle_bridge_prime(handler, body):
             })
         except _CLIENT_DISCONNECT_ERRORS:
             pass
+    finally:
+        stop_attention_relays()
     return True
 
 
