@@ -548,3 +548,119 @@ def test_command_bridge_frontend_renders_usage_quota_and_default_view():
     assert "let _currentPanel = 'bridge';" in panels
     assert '<main class="main showing-bridge">' in index
     assert 'data-panel="bridge" onclick="switchPanel(\'bridge\',{fromRailClick:true})" data-tooltip="Command Bridge"' in index
+
+
+def test_bridge_prime_cancel_promotes_partial_and_journals(monkeypatch, tmp_path):
+    from api import prime_session_store
+
+    store = prime_session_store.PrimeSessionStore(tmp_path / "prime-session.json")
+    monkeypatch.setattr(prime_session_store, "_STORE", store)
+    stream_id = store.begin_turn("ferma")
+    store.append_token(stream_id, "parziale vivo")
+
+    handler = _Handler()
+    assert routes._handle_bridge_prime_cancel(handler, {"stream_id": stream_id}) is None
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    hist = store.history()
+
+    assert payload["cancelled"] is True
+    assert hist["pending_turn"] is None
+    assert hist["messages"][-1]["content"] == "parziale vivo"
+    assert hist["messages"][-1]["interrupted"] is True
+    raw = json.loads((tmp_path / "prime-session.json").read_text(encoding="utf-8"))
+    assert raw["journal"][-1]["event"] == "turn_cancelled"
+
+
+def test_bridge_prime_live_exposes_pending_turn(monkeypatch, tmp_path):
+    from api import prime_session_store
+
+    store = prime_session_store.PrimeSessionStore(tmp_path / "prime-session.json")
+    monkeypatch.setattr(prime_session_store, "_STORE", store)
+    stream_id = store.begin_turn("continua")
+    store.append_token(stream_id, "token gia arrivati")
+
+    handler = _Handler()
+    assert routes._handle_bridge_prime_live(handler) is True
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    assert payload["active"] is True
+    assert payload["stream_id"] == stream_id
+    assert payload["pending_turn"]["partial_output"] == "token gia arrivati"
+
+
+def test_bridge_prime_compact_endpoint_reports_tokens(monkeypatch):
+    handler = _Handler()
+    seen = {}
+
+    monkeypatch.setattr(routes, "_prime_active_snapshot", lambda: {})
+    monkeypatch.setattr(routes, "_estimate_prime_history_tokens", lambda: 42)
+    monkeypatch.setattr(routes, "_get_claude_registry", lambda: object())
+
+    def fake_compact(registry, *, session_id, before_tokens=0, reason="manual", **kwargs):
+        seen["registry"] = registry
+        seen["session_id"] = session_id
+        seen["before_tokens"] = before_tokens
+        seen["reason"] = reason
+        return {
+            "ok": True,
+            "compacted": True,
+            "before_tokens": before_tokens,
+            "after_tokens": 12,
+            "after_tokens_unknown": False,
+        }
+
+    monkeypatch.setattr("api.prime_auto_compact.compact_prime_now", fake_compact)
+
+    assert routes._handle_bridge_prime_compact(handler, {}) is None
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert seen == {"registry": seen["registry"], "session_id": "hermes-prime", "before_tokens": 42, "reason": "manual"}
+    assert payload["before_tokens"] == 42
+    assert payload["after_tokens"] == 12
+
+
+def test_bridge_prime_model_and_workspace_persist(monkeypatch, tmp_path):
+    from api import prime_session_store
+
+    store = prime_session_store.PrimeSessionStore(tmp_path / "prime-session.json")
+    monkeypatch.setattr(prime_session_store, "_STORE", store)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider, **kwargs: (model or "claude-sonnet-4-6", provider or "anthropic", False),
+    )
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path / str(value or "ws"))
+
+    class Registry:
+        def close(self, session_id):
+            assert session_id == "hermes-prime"
+
+    monkeypatch.setattr(routes, "_get_claude_registry", lambda: Registry())
+
+    model_handler = _Handler()
+    routes._handle_bridge_prime_model(model_handler, {"action": "set", "model": "claude-sonnet-4-6", "profile": "default"})
+    model_payload = json.loads(model_handler.wfile.getvalue().decode("utf-8"))
+    assert model_payload["model"] == "claude-sonnet-4-6"
+    assert model_payload["model_provider"] == "anthropic"
+    assert model_payload["settings"]["profile"] == "default"
+
+    ws_handler = _Handler()
+    routes._handle_bridge_prime_workspace(ws_handler, {"action": "set", "workspace": "prime-ws"})
+    ws_payload = json.loads(ws_handler.wfile.getvalue().decode("utf-8"))
+    assert ws_payload["workspace"].endswith("prime-ws")
+    assert store.get_settings()["workspace"].endswith("prime-ws")
+
+
+def test_command_bridge_frontend_p1_controls_and_slash_commands():
+    source = Path("static/command_bridge.js").read_text(encoding="utf-8")
+
+    assert 'id="cbStop"' in source
+    assert "function cancelPrimeTurn()" in source
+    assert "apiPost('/api/bridge/prime/cancel'" in source
+    assert "api('/api/bridge/prime/live')" in source
+    assert "function handlePrimeSlashCommand(text)" in source
+    assert "cmd === '/compact'" in source
+    assert "apiPost('/api/bridge/prime/compact'" in source
+    assert "cmd === '/model'" in source
+    assert "apiPost('/api/bridge/prime/model'" in source
+    assert "cmd === '/workspace'" in source
+    assert "apiPost('/api/bridge/prime/workspace'" in source

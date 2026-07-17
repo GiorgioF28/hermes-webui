@@ -252,6 +252,30 @@ def _extract_after_usage(result: Any) -> dict:
     return {}
 
 
+def _prune_prime_tool_results_after_compaction(registry: Any, session_id: str) -> bool:
+    """Best-effort reuse of the standard post-compression tool-result prune.
+
+    The Prime SDK client normally owns its context internally, so there may be
+    no visible ``context_messages`` attribute to mutate. When tests or future
+    client adapters expose one, apply the same helper used by chat streaming.
+    """
+    try:
+        client = registry.get(session_id) if hasattr(registry, "get") else None
+        context_messages = getattr(client, "context_messages", None)
+        if not context_messages:
+            return False
+        from api.streaming import _prune_context_tool_results_after_compression
+
+        pruned = _prune_context_tool_results_after_compression(client, context_messages)
+        if pruned is context_messages:
+            return False
+        client.context_messages = pruned
+        return True
+    except Exception:
+        logger.debug("prime manual compact tool-result prune failed", exc_info=True)
+        return False
+
+
 # ── Main entry points ──────────────────────────────────────────────────────────
 
 def maybe_auto_compact_prime(
@@ -329,6 +353,60 @@ def maybe_auto_compact_prime(
         append_prime_auto_compact_event(event)
         logger.warning("prime_auto_compact failed", exc_info=True)
         return {"compacted": False, **event}
+
+
+def compact_prime_now(
+    registry: Any,
+    *,
+    session_id: str,
+    before_tokens: int = 0,
+    run_service_turn: Callable[[Any, str, float], Any] | None = None,
+    reason: str = "manual",
+) -> dict:
+    """Force a Prime ``/compact`` service turn and log it next to auto events."""
+    before_tokens = _safe_int(before_tokens)
+    try:
+        if run_service_turn is None:
+            result = _run_compact_service_turn(registry, session_id, compact_timeout_seconds())
+        else:
+            result = run_service_turn(registry, session_id, compact_timeout_seconds())
+        after_usage = _extract_after_usage(result)
+        after_tokens = context_tokens_from_usage(after_usage)
+        state = _sync_state_from_env()
+        state.record_compact_result(after_tokens=after_tokens)
+        pruned_tool_results = _prune_prime_tool_results_after_compaction(registry, session_id)
+        event = {
+            "session_id": session_id,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "after_tokens_unknown": after_tokens == 0,
+            "threshold_tokens": state.threshold_tokens,
+            "cap_tokens": session_cap_tokens(),
+            "cooldown_turns": state.cooldown_turns,
+            "reason": reason,
+            "forced": True,
+            "manual": True,
+            "pruned_tool_results": pruned_tool_results,
+            "status": "ok",
+        }
+        append_prime_auto_compact_event(event)
+        logger.info("prime_manual_compact %s", event)
+        return {"ok": True, "compacted": True, **event}
+    except Exception as exc:
+        event = {
+            "session_id": session_id,
+            "before_tokens": before_tokens,
+            "after_tokens": 0,
+            "after_tokens_unknown": True,
+            "reason": reason,
+            "forced": True,
+            "manual": True,
+            "status": "error",
+            "error": type(exc).__name__,
+        }
+        append_prime_auto_compact_event(event)
+        logger.warning("prime manual compact failed", exc_info=True)
+        return {"ok": False, "compacted": False, **event}
 
 
 def _run_compact_service_turn(registry: Any, session_id: str, timeout: float) -> dict:

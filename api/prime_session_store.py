@@ -32,6 +32,7 @@ class PrimeSessionStore:
             "messages": [],
             "pending_turn": None,
             "journal": [],
+            "settings": {},
         }
 
     def _read_locked(self) -> dict[str, Any]:
@@ -49,12 +50,15 @@ class PrimeSessionStore:
         data.setdefault("messages", [])
         data.setdefault("pending_turn", None)
         data.setdefault("journal", [])
+        data.setdefault("settings", {})
         if not isinstance(data["messages"], list):
             data["messages"] = []
         if not isinstance(data["journal"], list):
             data["journal"] = []
         if data["pending_turn"] is not None and not isinstance(data["pending_turn"], dict):
             data["pending_turn"] = None
+        if not isinstance(data["settings"], dict):
+            data["settings"] = {}
         return data
 
     def _write_locked(self, data: dict[str, Any]) -> None:
@@ -128,6 +132,37 @@ class PrimeSessionStore:
             self._append_journal_locked(data, "turn_finished", {"stream_id": stream_id})
             self._write_locked(data)
 
+    def cancel_turn(self, stream_id: str, reason: str = "cancelled") -> dict[str, Any]:
+        with self._lock:
+            data = self._read_locked()
+            pending = data.get("pending_turn")
+            partial = ""
+            promoted = False
+            if pending and pending.get("stream_id") == stream_id:
+                partial = str(pending.get("partial_output") or "")
+                if partial:
+                    data["messages"].append(
+                        {
+                            "role": "assistant",
+                            "content": partial,
+                            "created_at": time.time(),
+                            "interrupted": True,
+                            "cancelled": True,
+                            "error": str(reason or "cancelled"),
+                        }
+                    )
+                    promoted = True
+                pending["cancelled"] = True
+                pending["error"] = str(reason or "cancelled")
+                data["pending_turn"] = None
+            self._append_journal_locked(
+                data,
+                "turn_cancelled",
+                {"stream_id": stream_id, "partial_chars": len(partial), "promoted": promoted},
+            )
+            self._write_locked(data)
+            return {"stream_id": stream_id, "partial_output": partial, "promoted": promoted}
+
     def mark_error(self, stream_id: str, error: str, *, keep_pending: bool = True) -> None:
         with self._lock:
             data = self._read_locked()
@@ -161,8 +196,39 @@ class PrimeSessionStore:
                 "session_id": PRIME_SESSION_ID,
                 "messages": list(data.get("messages") or []),
                 "pending_turn": pending,
+                "settings": dict(data.get("settings") or {}),
                 "updated_at": data.get("updated_at"),
             }
+
+    def live(self) -> dict[str, Any]:
+        with self._lock:
+            data = self._read_locked()
+            pending = data.get("pending_turn")
+            return {
+                "ok": True,
+                "active": bool(pending),
+                "pending_turn": dict(pending) if isinstance(pending, dict) else None,
+                "settings": dict(data.get("settings") or {}),
+                "updated_at": data.get("updated_at"),
+            }
+
+    def get_settings(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._read_locked().get("settings") or {})
+
+    def update_settings(self, **values: Any) -> dict[str, Any]:
+        with self._lock:
+            data = self._read_locked()
+            settings = dict(data.get("settings") or {})
+            for key, value in values.items():
+                if value is None:
+                    settings.pop(key, None)
+                else:
+                    settings[key] = value
+            data["settings"] = settings
+            self._append_journal_locked(data, "settings_updated", {"keys": sorted(values.keys())})
+            self._write_locked(data)
+            return dict(settings)
 
 
 _STORE = PrimeSessionStore()

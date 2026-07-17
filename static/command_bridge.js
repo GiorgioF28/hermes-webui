@@ -235,14 +235,16 @@
 /* action buttons: floating just OUTSIDE the chat card, to its right */
 '.cb-actions{position:absolute;z-index:4;left:calc(22px + min(430px,40vw) + 14px);bottom:30px;display:flex;flex-direction:column;gap:9px;}',
 '.cb-hero.cb-collapsed .cb-actions{opacity:0;pointer-events:none;}',
-'.cb-mic,.cb-attach,.cb-send{width:40px;height:40px;border-radius:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;border:1px solid var(--cb-line);',
+'.cb-mic,.cb-attach,.cb-send,.cb-stop{width:40px;height:40px;border-radius:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;border:1px solid var(--cb-line);',
 '  background:linear-gradient(180deg,rgba(12,14,20,.7),rgba(8,9,14,.82));backdrop-filter:blur(8px);box-shadow:0 10px 30px -16px rgba(0,0,0,.9);}',
-'.cb-mic,.cb-attach{color:var(--cb-muted);}',
-'.cb-mic:hover,.cb-attach:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
+'.cb-mic,.cb-attach,.cb-stop{color:var(--cb-muted);}',
+'.cb-mic:hover,.cb-attach:hover,.cb-stop:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
 '.cb-mic.cb-on{color:#1a0c00;background:var(--cb-accent);border-color:var(--cb-accent);animation:cb-micpulse 1.1s ease-in-out infinite;}',
 '@keyframes cb-micpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,106,0,.5);}50%{box-shadow:0 0 0 6px rgba(255,106,0,0);}}',
 '.cb-send{background:var(--cb-accent);border-color:var(--cb-accent);color:#1a0c00;font-weight:700;}',
 '.cb-send:hover{filter:brightness(1.12);}',
+'.cb-stop{color:#ffccaa;border-color:rgba(255,106,0,.35);}',
+'.cb-stop[hidden]{display:none;}',
 '@media(max-width:680px){.cb-actions{left:auto;right:12px;bottom:auto;top:74px;}}',
 '.cb-attbar{display:flex;flex-wrap:wrap;gap:8px;padding:0 16px;}',
 '.cb-attbar:not(:empty){padding-top:12px;}',
@@ -440,6 +442,8 @@
           '<input id="cbFile" type="file" accept="image/*" multiple style="display:none">' +
           '<button class="cb-send" type="submit" form="cbForm" id="cbSend" aria-label="Invia" title="Invia">' +
             '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></button>' +
+          '<button class="cb-stop" type="button" id="cbStop" aria-label="Stop" title="Stop" hidden>' +
+            '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>' +
         '</div>' +
         '<section class="cb-stage" id="cbStage">' +
           '<button class="cb-stage-toggle" id="cbToggle" title="Comprimi chat" aria-label="Comprimi chat">' +
@@ -506,6 +510,8 @@
     if (pasteInput) pasteInput.addEventListener('paste', onPrimePaste);
     var vb = $('cbVoice');
     if (vb) vb.addEventListener('click', function () { userEngaged = true; toggleVoice(); });
+    var stop = $('cbStop');
+    if (stop) stop.addEventListener('click', cancelPrimeTurn);
     wireBrainControls();
     refreshBrainState();
     primeSay('prime', 'Plancia online. Ti dò il quadro quando vuoi — chiedimi "cosa serve oggi?" e ti briffo. Premi il microfono per parlarmi a voce.');
@@ -517,6 +523,7 @@
   var voiceOn = true, userEngaged = false, _ctx = null, _an = null, _raf = null, _cur = null, _rec = null, _ttsActive = false;
   var _listening = false, _micTimer = null;
   var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
+  var _primeStreaming = false, _primeStreamId = null, _primeLiveTimer = null;
 
   function renderBrainState(state) {
     state = state || {};
@@ -558,6 +565,90 @@
     if (claude) claude.addEventListener('click', function () { setBrain({ action: 'set', lead: 'claude' }); });
     if (codex) codex.addEventListener('click', function () { setBrain({ action: 'set', lead: 'codex' }); });
     if (auto) auto.addEventListener('click', function () { setBrain({ action: 'auto' }); });
+  }
+
+  function setPrimeStreaming(active, streamId) {
+    _primeStreaming = !!active;
+    _primeStreamId = active ? (streamId || _primeStreamId || null) : null;
+    var stop = $('cbStop'); if (stop) stop.hidden = !_primeStreaming;
+  }
+
+  function cancelPrimeTurn() {
+    if (!_primeStreaming && !_primeStreamId) return;
+    var stop = $('cbStop'); if (stop) stop.disabled = true;
+    apiPost('/api/bridge/prime/cancel', { stream_id: _primeStreamId || '' })
+      .then(function (d) {
+        sysNote((d && d.promoted) ? 'Turno interrotto: ho salvato il parziale.' : 'Stop inviato a Hermes Prime.');
+      })
+      .catch(function (e) { sysNote('Stop fallito: ' + (e && e.message ? e.message : 'errore')); })
+      .then(function () { if (stop) stop.disabled = false; setPrimeStreaming(false, null); });
+  }
+
+  function startPrimeLivePolling(node) {
+    if (_primeLiveTimer) clearInterval(_primeLiveTimer);
+    var lastText = node ? (node.textContent || '') : '';
+    var tick = function () {
+      api('/api/bridge/prime/live').then(function (data) {
+        var pending = data && data.pending_turn;
+        if (!data || !data.active || !pending) {
+          if (_primeLiveTimer) clearInterval(_primeLiveTimer);
+          _primeLiveTimer = null;
+          setPrimeStreaming(false, null);
+          return;
+        }
+        setPrimeStreaming(true, pending.stream_id || data.stream_id || null);
+        var partial = String(pending.partial_output || '');
+        if (node && partial && partial !== lastText) {
+          lastText = partial;
+          node.textContent = partial;
+          node.classList.add('cb-recovered');
+        }
+      }).catch(function () {});
+    };
+    tick();
+    _primeLiveTimer = setInterval(tick, 2000);
+  }
+
+  function formatCompactTokens(n) {
+    n = Number(n) || 0;
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
+    return String(n);
+  }
+
+  function handlePrimeSlashCommand(text) {
+    var raw = String(text || '').trim();
+    if (!raw || raw.charAt(0) !== '/') return false;
+    var parts = raw.split(/\s+/);
+    var cmd = parts[0].toLowerCase();
+    var args = raw.slice(parts[0].length).trim();
+    if (cmd === '/compact') {
+      sysNote('Compressione contesto Prime in corso...');
+      apiPost('/api/bridge/prime/compact', {})
+        .then(function (d) {
+          var before = formatCompactTokens(d && d.before_tokens);
+          var after = (d && d.after_tokens_unknown) ? '?' : formatCompactTokens(d && d.after_tokens);
+          sysNote('Contesto compresso: ' + before + ' -> ' + after + ' token.');
+        })
+        .catch(function (e) { sysNote('/compact: ' + (e && e.message ? e.message : 'errore')); });
+      return true;
+    }
+    if (cmd === '/model') {
+      var body = args ? { action: 'set', model: args } : { action: 'get' };
+      apiPost('/api/bridge/prime/model', body)
+        .then(function (d) {
+          sysNote('Model Prime: ' + (d.model || '?') + (d.model_provider ? (' @ ' + d.model_provider) : '') + (d.profile ? (' · profilo ' + d.profile) : ''));
+        })
+        .catch(function (e) { sysNote('/model: ' + (e && e.message ? e.message : 'errore')); });
+      return true;
+    }
+    if (cmd === '/workspace') {
+      var payload = args ? { action: 'set', workspace: args } : { action: 'get' };
+      apiPost('/api/bridge/prime/workspace', payload)
+        .then(function (d) { sysNote('Workspace Prime: ' + (d.workspace || '?')); })
+        .catch(function (e) { sysNote('/workspace: ' + (e && e.message ? e.message : 'errore')); });
+      return true;
+    }
+    return false;
   }
 
   // The central petal-core is the primary Voice Orb; the memory planet on the
@@ -1033,6 +1124,7 @@
       if (pending && pending.partial_output) {
         var node = primeSay('prime', pending.partial_output || '');
         if (node) node.classList.add('cb-recovered');
+        if (node) startPrimeLivePolling(node.querySelector('.cb-bubble') || node);
       }
     }).catch(function () {});
   }
@@ -1143,6 +1235,12 @@
     userEngaged = true;
     var inp = $('cbInput'); if (!inp) return;
     var v = inp.value.trim();
+    if (handlePrimeSlashCommand(v)) {
+      inp.value = '';
+      inp.style.height = 'auto';
+      if (window.__cbAutoGrow) window.__cbAutoGrow();
+      return;
+    }
     var ready = pendingAttachments.filter(function (a) { return !!a.path; });
     var stillUp = pendingAttachments.some(function (a) { return !a.path; });
     if (!v && !ready.length) {
@@ -1167,6 +1265,7 @@
     var liveUsage = $('cbLiveUsage');
     if (liveUsage) { liveUsage.hidden = true; liveUsage.textContent = ''; }
     var reply = '', settled = false, speech = { spokenLen: 0 }, finalUsage = null;
+    setPrimeStreaming(true, null);
     var showUsage = function (usage) {
       if (!_hasBridgeUsage(usage)) return;
       finalUsage = usage;
@@ -1179,11 +1278,13 @@
     };
     var showStatus = function (state, tool) {
       var labels = {
+        started: 'in corso',
         queued: 'in coda\u2026',
         reasoning: 'sto ragionando\u2026',
         tool: 'uso lo strumento ' + (tool || '') + '\u2026',
         responding: 'sta scrivendo\u2026',
-        done: '\u2713 completato'
+        done: '\u2713 completato',
+        cancelled: 'interrotto'
       };
       var label = labels[state]; if (!label) return;
       if (statusLine) statusLine.textContent = label;
@@ -1197,6 +1298,7 @@
       if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
       if (finalUsage) showUsage(finalUsage);
       if (liveUsage) liveUsage.hidden = true;
+      setPrimeStreaming(false, null);
       flushSpokenSentences(reply, speech, true);
       if (!_ttsActive) setOrb('idle', 0);
     };
@@ -1215,6 +1317,7 @@
       if (settled) return;
       settled = true;
       if (liveUsage) liveUsage.hidden = true;
+      setPrimeStreaming(false, null);
       if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
       ph = null; bubble = null; statusLine = null;
       sysNote(text);
@@ -1235,6 +1338,11 @@
         done: function (d) {
           if (d && d.usage) showUsage(d.usage);
           if (!reply && d && d.reply) showToken(d.reply);
+          if (d && d.cancelled) {
+            finish('interrotto');
+            if (bubble) bubble.classList.add('cb-recovered');
+            return;
+          }
           if (!reply) showToken('Ricevuto.');
           finish('\u2713 completato');
           if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
