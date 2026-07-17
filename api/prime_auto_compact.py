@@ -61,6 +61,49 @@ def compact_threshold_tokens() -> int:
     return _env_int("PRIME_COMPACT_THRESHOLD", DEFAULT_THRESHOLD_TOKENS)
 
 
+def compact_threshold_for_model(model_state: dict | None = None) -> int:
+    """Compact threshold scaled to real model context window.
+
+    When the resolved model has a known context window, the threshold is scaled
+    proportionally (default 60k / 200k claude-sonnet base ≈ 30%). This avoids
+    compacting too early on large-context models or too late on small ones.
+
+    Falls back to compact_threshold_tokens() (env-var or 60k default) when the
+    model context length is unknown.
+    """
+    base = compact_threshold_tokens()
+    if base <= 0:
+        return base  # disabled
+    try:
+        cl = _prime_model_context_length(model_state)
+        if cl > 0:
+            # Scale: threshold = 30% of model context, clamped between 30k and 150k.
+            scaled = max(30_000, min(150_000, int(cl * 0.30)))
+            logger.debug(
+                "prime compact threshold scaled: model_ctx=%d scaled=%d base=%d",
+                cl, scaled, base,
+            )
+            return scaled
+    except Exception:
+        logger.debug("prime compact threshold model scaling failed", exc_info=True)
+    return base
+
+
+def _prime_model_context_length(model_state: dict | None = None) -> int:
+    """Resolve the real context window for the Prime model from model metadata."""
+    try:
+        from api.routes import _resolve_prime_model_state, _resolve_context_length_for_session_model
+        state = model_state if isinstance(model_state, dict) else _resolve_prime_model_state()
+        model = str(state.get("model") or "").strip()
+        provider = str(state.get("model_provider") or "").strip()
+        if not model:
+            return 0
+        return _resolve_context_length_for_session_model(model, provider) or 0
+    except Exception:
+        logger.debug("prime model context length lookup failed", exc_info=True)
+        return 0
+
+
 def session_cap_tokens() -> int:
     """Tetto duro della sessione Prime (HERMES_PRIME_SESSION_CAP_TOKENS).
 
