@@ -26,6 +26,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 from contextlib import closing
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from api.agent_sessions import (
     MESSAGING_SOURCES,
@@ -6426,6 +6427,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/approval/pending":
         return _handle_approval_pending(handler, parsed)
 
+    if parsed.path == "/api/bridge/prime/history":
+        return _handle_bridge_prime_history(handler)
+
+    if parsed.path == "/api/bridge/prime/live":
+        return _handle_bridge_prime_live(handler)
+
+    if parsed.path == "/api/bridge/prime/todos":
+        return _handle_bridge_prime_todos(handler)
+
     if parsed.path == "/api/approval/stream":
         return _handle_approval_sse_stream(handler, parsed)
 
@@ -8147,6 +8157,24 @@ def handle_post(handler, parsed) -> bool:
     # ── Clarify (POST) ──
     if parsed.path == "/api/bridge/prime/brief":
         return _handle_bridge_prime_brief(handler, body)
+
+    if parsed.path == "/api/bridge/prime/cancel":
+        return _handle_bridge_prime_cancel(handler, body)
+
+    if parsed.path == "/api/bridge/prime/compact":
+        return _handle_bridge_prime_compact(handler, body)
+
+    if parsed.path == "/api/bridge/prime/model":
+        return _handle_bridge_prime_model(handler, body)
+
+    if parsed.path == "/api/bridge/prime/workspace":
+        return _handle_bridge_prime_workspace(handler, body)
+
+    if parsed.path == "/api/bridge/prime/goal":
+        return _handle_bridge_prime_goal(handler, body)
+
+    if parsed.path == "/api/bridge/prime/tools":
+        return _handle_bridge_prime_tools(handler, body)
 
     if parsed.path == "/api/bridge/prime":
         return _handle_bridge_prime(handler, body)
@@ -11049,7 +11077,124 @@ def _hermes_prime_turn_limits():
     return idle, hard, poll
 
 
+def _prime_store_settings() -> dict:
+    try:
+        from api.prime_session_store import get_prime_session_store
+
+        return get_prime_session_store().get_settings()
+    except Exception:
+        logger.debug("prime settings read failed", exc_info=True)
+        return {}
+
+
+def _prime_workspace_from_settings(settings: dict | None = None) -> Path:
+    settings = settings if isinstance(settings, dict) else _prime_store_settings()
+    candidate = str((settings or {}).get("workspace") or "").strip()
+    try:
+        if candidate:
+            return Path(str(resolve_trusted_workspace(candidate)))
+    except Exception:
+        logger.warning("prime stored workspace invalid, falling back", exc_info=True)
+    try:
+        return Path(str(resolve_trusted_workspace(get_last_workspace())))
+    except Exception:
+        return Path(str(DEFAULT_WORKSPACE))
+
+
+def _prime_profile_model_config(profile: str | None, requested_provider: str | None):
+    if _clean_session_model_provider(requested_provider) or not profile:
+        return None, None
+    try:
+        pseudo = SimpleNamespace(profile=profile)
+        return _read_profile_model_config(pseudo, requested_provider)
+    except Exception:
+        logger.debug("prime profile model config failed", exc_info=True)
+        return None, None
+
+
+def _resolve_prime_model_state(settings: dict | None = None, *, model=None, profile=None) -> dict:
+    settings = dict(settings or _prime_store_settings())
+    requested_model = model if model is not None else settings.get("model")
+    requested_provider = settings.get("model_provider")
+    requested_profile = profile if profile is not None else settings.get("profile")
+    pp_provider, pp_default = _prime_profile_model_config(requested_profile, requested_provider)
+    effective_model, effective_provider, normalized = _resolve_compatible_session_model_state(
+        requested_model,
+        requested_provider,
+        profile_provider=pp_provider,
+        profile_default_model=pp_default,
+        explicit_model_pick=bool(model),
+        prefer_cached_catalog=True,
+    )
+    return {
+        "model": effective_model,
+        "model_provider": effective_provider,
+        "normalized_model": normalized,
+        "profile": requested_profile or None,
+    }
+
+
+def _estimate_prime_history_tokens() -> int:
+    try:
+        from api.prime_session_store import get_prime_session_store
+
+        hist = get_prime_session_store().history()
+        total = 0
+        for msg in hist.get("messages") or []:
+            if not isinstance(msg, dict):
+                continue
+            total += len(str(msg.get("content") or "").split())
+        pending = hist.get("pending_turn") or {}
+        total += len(str(pending.get("partial_output") or "").split())
+        return max(total, 0)
+    except Exception:
+        logger.debug("prime token estimate failed", exc_info=True)
+        return 0
+
+
 _PRIME_TURN_LOCK = threading.Lock()
+_PRIME_ACTIVE_LOCK = threading.RLock()
+_PRIME_ACTIVE_TURN: dict[str, object] = {}
+
+
+def _prime_active_snapshot() -> dict:
+    with _PRIME_ACTIVE_LOCK:
+        return dict(_PRIME_ACTIVE_TURN)
+
+
+def _prime_active_set(**values) -> None:
+    with _PRIME_ACTIVE_LOCK:
+        _PRIME_ACTIVE_TURN.clear()
+        _PRIME_ACTIVE_TURN.update(values)
+
+
+def _prime_active_clear(stream_id: str | None = None) -> None:
+    with _PRIME_ACTIVE_LOCK:
+        if stream_id is None or _PRIME_ACTIVE_TURN.get("stream_id") == stream_id:
+            _PRIME_ACTIVE_TURN.clear()
+
+
+def _request_prime_cancel(stream_id: str | None = None) -> bool:
+    with _PRIME_ACTIVE_LOCK:
+        active = dict(_PRIME_ACTIVE_TURN)
+    if stream_id and active.get("stream_id") and active.get("stream_id") != stream_id:
+        return False
+    cancel_event = active.get("cancel_event")
+    if hasattr(cancel_event, "set"):
+        cancel_event.set()
+    fut = active.get("future")
+    if fut is not None and hasattr(fut, "cancel"):
+        try:
+            fut.cancel()
+        except Exception:
+            logger.debug("prime future cancel failed", exc_info=True)
+    reg = active.get("registry")
+    if reg is not None and hasattr(reg, "close"):
+        try:
+            reg.close("hermes-prime")
+        except Exception:
+            logger.debug("prime registry close during cancel failed", exc_info=True)
+    return bool(active)
 
 
 def _reset_prime_session(reg, fut):
@@ -11094,7 +11239,7 @@ class _ClaudeExhausted(Exception):
         self.reason = reason or ""
 
 
-def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_status=None):
+def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_status=None, model_state=None, stream_id=None):
     """Un turno di Hermes Prime, instradato al capo corrente (Claude o Codex).
 
     Default Claude. Se Claude esaurisce i crediti durante il turno, flippa il
@@ -11133,7 +11278,7 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
     if lead_brain.get_lead(workspace) == lead_brain.LEAD_CODEX:
         return _hermes_prime_reply_codex(message, workspace, attachments, on_token=on_token, on_status=on_status)
     try:
-        return _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status)
+        return _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status, model_state=model_state, stream_id=stream_id)
     except _ClaudeExhausted as ex:
         current = lead_brain.get_lead_state(workspace)
         if current.get("manual"):
@@ -11194,10 +11339,14 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
         raise RuntimeError(f"Codex CLI non ha completato il turno: {detail}") from exc
     if reply and on_token is not None:
         on_token(reply)
-    return {"reply": reply, "delegations": get_background_tasks()}
+    return {
+        "reply": reply,
+        "delegations": get_background_tasks(),
+        "usage": {},
+    }
 
 
-def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=None, on_status=None):
+def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=None, on_status=None, model_state=None, stream_id=None):
     """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
     from api.prime_delegation import get_background_tasks
     from api import lead_brain
@@ -11212,6 +11361,9 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     final = {"text": ""}
     final_usage = {"usage": {}}
     last_state = [None]
+    cancel_event = threading.Event()
+    model_state = dict(model_state or _resolve_prime_model_state())
+    effective_model = str(model_state.get("model") or "claude-fable-5")
 
     # Le foto allegate finiscono nell'inbox 'hermes-prime', già negli add_dirs
     # della sessione Prime: aggiungiamo la nota che gli dice di leggerle con Read.
@@ -11239,6 +11391,12 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     async def _drive(client):
         await client.query(prompt_text)
         async for m in client.receive_response():
+            if cancel_event.is_set():
+                try:
+                    await client.interrupt()
+                except Exception:
+                    pass
+                return
             last_activity[0] = time.monotonic()
             ev = getattr(m, "event", None)
             if isinstance(ev, dict):
@@ -11300,13 +11458,31 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         reg.get_or_create(
             "hermes-prime", cwd=workspace, add_dir=workspace,
             system_prompt=_hermes_prime_system_prompt(workspace),
+            model=effective_model,
         )
         # Start the watchdog only after this HTTP turn owns the Prime session.
         last_activity = [time.monotonic()]
         fut = reg.submit_turn("hermes-prime", _drive)
+        _prime_active_set(
+            stream_id=stream_id,
+            cancel_event=cancel_event,
+            future=fut,
+            registry=reg,
+            workspace=str(workspace),
+            model=effective_model,
+            profile=model_state.get("profile"),
+            started_at=time.time(),
+        )
         started = time.monotonic()
         try:
             while True:
+                if cancel_event.is_set():
+                    timed_out = True
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        logger.debug("prime turn cancel failed", exc_info=True)
+                    break
                 try:
                     fut.result(timeout=poll)
                     break
@@ -11327,11 +11503,14 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         except Exception as turn_exc:
             _reset_prime_session(reg, fut)
             # Crediti Claude finiti a metà turno → segnala l'handoff a Codex.
-            if lead_brain.is_claude_quota_error(turn_exc):
+            if cancel_event.is_set():
+                timed_out = True
+            elif lead_brain.is_claude_quota_error(turn_exc):
                 raise _ClaudeExhausted(
                     partial="".join(parts), reason=f"{type(turn_exc).__name__}",
                 ) from turn_exc
-            raise
+            else:
+                raise
         if not timed_out:
             prime_auto_compact.maybe_auto_compact_prime(
                 reg,
@@ -11353,9 +11532,19 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         if timed_out:
             _reset_prime_session(reg, fut)
     finally:
+        _prime_active_clear(stream_id)
         _PRIME_TURN_LOCK.release()
 
     reply = ("".join(parts).strip() or final["text"].strip())
+    if cancel_event.is_set():
+        if reply and on_token is not None and not parts:
+            on_token(reply)
+        return {
+            "reply": reply,
+            "delegations": get_background_tasks(),
+            "usage": final_usage.get("usage") or {},
+            "cancelled": True,
+        }
     if timed_out and not reply:
         reply = (
             "Ci sto mettendo più del previsto su questa. Dammi un attimo e "
@@ -11363,11 +11552,306 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         )
     if reply and not parts and on_token is not None:
         on_token(reply)
-    return {"reply": reply, "delegations": get_background_tasks()}
+    return {
+        "reply": reply,
+        "delegations": get_background_tasks(),
+        "usage": final_usage.get("usage") or {},
+    }
 
+
+
+def _handle_bridge_prime_history(handler):
+    """GET /api/bridge/prime/history -- persisted Command Bridge transcript."""
+    try:
+        from api.prime_session_store import get_prime_session_store
+        return j(handler, get_prime_session_store().history(), extra_headers={"Cache-Control": "no-store"}) or True
+    except Exception as exc:
+        logger.exception("bridge prime history failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
+def _handle_bridge_prime_live(handler):
+    """GET /api/bridge/prime/live -- current Prime turn for light reconnect polling."""
+    try:
+        from api.prime_session_store import get_prime_session_store
+
+        payload = get_prime_session_store().live()
+        active = _prime_active_snapshot()
+        if active:
+            payload["active"] = True
+            payload["stream_id"] = active.get("stream_id")
+            payload["started_at"] = active.get("started_at")
+            payload["model"] = active.get("model")
+            payload["profile"] = active.get("profile")
+        elif payload.get("pending_turn"):
+            payload["stream_id"] = payload["pending_turn"].get("stream_id")
+        return j(handler, payload, extra_headers={"Cache-Control": "no-store"}) or True
+    except Exception as exc:
+        logger.exception("bridge prime live failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
+def _handle_bridge_prime_cancel(handler, body):
+    """POST /api/bridge/prime/cancel -- stop the active Prime turn and preserve partial."""
+    from api.prime_session_store import get_prime_session_store
+
+    requested = str((body or {}).get("stream_id") or "").strip() or None
+    live = get_prime_session_store().live()
+    pending = live.get("pending_turn") or {}
+    stream_id = requested or pending.get("stream_id")
+    if not stream_id:
+        return j(handler, {"ok": True, "cancelled": False, "reason": "idle"})
+    signalled = _request_prime_cancel(stream_id)
+    cancelled = get_prime_session_store().cancel_turn(stream_id, "cancelled by user")
+    return j(handler, {"ok": True, "cancelled": True, "signalled": signalled, **cancelled})
+
+
+def _handle_bridge_prime_compact(handler, body):
+    """POST /api/bridge/prime/compact -- manual Prime /compact service turn."""
+    if _prime_active_snapshot():
+        return bad(handler, "Prime is still streaming; stop or wait before compacting.", 409)
+    try:
+        from api import prime_auto_compact
+
+        before = _estimate_prime_history_tokens()
+        result = prime_auto_compact.compact_prime_now(
+            _get_claude_registry(),
+            session_id="hermes-prime",
+            before_tokens=before,
+            reason="manual",
+        )
+        status = 200 if result.get("ok") else 500
+        return j(handler, result, status=status)
+    except Exception as exc:
+        logger.exception("bridge prime compact failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500)
+
+
+def _handle_bridge_prime_model(handler, body):
+    """POST /api/bridge/prime/model -- get/set Prime model/profile resolver state."""
+    from api.prime_session_store import get_prime_session_store
+
+    store = get_prime_session_store()
+    action = str((body or {}).get("action") or "get").strip().lower()
+    settings = store.get_settings()
+    if action == "set":
+        model = str((body or {}).get("model") or "").strip()
+        profile = str((body or {}).get("profile") or "").strip()
+        if profile:
+            try:
+                from api.profiles import _PROFILE_ID_RE
+
+                if profile != "default" and not _PROFILE_ID_RE.fullmatch(profile):
+                    return bad(handler, "invalid profile", 400)
+            except ImportError:
+                pass
+        new_values = {}
+        if "model" in (body or {}):
+            new_values["model"] = model or None
+        if "profile" in (body or {}):
+            new_values["profile"] = profile or None
+        settings = store.update_settings(**new_values)
+        try:
+            _get_claude_registry().close("hermes-prime")
+        except Exception:
+            logger.debug("prime model change close failed", exc_info=True)
+    state = _resolve_prime_model_state(settings)
+    return j(handler, {"ok": True, **state, "settings": settings})
+
+
+def _handle_bridge_prime_workspace(handler, body):
+    """POST /api/bridge/prime/workspace -- get/set Prime working directory."""
+    from api.prime_session_store import get_prime_session_store
+
+    store = get_prime_session_store()
+    action = str((body or {}).get("action") or "get").strip().lower()
+    settings = store.get_settings()
+    if action == "set":
+        raw = str((body or {}).get("workspace") or "").strip()
+        if not raw:
+            return bad(handler, "workspace is required")
+        selected = None
+        try:
+            data = load_workspaces()
+            q = raw.lower()
+            for ws in data or []:
+                name = str(ws.get("name") or "")
+                path = str(ws.get("path") or "")
+                if q in name.lower() or q in path.lower():
+                    selected = path
+                    break
+        except Exception:
+            selected = None
+        try:
+            workspace = str(resolve_trusted_workspace(selected or raw))
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        settings = store.update_settings(workspace=workspace)
+        try:
+            _get_claude_registry().close("hermes-prime")
+        except Exception:
+            logger.debug("prime workspace change close failed", exc_info=True)
+    workspace = str(_prime_workspace_from_settings(settings))
+    return j(handler, {"ok": True, "workspace": workspace, "settings": settings})
+
+
+def _handle_bridge_prime_todos(handler):
+    """GET /api/bridge/prime/todos -- current Prime todo snapshot (P2-B cold-load)."""
+    try:
+        from api.prime_session_store import get_prime_session_store
+        snapshot = get_prime_session_store().get_todo_snapshot()
+        if snapshot is None:
+            return j(handler, {"ok": True, "todo_state": None}, extra_headers={"Cache-Control": "no-store"}) or True
+        return j(handler, {"ok": True, "todo_state": snapshot}, extra_headers={"Cache-Control": "no-store"}) or True
+    except Exception as exc:
+        logger.exception("bridge prime todos failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
+def _handle_bridge_prime_goal(handler, body):
+    """POST /api/bridge/prime/goal -- get/set the Prime session goal (P2-A)."""
+    from api.prime_session_store import get_prime_session_store
+    store = get_prime_session_store()
+    action = str((body or {}).get("action") or "get").strip().lower()
+    if action == "set":
+        goal = str((body or {}).get("goal") or "").strip()
+        store.update_settings(goal=goal or None)
+        return j(handler, {"ok": True, "goal": goal or None})
+    settings = store.get_settings()
+    return j(handler, {"ok": True, "goal": settings.get("goal")})
+
+
+def _handle_bridge_prime_tools(handler, body):
+    """POST /api/bridge/prime/tools -- get/set Prime toolset preset (P3-C)."""
+    from api.prime_session_store import get_prime_session_store
+    from api.prime_lean_preset import VALID_TOOLSETS, TOOLSET_DEFAULT, resolve_prime_toolset
+    store = get_prime_session_store()
+    action = str((body or {}).get("action") or "get").strip().lower()
+    if action == "set":
+        requested = str((body or {}).get("toolset") or "").strip().lower()
+        if requested not in VALID_TOOLSETS:
+            return bad(handler, f"toolset must be one of: {', '.join(sorted(VALID_TOOLSETS))}", 400)
+        store.update_settings(toolset=requested)
+        try:
+            _get_claude_registry().close("hermes-prime")
+        except Exception:
+            logger.debug("prime toolset change close failed", exc_info=True)
+        return j(handler, {"ok": True, "toolset": requested, "presets": sorted(VALID_TOOLSETS)})
+    settings = store.get_settings()
+    current = resolve_prime_toolset(settings)
+    return j(handler, {"ok": True, "toolset": current, "presets": sorted(VALID_TOOLSETS)})
+
+
+def _call_hermes_prime_reply_for_bridge(msg, workspace, *, attachments, on_token, on_status, model_state, stream_id):
+    import inspect
+
+    kwargs = {
+        "attachments": attachments,
+        "on_token": on_token,
+        "on_status": on_status,
+    }
+    try:
+        params = inspect.signature(_hermes_prime_reply).parameters
+        if "model_state" in params:
+            kwargs["model_state"] = model_state
+        if "stream_id" in params:
+            kwargs["stream_id"] = stream_id
+    except (TypeError, ValueError):
+        kwargs["model_state"] = model_state
+        kwargs["stream_id"] = stream_id
+    return _hermes_prime_reply(msg, workspace, **kwargs)
+
+
+def _bridge_prime_subscribe_queue(kind: str):
+    if kind == "approval":
+        try:
+            return _approval_sse_subscribe("hermes-prime")
+        except Exception:
+            return None
+    if kind == "clarify" and clarify_sse_subscribe is not None:
+        try:
+            return clarify_sse_subscribe("hermes-prime")
+        except Exception:
+            return None
+    return None
+
+
+def _bridge_prime_unsubscribe_queue(kind: str, q) -> None:
+    if q is None:
+        return
+    try:
+        if kind == "approval":
+            _approval_sse_unsubscribe("hermes-prime", q)
+        elif kind == "clarify" and clarify_sse_unsubscribe is not None:
+            clarify_sse_unsubscribe("hermes-prime", q)
+    except Exception:
+        logger.debug("bridge prime %s unsubscribe failed", kind, exc_info=True)
+
+
+def _bridge_prime_register_gateway_approval(emit):
+    """Register the existing tools.approval gateway callback for Prime."""
+    try:
+        from tools.approval import register_gateway_notify, unregister_gateway_notify
+    except Exception:
+        return None
+
+    def _notify(approval_data):
+        pending = dict(approval_data or {})
+        emit("approval", {"pending": pending, "pending_count": 1})
+
+    try:
+        register_gateway_notify("hermes-prime", _notify)
+    except Exception:
+        logger.debug("bridge prime approval notify registration failed", exc_info=True)
+        return None
+    return unregister_gateway_notify
+
+
+def _bridge_prime_start_attention_relays(emit):
+    """Forward existing approval/clarify queues into the bridge POST SSE stream."""
+    stop_event = threading.Event()
+    relays = []
+
+    def _start(kind: str):
+        q = _bridge_prime_subscribe_queue(kind)
+        if q is None:
+            return
+
+        def _drain():
+            try:
+                while not stop_event.is_set():
+                    try:
+                        payload = q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if payload is None:
+                        break
+                    emit(kind, payload)
+            finally:
+                _bridge_prime_unsubscribe_queue(kind, q)
+
+        t = threading.Thread(target=_drain, name=f"bridge-prime-{kind}-relay", daemon=True)
+        t.start()
+        relays.append(t)
+
+    _start("approval")
+    _start("clarify")
+    unregister_gateway_approval = _bridge_prime_register_gateway_approval(emit)
+
+    def _stop():
+        stop_event.set()
+        for t in relays:
+            t.join(timeout=1.0)
+        if unregister_gateway_approval is not None:
+            try:
+                unregister_gateway_approval("hermes-prime")
+            except Exception:
+                logger.debug("bridge prime approval notify unregister failed", exc_info=True)
+
+    return _stop
 
 def _handle_bridge_prime(handler, body):
-    """POST /api/bridge/prime — stream Hermes Prime tokens, then delegations."""
+    """POST /api/bridge/prime -- stream Hermes Prime tokens, then delegations."""
     msg = str((body or {}).get("message") or "").strip()
     raw_atts = (body or {}).get("attachments")
     attachments = [a for a in raw_atts if isinstance(a, dict)] if isinstance(raw_atts, list) else []
@@ -11375,7 +11859,23 @@ def _handle_bridge_prime(handler, body):
         return bad(handler, "message is required")
     if not msg and attachments:
         msg = "(L'utente ha allegato file senza testo.)"
-    workspace = Path(str(DEFAULT_WORKSPACE))
+    from api.prime_session_store import get_prime_session_store
+
+    store = get_prime_session_store()
+    incoming_settings = {}
+    if "model" in (body or {}):
+        incoming_settings["model"] = str((body or {}).get("model") or "").strip() or None
+    if "profile" in (body or {}):
+        incoming_settings["profile"] = str((body or {}).get("profile") or "").strip() or None
+    if incoming_settings:
+        store.update_settings(**incoming_settings)
+        try:
+            _get_claude_registry().close("hermes-prime")
+        except Exception:
+            logger.debug("prime inline model/profile change close failed", exc_info=True)
+    settings = store.get_settings()
+    workspace = _prime_workspace_from_settings(settings)
+    model_state = _resolve_prime_model_state(settings)
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
@@ -11386,42 +11886,105 @@ def _handle_bridge_prime(handler, body):
 
     from api.streaming import _sse
 
+    stream_id = store.begin_turn(msg, attachments)
+    write_lock = threading.Lock()
+
+    def emit(event, payload):
+        with write_lock:
+            _sse(handler, event, payload)
+
+    def _token(text):
+        store.append_token(stream_id, text)
+        emit("token", {"text": text})
+
+    def _on_tool_call(tool_name: str, result_summary: str = "") -> None:
+        """Emit SSE tool event and journal the tool call (P2-C)."""
+        try:
+            store.append_tool_event(stream_id, tool_name, result_summary)
+            emit("tool", {"tool": tool_name, "summary": result_summary, "stream_id": stream_id})
+        except Exception:
+            logger.debug("bridge prime tool event emit failed", exc_info=True)
+
+    stop_attention_relays = _bridge_prime_start_attention_relays(emit)
+
     try:
-        result = _hermes_prime_reply(
-            msg,
-            workspace,
-            attachments=attachments,
-            on_token=lambda text: _sse(handler, "token", {"text": text}),
-            on_status=lambda status: _sse(handler, "status", status),
-        )
-        _sse(handler, "status", {"state": "done"})
-        _sse(
-            handler,
+        try:
+            from api.streaming import _bind_turn_session_identity
+        except Exception:
+            _bind_turn_session_identity = None
+        if _bind_turn_session_identity is None:
+            result = _call_hermes_prime_reply_for_bridge(
+                msg,
+                workspace,
+                attachments=attachments,
+                on_token=_token,
+                on_status=lambda status: emit("status", status),
+                model_state=model_state,
+                stream_id=stream_id,
+            )
+        else:
+            with _bind_turn_session_identity("hermes-prime"):
+                result = _call_hermes_prime_reply_for_bridge(
+                    msg,
+                    workspace,
+                    attachments=attachments,
+                    on_token=_token,
+                    on_status=lambda status: emit("status", status),
+                    model_state=model_state,
+                    stream_id=stream_id,
+                )
+        if result.get("cancelled"):
+            cancelled = store.cancel_turn(stream_id, "cancelled by user")
+            emit("status", {"state": "cancelled", "cancelled": True})
+            emit(
+                "done",
+                {
+                    "reply": cancelled.get("partial_output") or result.get("reply") or "",
+                    "delegations": result.get("delegations", []),
+                    "usage": result.get("usage") or {},
+                    "cancelled": True,
+                },
+            )
+            return True
+        emit("status", {"state": "done"})
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        if usage:
+            emit("usage", {"usage": usage})
+        reply = result["reply"] or "Ricevuto."
+        store.finish_turn(stream_id, reply, usage=usage)
+        # P2-B: try to extract and persist todo state from the standard session
+        try:
+            from api.todo_state import derive_todo_state
+            hist = store.history()
+            snap = derive_todo_state(hist.get("messages") or [])
+            if snap is not None:
+                store.update_todo_snapshot(snap)
+        except Exception:
+            logger.debug("bridge prime todo snapshot update failed", exc_info=True)
+        emit(
             "done",
             {
-                "reply": result["reply"] or "Ricevuto.",
+                "reply": reply,
                 "delegations": result.get("delegations", []),
+                "usage": usage,
             },
         )
     except _CLIENT_DISCONNECT_ERRORS:
-        # Può essere il browser che se ne va (non possiamo farci nulla) oppure il
-        # bridge/sottoprocesso che chiude la pipe mentre il client è ancora lì.
-        # Proviamo comunque a chiudere lo stream con un evento terminale: se il
-        # socket è davvero morto la write fallisce e la ignoriamo. Così l'utente
-        # non resta col generico "risposta interrotta".
+        store.mark_error(stream_id, "client disconnected", keep_pending=True)
         try:
-            _sse(handler, "error", {
-                "error": "La sessione di Hermes Prime si è interrotta. Riprova tra poco.",
+            emit("error", {
+                "error": "La sessione di Hermes Prime si e interrotta. Riprova tra poco.",
                 "branch": bridge_errors.TRANSPORT_CUT,
                 "hint": bridge_errors.classify(bridge_errors.TRANSPORT_CUT)["hint"],
             })
         except _CLIENT_DISCONNECT_ERRORS:
             pass
     except Exception as exc:
+        store.mark_error(stream_id, _sanitize_error(exc), keep_pending=True)
         logger.exception("hermes prime reply failed")
         info = bridge_errors.classify(exc)
         try:
-            _sse(handler, "error", {
+            emit("error", {
                 "error": info["message"],
                 "branch": info["branch"],
                 "hint": info["hint"],
@@ -11429,6 +11992,8 @@ def _handle_bridge_prime(handler, body):
             })
         except _CLIENT_DISCONNECT_ERRORS:
             pass
+    finally:
+        stop_attention_relays()
     return True
 
 
@@ -14579,7 +15144,7 @@ def _get_claude_registry():
             from api.ask_user_tool import build_ask_user_server
             from api.upload import _session_attachment_dir
 
-            async def _factory(session_id, *, cwd, add_dir, system_prompt):
+            async def _factory(session_id, *, cwd, add_dir, system_prompt, model=None):
                 _add_dirs = [str(add_dir)] if add_dir else []
                 try:
                     _att = _session_attachment_dir(session_id)
@@ -14599,7 +15164,7 @@ def _get_claude_registry():
                     system_prompt=system_prompt,
                     permission_mode="bypassPermissions",
                     include_partial_messages=True,
-                    model="claude-fable-5",
+                    model=str(model or "claude-fable-5"),
                     mcp_servers=_mcp,
                     allowed_tools=_allowed,
                     # Isolate the bridge from the user's global Claude Code config:

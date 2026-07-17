@@ -576,11 +576,18 @@ def test_server():
     import time as _time
     _time.sleep(0.5)  # brief pause to let the port release
 
-    # Clean slate
+    # Clean slate  (Windows: live server may hold logs/agent.log open; skip locked)
+    def _win_ignore_locked(func, path, exc_info):
+        exc = exc_info[1]
+        # PermissionError = file held open; OSError 145 = dir not empty after skips
+        if isinstance(exc, (PermissionError, OSError)):
+            return  # locked by live server — skip silently
+        raise exc
+
     if TEST_STATE_DIR.exists():
-        shutil.rmtree(TEST_STATE_DIR)
-    TEST_STATE_DIR.mkdir(parents=True)
-    TEST_WORKSPACE.mkdir(parents=True)
+        shutil.rmtree(TEST_STATE_DIR, onerror=_win_ignore_locked)
+    TEST_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    TEST_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
     # Symlink real skills into test home so skill-related tests work,
     # but all write-heavy state stays isolated.

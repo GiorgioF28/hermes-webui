@@ -49,6 +49,94 @@
     }
     node.textContent = String(text || '');
   }
+  function _fmtCompactTokens(value) {
+    var n = Number(value) || 0;
+    if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
+    return String(Math.max(0, Math.round(n)));
+  }
+  function _usageInputTokens(usage) { usage = usage || {}; return Number(usage.input_tokens || 0); }
+  function _usageOutputTokens(usage) { usage = usage || {}; return Number(usage.output_tokens || 0); }
+  function _usageCacheReadTokens(usage) { usage = usage || {}; return Number(usage.cache_read_tokens || usage.cache_read_input_tokens || 0); }
+  function _usageCacheWriteTokens(usage) { usage = usage || {}; return Number(usage.cache_write_tokens || usage.cache_creation_input_tokens || 0); }
+  function _usageCost(usage) {
+    usage = usage || {};
+    var n = Number(usage.estimated_cost_usd != null ? usage.estimated_cost_usd : usage.estimated_cost);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  function _hasBridgeUsage(usage) {
+    return !!(usage && (_usageInputTokens(usage) || _usageOutputTokens(usage) || _usageCacheReadTokens(usage) || _usageCacheWriteTokens(usage) || _usageCost(usage)));
+  }
+  function _formatAssistantUsageBadge(usage) {
+    if (!_hasBridgeUsage(usage)) return '';
+    var parts = ['in ' + _fmtCompactTokens(_usageInputTokens(usage)), 'out ' + _fmtCompactTokens(_usageOutputTokens(usage))];
+    var cacheRead = _usageCacheReadTokens(usage), cacheWrite = _usageCacheWriteTokens(usage);
+    if (cacheRead || cacheWrite) parts.push('cache ' + _fmtCompactTokens(cacheRead) + '/' + _fmtCompactTokens(cacheWrite));
+    var cost = _usageCost(usage);
+    if (cost) parts.push('~$' + (cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)));
+    return parts.join(' · ');
+  }
+  function _formatLiveUsage(usage) {
+    if (!_hasBridgeUsage(usage)) return '';
+    return 'in ' + _fmtCompactTokens(_usageInputTokens(usage)) + ' · out ' + _fmtCompactTokens(_usageOutputTokens(usage));
+  }
+  function _formatQuotaMoneyShort(value) {
+    var n = Number(value);
+    if (!Number.isFinite(n)) return '';
+    if (Math.abs(n) >= 100) return '$' + n.toFixed(0);
+    if (Math.abs(n) >= 10) return '$' + n.toFixed(1);
+    return '$' + n.toFixed(2);
+  }
+  function _formatQuotaPercentShort(value) {
+    var n = Number(value);
+    if (!Number.isFinite(n)) return '';
+    return Math.max(0, Math.min(100, n)).toFixed(0) + '%';
+  }
+  function _renderTokenQuotaPill(status) {
+    var pill = $('cbQuotaPill');
+    if (!pill) return;
+    if (window._showQuotaChip !== true || !status) {
+      pill.hidden = true; pill.textContent = ''; pill.removeAttribute('title'); return;
+    }
+    var label = '';
+    var title = status.message || 'Provider usage loaded';
+    if (Number.isFinite(Number(status.primary_used_percent))) {
+      var usedPct = Math.max(0, Math.min(100, Number(status.primary_used_percent)));
+      label = 'Codex ' + Math.max(0, 100 - usedPct).toFixed(0) + '%';
+      title = 'Codex quota';
+      if (status.plan) title += ' - ' + status.plan;
+      if (status.primary_resets_at) title += ' - resets ' + status.primary_resets_at;
+    }
+    var accountLimits = status.account_limits || null;
+    if (!label && accountLimits && Array.isArray(accountLimits.windows) && accountLimits.windows.length) {
+      var w = accountLimits.windows.find(function (x) { return x && Number.isFinite(Number(x.remaining_percent)); }) || accountLimits.windows[0];
+      var remainingPct = _formatQuotaPercentShort(w && w.remaining_percent);
+      if (remainingPct) label = (status.display_name || status.provider || 'Codex') + ' ' + remainingPct;
+    }
+    if (!label && status.quota) {
+      var remainingMoney = _formatQuotaMoneyShort(status.quota.limit_remaining);
+      if (remainingMoney) {
+        label = (status.display_name || status.provider || 'Codex') + ' ' + remainingMoney;
+        var used = _formatQuotaMoneyShort(status.quota.usage), limit = _formatQuotaMoneyShort(status.quota.limit);
+        var bits = [];
+        if (used) bits.push('used ' + used);
+        if (limit) bits.push('limit ' + limit);
+        if (bits.length) title += ' - ' + bits.join(' · ');
+      }
+    }
+    if (!label) { pill.hidden = true; pill.textContent = ''; pill.removeAttribute('title'); return; }
+    pill.textContent = label; pill.title = title; pill.hidden = false;
+  }
+  var _cbQuotaRefreshInFlight = false;
+  function pollTokenQuota() {
+    if (window._showQuotaChip !== true) { _renderTokenQuotaPill(null); return Promise.resolve(); }
+    if (_cbQuotaRefreshInFlight) return Promise.resolve();
+    _cbQuotaRefreshInFlight = true;
+    return api('/api/usage/limits')
+      .then(function (d) { _renderTokenQuotaPill(d && (d.codex || d.provider || d)); })
+      .catch(function () { _renderTokenQuotaPill(null); })
+      .then(function () { _cbQuotaRefreshInFlight = false; });
+  }
 
   /* ── fonts + scoped styles ─────────────────────────────────────────────── */
   function injectFonts() {
@@ -102,6 +190,8 @@
 '.cb-dot{width:9px;height:9px;border-radius:50%;background:var(--cb-accent);box-shadow:0 0 10px var(--cb-accent);flex:0 0 auto;}',
 '.cb-chat-name{font-family:var(--cb-disp);font-weight:700;letter-spacing:.14em;font-size:13px;text-transform:uppercase;}',
 '.cb-chat-role{font-family:var(--cb-mono);font-size:10px;color:var(--cb-muted);letter-spacing:.08em;margin-top:1px;}',
+'.cb-quota{font-family:var(--cb-mono);font-size:9px;color:var(--cb-accent-2);border:1px solid var(--cb-accent-dim);border-radius:999px;padding:4px 7px;background:rgba(255,106,0,.07);white-space:nowrap;}',
+'.cb-quota[hidden]{display:none;}',
 '.cb-voicetoggle{background:transparent;border:1px solid var(--cb-line);color:var(--cb-faint);border-radius:8px;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;transition:.15s;}',
 '.cb-voicetoggle:hover{color:var(--cb-text);}',
 '.cb-voicetoggle.cb-on{color:var(--cb-accent);border-color:var(--cb-accent-dim);}',
@@ -118,6 +208,19 @@
 '.cb-msg.cb-from-user{align-self:flex-end;text-align:right;color:#fff;}',
 '.cb-msg.cb-from-prime .cb-bubble{color:var(--cb-text);}',
 '.cb-prime-status{margin-top:5px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.06em;color:var(--cb-faint);}',
+'.cb-msg-foot{margin-top:7px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.04em;color:var(--cb-faint);}',
+'.cb-msg-foot[hidden]{display:none;}',
+'.cb-attention-card{align-self:stretch;max-width:100%;border:1px solid rgba(255,160,92,.34);background:rgba(36,24,14,.86);border-radius:8px;padding:12px;color:var(--cb-text);box-shadow:0 16px 34px rgba(0,0,0,.26);}',
+'.cb-attention-k{font-family:var(--cb-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--cb-accent);margin-bottom:6px;}',
+'.cb-attention-title{font-size:13px;font-weight:700;color:#fff;margin-bottom:7px;}',
+'.cb-attention-body{font-size:12px;line-height:1.45;color:var(--cb-muted);white-space:pre-wrap;word-break:break-word;}',
+'.cb-attention-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px;}',
+'.cb-attention-actions button{border:1px solid var(--cb-line);background:rgba(255,255,255,.06);color:#fff;border-radius:7px;padding:7px 9px;font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;cursor:pointer;}',
+'.cb-attention-actions button:hover{border-color:rgba(255,255,255,.28);background:rgba(255,255,255,.1);}',
+'.cb-attention-actions button.deny{color:#ffb4a8;border-color:rgba(255,107,92,.34);}',
+'.cb-attention-input{width:100%;box-sizing:border-box;margin-top:9px;border:1px solid var(--cb-line);border-radius:8px;background:rgba(0,0,0,.2);color:#fff;padding:9px;font-size:12px;}',
+'.cb-choice.selected{border-color:var(--cb-accent);box-shadow:0 0 0 2px rgba(255,106,0,.16) inset;}',
+'.cb-recovered .cb-who:after{content:" · recuperato";color:var(--cb-accent);}',
 '.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:2px solid var(--cb-accent);',
 '  border-radius:8px;padding:9px 12px;background:rgba(255,106,0,.05);font-family:var(--cb-mono);font-size:11px;}',
 '.cb-deleg b{color:var(--cb-accent-2);font-weight:600;}',
@@ -127,17 +230,21 @@
 '  color:var(--cb-text);font-family:var(--cb-sans);font-size:13.5px;line-height:1.45;padding:11px 14px;outline:none;',
 '  resize:none;display:block;min-height:44px;max-height:46vh;overflow-y:auto;}',
 '.cb-chat-input textarea:focus{border-color:var(--cb-accent);box-shadow:0 0 0 3px rgba(255,106,0,.12);}',
+'.cb-live-usage{align-self:center;margin-left:10px;font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-faint);white-space:nowrap;}',
+'.cb-live-usage[hidden]{display:none;}',
 /* action buttons: floating just OUTSIDE the chat card, to its right */
 '.cb-actions{position:absolute;z-index:4;left:calc(22px + min(430px,40vw) + 14px);bottom:30px;display:flex;flex-direction:column;gap:9px;}',
 '.cb-hero.cb-collapsed .cb-actions{opacity:0;pointer-events:none;}',
-'.cb-mic,.cb-attach,.cb-send{width:40px;height:40px;border-radius:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;border:1px solid var(--cb-line);',
+'.cb-mic,.cb-attach,.cb-send,.cb-stop{width:40px;height:40px;border-radius:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;flex:0 0 auto;border:1px solid var(--cb-line);',
 '  background:linear-gradient(180deg,rgba(12,14,20,.7),rgba(8,9,14,.82));backdrop-filter:blur(8px);box-shadow:0 10px 30px -16px rgba(0,0,0,.9);}',
-'.cb-mic,.cb-attach{color:var(--cb-muted);}',
-'.cb-mic:hover,.cb-attach:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
+'.cb-mic,.cb-attach,.cb-stop{color:var(--cb-muted);}',
+'.cb-mic:hover,.cb-attach:hover,.cb-stop:hover{color:var(--cb-text);border-color:var(--cb-accent);}',
 '.cb-mic.cb-on{color:#1a0c00;background:var(--cb-accent);border-color:var(--cb-accent);animation:cb-micpulse 1.1s ease-in-out infinite;}',
 '@keyframes cb-micpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,106,0,.5);}50%{box-shadow:0 0 0 6px rgba(255,106,0,0);}}',
 '.cb-send{background:var(--cb-accent);border-color:var(--cb-accent);color:#1a0c00;font-weight:700;}',
 '.cb-send:hover{filter:brightness(1.12);}',
+'.cb-stop{color:#ffccaa;border-color:rgba(255,106,0,.35);}',
+'.cb-stop[hidden]{display:none;}',
 '@media(max-width:680px){.cb-actions{left:auto;right:12px;bottom:auto;top:74px;}}',
 '.cb-attbar{display:flex;flex-wrap:wrap;gap:8px;padding:0 16px;}',
 '.cb-attbar:not(:empty){padding-top:12px;}',
@@ -290,6 +397,18 @@
 '.cb-client em{display:block;margin-top:3px;font-style:normal;font-family:var(--cb-mono);font-size:10px;line-height:1.35;color:var(--cb-muted);}',
 /* white -> fluo-orange gradient on display titles (the accent the user wanted on TEXT) */
 '.cb-chat-name,.cb-sec-title,.cb-card-name{background:linear-gradient(90deg,#ffffff 0%,#ffffff 26%,#ffb673 62%,var(--cb-accent) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
+/* todos strip (P2-B) */
+'.cb-todos{border-top:1px solid var(--cb-line2);padding:10px 14px;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:4px;}',
+'.cb-todos-head{font-family:var(--cb-mono);font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:var(--cb-faint);margin-bottom:4px;}',
+'.cb-todo-row{display:flex;align-items:baseline;gap:6px;font-size:11.5px;line-height:1.3;}',
+'.cb-todo-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto;margin-top:4px;}',
+'.cb-todo-dot.pending{background:#f5c518;}.cb-todo-dot.in_progress{background:#48c774;}.cb-todo-dot.completed{background:var(--cb-faint);text-decoration:line-through;}.cb-todo-dot.cancelled{background:var(--cb-faint);opacity:.4;}',
+'.cb-todo-txt{color:var(--cb-text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+'.cb-todo-status{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);white-space:nowrap;}',
+/* tool cards (P2-C) */
+'.cb-tool-card{align-self:flex-start;max-width:96%;border:1px solid rgba(100,180,255,.22);border-left:2px solid rgba(100,180,255,.5);border-radius:6px;padding:6px 10px;background:rgba(40,60,80,.28);font-family:var(--cb-mono);font-size:10.5px;line-height:1.35;}',
+'.cb-tool-name{color:rgba(140,210,255,.9);font-weight:600;letter-spacing:.08em;}',
+'.cb-tool-summary{color:var(--cb-muted);margin-top:2px;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px;}',
 ''
     ].join('\n');
     var s = el('style'); s.id = 'cb-styles'; s.textContent = css;
@@ -311,6 +430,7 @@
             '<div class="cb-chat-name">Hermes Prime</div>' +
             '<div class="cb-chat-role">chief of staff · voce attiva</div>' +
           '</div>' +
+            '<span class="cb-quota" id="cbQuotaPill" hidden></span>' +
             '<div class="cb-brainctl" id="cbBrainCtl" aria-label="Seleziona brain di Hermes Prime">' +
               '<button type="button" class="cb-brainbtn" id="cbBrainClaude" data-lead="claude" title="Usa Claude cloud e pinna la scelta">CLOUD</button>' +
               '<button type="button" class="cb-brainbtn" id="cbBrainAuto" data-action="auto" title="Riabilita il failover automatico">AUTO</button>' +
@@ -320,9 +440,14 @@
               '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg></button>' +
           '</div>' +
           '<div class="cb-chat-log" id="cbLog"></div>' +
+          '<div class="cb-todos" id="cbTodos" hidden>' +
+            '<div class="cb-todos-head">Todo attivi</div>' +
+            '<div id="cbTodoList"></div>' +
+          '</div>' +
           '<div class="cb-attbar" id="cbAtt"></div>' +
           '<form class="cb-chat-input" id="cbForm" autocomplete="off">' +
             '<textarea id="cbInput" rows="1" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime"></textarea>' +
+            '<span class="cb-live-usage" id="cbLiveUsage" hidden></span>' +
           '</form>' +
         '</aside>' +
         '<div class="cb-actions" id="cbActions">' +
@@ -333,6 +458,8 @@
           '<input id="cbFile" type="file" accept="image/*" multiple style="display:none">' +
           '<button class="cb-send" type="submit" form="cbForm" id="cbSend" aria-label="Invia" title="Invia">' +
             '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></button>' +
+          '<button class="cb-stop" type="button" id="cbStop" aria-label="Stop" title="Stop" hidden>' +
+            '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>' +
         '</div>' +
         '<section class="cb-stage" id="cbStage">' +
           '<button class="cb-stage-toggle" id="cbToggle" title="Comprimi chat" aria-label="Comprimi chat">' +
@@ -399,6 +526,8 @@
     if (pasteInput) pasteInput.addEventListener('paste', onPrimePaste);
     var vb = $('cbVoice');
     if (vb) vb.addEventListener('click', function () { userEngaged = true; toggleVoice(); });
+    var stop = $('cbStop');
+    if (stop) stop.addEventListener('click', cancelPrimeTurn);
     wireBrainControls();
     refreshBrainState();
     primeSay('prime', 'Plancia online. Ti dò il quadro quando vuoi — chiedimi "cosa serve oggi?" e ti briffo. Premi il microfono per parlarmi a voce.');
@@ -410,6 +539,7 @@
   var voiceOn = true, userEngaged = false, _ctx = null, _an = null, _raf = null, _cur = null, _rec = null, _ttsActive = false;
   var _listening = false, _micTimer = null;
   var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
+  var _primeStreaming = false, _primeStreamId = null, _primeLiveTimer = null;
 
   function renderBrainState(state) {
     state = state || {};
@@ -453,6 +583,151 @@
     if (auto) auto.addEventListener('click', function () { setBrain({ action: 'auto' }); });
   }
 
+  function setPrimeStreaming(active, streamId) {
+    _primeStreaming = !!active;
+    _primeStreamId = active ? (streamId || _primeStreamId || null) : null;
+    var stop = $('cbStop'); if (stop) stop.hidden = !_primeStreaming;
+  }
+
+  function cancelPrimeTurn() {
+    if (!_primeStreaming && !_primeStreamId) return;
+    var stop = $('cbStop'); if (stop) stop.disabled = true;
+    apiPost('/api/bridge/prime/cancel', { stream_id: _primeStreamId || '' })
+      .then(function (d) {
+        sysNote((d && d.promoted) ? 'Turno interrotto: ho salvato il parziale.' : 'Stop inviato a Hermes Prime.');
+      })
+      .catch(function (e) { sysNote('Stop fallito: ' + (e && e.message ? e.message : 'errore')); })
+      .then(function () { if (stop) stop.disabled = false; setPrimeStreaming(false, null); });
+  }
+
+  function startPrimeLivePolling(node) {
+    if (_primeLiveTimer) clearInterval(_primeLiveTimer);
+    var lastText = node ? (node.textContent || '') : '';
+    var tick = function () {
+      api('/api/bridge/prime/live').then(function (data) {
+        var pending = data && data.pending_turn;
+        if (!data || !data.active || !pending) {
+          if (_primeLiveTimer) clearInterval(_primeLiveTimer);
+          _primeLiveTimer = null;
+          setPrimeStreaming(false, null);
+          return;
+        }
+        setPrimeStreaming(true, pending.stream_id || data.stream_id || null);
+        var partial = String(pending.partial_output || '');
+        if (node && partial && partial !== lastText) {
+          lastText = partial;
+          node.textContent = partial;
+          node.classList.add('cb-recovered');
+        }
+      }).catch(function () {});
+    };
+    tick();
+    _primeLiveTimer = setInterval(tick, 2000);
+  }
+
+  function formatCompactTokens(n) {
+    n = Number(n) || 0;
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
+    return String(n);
+  }
+
+  function handlePrimeSlashCommand(text) {
+    var raw = String(text || '').trim();
+    if (!raw || raw.charAt(0) !== '/') return false;
+    var parts = raw.split(/\s+/);
+    var cmd = parts[0].toLowerCase();
+    var args = raw.slice(parts[0].length).trim();
+    if (cmd === '/compact') {
+      sysNote('Compressione contesto Prime in corso...');
+      apiPost('/api/bridge/prime/compact', {})
+        .then(function (d) {
+          var before = formatCompactTokens(d && d.before_tokens);
+          var after = (d && d.after_tokens_unknown) ? '?' : formatCompactTokens(d && d.after_tokens);
+          sysNote('Contesto compresso: ' + before + ' -> ' + after + ' token.');
+        })
+        .catch(function (e) { sysNote('/compact: ' + (e && e.message ? e.message : 'errore')); });
+      return true;
+    }
+    if (cmd === '/model') {
+      var body = args ? { action: 'set', model: args } : { action: 'get' };
+      apiPost('/api/bridge/prime/model', body)
+        .then(function (d) {
+          sysNote('Model Prime: ' + (d.model || '?') + (d.model_provider ? (' @ ' + d.model_provider) : '') + (d.profile ? (' · profilo ' + d.profile) : ''));
+        })
+        .catch(function (e) { sysNote('/model: ' + (e && e.message ? e.message : 'errore')); });
+      return true;
+    }
+    if (cmd === '/workspace') {
+      var payload = args ? { action: 'set', workspace: args } : { action: 'get' };
+      apiPost('/api/bridge/prime/workspace', payload)
+        .then(function (d) { sysNote('Workspace Prime: ' + (d.workspace || '?')); })
+        .catch(function (e) { sysNote('/workspace: ' + (e && e.message ? e.message : 'errore')); });
+      return true;
+    }
+    if (cmd === '/interrupt') {
+      cancelPrimeTurn();
+      sysNote('Turno interrotto.');
+      return true;
+    }
+    if (cmd === '/compress') {
+      return handlePrimeSlashCommand('/compact');
+    }
+    if (cmd === '/steer') {
+      if (!args) { sysNote('/steer: inserisci il nuovo messaggio di ridirezionamento.'); return true; }
+      if (_primeStreaming) {
+        cancelPrimeTurn();
+        setTimeout(function () {
+          var inp = $('cbInput');
+          if (inp) { inp.value = args; if (window.__cbAutoGrow) window.__cbAutoGrow(); onPrimeSubmit({ preventDefault: function () {} }); }
+        }, 200);
+      } else {
+        var inp = $('cbInput');
+        if (inp) { inp.value = args; if (window.__cbAutoGrow) window.__cbAutoGrow(); onPrimeSubmit({ preventDefault: function () {} }); }
+      }
+      return true;
+    }
+    if (cmd === '/retry') {
+      api('/api/bridge/prime/history').then(function (data) {
+        var msgs = (data && data.messages) || [];
+        var lastUser = null;
+        for (var i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === 'user') { lastUser = msgs[i].content; break; }
+        }
+        if (!lastUser) { sysNote('/retry: nessun messaggio utente nella storia.'); return; }
+        var inp = $('cbInput');
+        if (inp) { inp.value = lastUser; if (window.__cbAutoGrow) window.__cbAutoGrow(); onPrimeSubmit({ preventDefault: function () {} }); }
+      }).catch(function () { sysNote('/retry: impossibile leggere la storia.'); });
+      return true;
+    }
+    if (cmd === '/goal') {
+      if (!args) {
+        apiPost('/api/bridge/prime/goal', { action: 'get' })
+          .then(function (d) { sysNote('Goal attivo: ' + (d.goal || '(non impostato)')); })
+          .catch(function (e) { sysNote('/goal: ' + (e && e.message ? e.message : 'errore')); });
+      } else {
+        apiPost('/api/bridge/prime/goal', { action: 'set', goal: args })
+          .then(function (d) { sysNote('Goal impostato: ' + (d.goal || args)); })
+          .catch(function (e) { sysNote('/goal: ' + (e && e.message ? e.message : 'errore')); });
+      }
+      return true;
+    }
+    if (cmd === '/tools') {
+      if (!args) {
+        apiPost('/api/bridge/prime/tools', { action: 'get' })
+          .then(function (d) { sysNote('Toolset: ' + (d.toolset || 'lean') + ' · preset disponibili: ' + ((d.presets || []).join(', '))); })
+          .catch(function (e) { sysNote('/tools: ' + (e && e.message ? e.message : 'errore')); });
+      } else {
+        apiPost('/api/bridge/prime/tools', { action: 'set', toolset: args })
+          .then(function (d) { sysNote('Toolset impostato: ' + d.toolset + ' (attivo dal prossimo turno)'); })
+          .catch(function (e) { sysNote('/tools: ' + (e && e.message ? e.message : 'errore')); });
+      }
+      return true;
+    }
+    // Unknown /command → help (NOT sent to Prime)
+    sysNote('Comandi disponibili: /compact, /compress, /model, /workspace, /interrupt, /steer <testo>, /retry, /goal [testo], /tools [preset]');
+    return true;
+  }
+
   // The central petal-core is the primary Voice Orb; the memory planet on the
   // right echoes the same state so its heart pulses in sync with the voice.
   function setOrb(state, amp) {
@@ -471,6 +746,39 @@
     m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
   }
+
+  // ── Todos panel (P2-B) ──────────────────────────────────────────────────
+  function renderTodos(snapshot) {
+    var panel = $('cbTodos'), list = $('cbTodoList');
+    if (!panel || !list) return;
+    var todos = (snapshot && snapshot.todos) || [];
+    if (!todos.length) { panel.hidden = true; return; }
+    var active = todos.filter(function (t) { return t && t.status !== 'cancelled' && t.status !== 'completed'; });
+    if (!active.length) { panel.hidden = true; return; }
+    panel.hidden = false;
+    list.innerHTML = active.slice(0, 12).map(function (t) {
+      var status = String(t.status || 'pending');
+      var dot = 'cb-todo-dot ' + status;
+      return '<div class="cb-todo-row"><span class="' + dot + '"></span><span class="cb-todo-txt">' + esc(t.content || t.id || '') + '</span><span class="cb-todo-status">' + esc(status) + '</span></div>';
+    }).join('');
+  }
+
+  function loadPrimeTodos() {
+    api('/api/bridge/prime/todos').then(function (d) {
+      if (d && d.todo_state) renderTodos(d.todo_state);
+    }).catch(function () {});
+  }
+
+  // ── Tool cards (P2-C) ──────────────────────────────────────────────────
+  function renderToolCard(toolName, summary) {
+    var log = $('cbLog'); if (!log) return;
+    var card = el('div', 'cb-tool-card');
+    card.innerHTML = '<span class="cb-tool-name">' + esc(toolName || 'tool') + '</span>' +
+      (summary ? '<div class="cb-tool-summary">' + esc(summary) + '</div>' : '');
+    var _sb = nearBottom(log); log.appendChild(card); if (_sb) log.scrollTop = log.scrollHeight;
+    return card;
+  }
+
   // delegation cards: update-in-place by id (in_corso -> ok/errore), background-aware
   var _cbTasks = {};
   function renderTask(t) {
@@ -542,6 +850,8 @@
     api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {});
   }
   function startWorklogPolling() { if (!_cbWorklogTimer) _cbWorklogTimer = setInterval(pollWorklog, 60000); }
+  var _cbQuotaTimer = null;
+  function startQuotaPolling() { if (!_cbQuotaTimer) _cbQuotaTimer = setInterval(pollTokenQuota, 120000); }
   // Strip markdown so the TTS doesn't read "asterisco asterisco" etc.
   function cleanForSpeech(t) {
     return String(t || '')
@@ -564,7 +874,7 @@
   function pendingBubble() {
     var log = $('cbLog'); if (!log) return null;
     var m = el('div', 'cb-msg cb-from-prime');
-    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status">in corso</div>';
+    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status">in corso</div><div class="cb-msg-foot" hidden></div>';
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight; return m;
   }
   function streamPrimeResponse(response, handlers) {
@@ -809,9 +1119,127 @@
       label = imgs ? '<em style="opacity:.6">foto allegata</em>' : '';
     }
     m.innerHTML = '<div class="cb-who">' + (who === 'user' ? 'tu' : 'hermes prime') + '</div>' +
-      '<div class="cb-bubble">' + label + imgs + '</div>';
+      '<div class="cb-bubble">' + label + imgs + '</div>' +
+      (who === 'prime' ? '<div class="cb-msg-foot" hidden></div>' : '');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
     if (who === 'prime' && userEngaged) speak(text);
+    return m;
+  }
+
+  var _cbHistoryLoaded = false;
+  function normalizeAttentionPending(payload) {
+    if (!payload) return null;
+    return payload.pending || payload;
+  }
+  function appendAttentionCard(kind, pending) {
+    var log = $('cbLog'); if (!log || !pending) return null;
+    var card = el('div', 'cb-attention-card cb-' + kind + '-card');
+    var label = kind === 'approval' ? 'approval richiesta' : 'chiarimento richiesto';
+    var title = kind === 'approval'
+      ? (pending.description || 'Conferma azione richiesta')
+      : (pending.question || 'Serve una scelta');
+    var body = kind === 'approval'
+      ? (pending.command || pending.pattern_key || '')
+      : ((pending.choices_offered || []).join('\n') || '');
+    card.innerHTML =
+      '<div class="cb-attention-k">' + esc(label) + '</div>' +
+      '<div class="cb-attention-title">' + esc(title) + '</div>' +
+      (body ? '<div class="cb-attention-body">' + esc(body) + '</div>' : '') +
+      '<div class="cb-attention-actions"></div>';
+    var _sb = nearBottom(log); log.appendChild(card); if (_sb) log.scrollTop = log.scrollHeight;
+    return card;
+  }
+  function renderBridgeApprovalCard(payload) {
+    var pending = normalizeAttentionPending(payload);
+    if (!pending) { sysNote('Approval bridge risolta o scaduta.'); return; }
+    var card = appendAttentionCard('approval', pending); if (!card) return;
+    var actions = card.querySelector('.cb-attention-actions');
+    [
+      ['once', 'Allow once', ''],
+      ['session', 'Allow session', ''],
+      ['deny', 'Deny', 'deny']
+    ].forEach(function (item) {
+      var b = el('button', item[2]); b.type = 'button'; b.textContent = item[1];
+      b.addEventListener('click', function () {
+        actions.querySelectorAll('button').forEach(function (btn) { btn.disabled = true; });
+        apiPost('/api/approval/respond', {
+          session_id: 'hermes-prime',
+          approval_id: pending.approval_id || '',
+          choice: item[0]
+        }).then(function () {
+          card.querySelector('.cb-attention-k').textContent = 'approval inviata';
+        }).catch(function (e) {
+          sysNote('Approval: ' + (e && e.message ? e.message : 'errore risposta'));
+          actions.querySelectorAll('button').forEach(function (btn) { btn.disabled = false; });
+        });
+      });
+      actions.appendChild(b);
+    });
+  }
+  function renderBridgeClarifyCard(payload) {
+    var pending = normalizeAttentionPending(payload);
+    if (!pending) { sysNote('Clarify bridge risolto o scaduto.'); return; }
+    var card = appendAttentionCard('clarify', pending); if (!card) return;
+    var actions = card.querySelector('.cb-attention-actions');
+    var selected = [];
+    var questions = Array.isArray(pending.questions) ? pending.questions : null;
+    var choices = questions && questions.length ? (questions[0].options || []).map(function (o) { return o.label || o.value || o.text || ''; }) : (pending.choices_offered || []);
+    choices.filter(Boolean).forEach(function (choice) {
+      var b = el('button', 'cb-choice'); b.type = 'button'; b.textContent = choice;
+      b.addEventListener('click', function () {
+        var multi = questions && questions[0] && questions[0].multiSelect;
+        if (multi) {
+          var idx = selected.indexOf(choice);
+          if (idx >= 0) selected.splice(idx, 1); else selected.push(choice);
+          b.classList.toggle('selected', selected.indexOf(choice) >= 0);
+        } else {
+          selected = [choice];
+          actions.querySelectorAll('.cb-choice').forEach(function (btn) { btn.classList.remove('selected'); });
+          b.classList.add('selected');
+        }
+      });
+      actions.appendChild(b);
+    });
+    var input = el('input', 'cb-attention-input');
+    input.type = 'text';
+    input.placeholder = 'Risposta libera';
+    card.appendChild(input);
+    var send = el('button', ''); send.type = 'button'; send.textContent = 'Send';
+    send.addEventListener('click', function () {
+      var answer = input.value.trim() || selected.join(', ');
+      if (!answer) { input.focus(); return; }
+      send.disabled = true;
+      apiPost('/api/clarify/respond', {
+        session_id: 'hermes-prime',
+        clarify_id: pending.clarify_id || '',
+        response: answer
+      }).then(function () {
+        card.querySelector('.cb-attention-k').textContent = 'chiarimento inviato';
+      }).catch(function (e) {
+        send.disabled = false;
+        sysNote('Clarify: ' + (e && e.message ? e.message : 'errore risposta'));
+      });
+    });
+    actions.appendChild(send);
+  }
+  function loadPrimeHistory() {
+    if (_cbHistoryLoaded) return Promise.resolve();
+    _cbHistoryLoaded = true;
+    return api('/api/bridge/prime/history').then(function (data) {
+      var log = $('cbLog'); if (!log) return;
+      (data.messages || []).forEach(function (m) {
+        primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '');
+      });
+      var pending = data.pending_turn;
+      if (pending && pending.partial_output) {
+        var node = primeSay('prime', pending.partial_output || '');
+        if (node) node.classList.add('cb-recovered');
+        if (node) startPrimeLivePolling(node.querySelector('.cb-bubble') || node);
+      }
+      (data.tool_events || []).forEach(function (ev) {
+        if (ev && ev.tool) renderToolCard(ev.tool, ev.summary || '');
+      });
+    }).catch(function () {});
   }
   /* ── Allegati foto per Hermes Prime ─────────────────────────────────────── */
   var pendingAttachments = []; // { name, path, url, type, size }
@@ -920,6 +1348,12 @@
     userEngaged = true;
     var inp = $('cbInput'); if (!inp) return;
     var v = inp.value.trim();
+    if (handlePrimeSlashCommand(v)) {
+      inp.value = '';
+      inp.style.height = 'auto';
+      if (window.__cbAutoGrow) window.__cbAutoGrow();
+      return;
+    }
     var ready = pendingAttachments.filter(function (a) { return !!a.path; });
     var stillUp = pendingAttachments.some(function (a) { return !a.path; });
     if (!v && !ready.length) {
@@ -940,14 +1374,30 @@
     var ph = pendingBubble();
     var bubble = ph ? ph.querySelector('.cb-bubble') : null;
     var statusLine = ph ? ph.querySelector('.cb-prime-status') : null;
-    var reply = '', settled = false, speech = { spokenLen: 0 };
+    var footLine = ph ? ph.querySelector('.cb-msg-foot') : null;
+    var liveUsage = $('cbLiveUsage');
+    if (liveUsage) { liveUsage.hidden = true; liveUsage.textContent = ''; }
+    var reply = '', settled = false, speech = { spokenLen: 0 }, finalUsage = null;
+    setPrimeStreaming(true, null);
+    var showUsage = function (usage) {
+      if (!_hasBridgeUsage(usage)) return;
+      finalUsage = usage;
+      var liveText = _formatLiveUsage(usage);
+      if (liveUsage && liveText) { liveUsage.textContent = liveText; liveUsage.hidden = false; }
+      if (footLine && window._showTokenUsage === true) {
+        var badge = _formatAssistantUsageBadge(usage);
+        if (badge) { footLine.textContent = badge; footLine.hidden = false; }
+      }
+    };
     var showStatus = function (state, tool) {
       var labels = {
+        started: 'in corso',
         queued: 'in coda\u2026',
         reasoning: 'sto ragionando\u2026',
         tool: 'uso lo strumento ' + (tool || '') + '\u2026',
         responding: 'sta scrivendo\u2026',
-        done: '\u2713 completato'
+        done: '\u2713 completato',
+        cancelled: 'interrotto'
       };
       var label = labels[state]; if (!label) return;
       if (statusLine) statusLine.textContent = label;
@@ -959,6 +1409,9 @@
       settled = true;
       if (statusLine) statusLine.textContent = label || '\u2713 completato';
       if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
+      if (finalUsage) showUsage(finalUsage);
+      if (liveUsage) liveUsage.hidden = true;
+      setPrimeStreaming(false, null);
       flushSpokenSentences(reply, speech, true);
       if (!_ttsActive) setOrb('idle', 0);
     };
@@ -976,6 +1429,8 @@
     var fail = function (text) {
       if (settled) return;
       settled = true;
+      if (liveUsage) liveUsage.hidden = true;
+      setPrimeStreaming(false, null);
       if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
       ph = null; bubble = null; statusLine = null;
       sysNote(text);
@@ -990,8 +1445,19 @@
       return streamPrimeResponse(r, {
         status: function (d) { showStatus(d && d.state, d && d.tool); },
         token: function (d) { showToken(d && d.text); },
+        usage: function (d) { showUsage(d && d.usage); },
+        approval: function (d) { renderBridgeApprovalCard(d); },
+        clarify: function (d) { renderBridgeClarifyCard(d); },
+        todo: function (d) { renderTodos(d); },
+        tool: function (d) { if (d && d.tool) renderToolCard(d.tool, d.summary || ''); },
         done: function (d) {
+          if (d && d.usage) showUsage(d.usage);
           if (!reply && d && d.reply) showToken(d.reply);
+          if (d && d.cancelled) {
+            finish('interrotto');
+            if (bubble) bubble.classList.add('cb-recovered');
+            return;
+          }
           if (!reply) showToken('Ricevuto.');
           finish('\u2713 completato');
           if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
@@ -1604,10 +2070,14 @@
   /* ── entry point (called by switchPanel) ───────────────────────────────── */
   window.loadCommandBridge = function () {
     if (!BUILT) { if (!build()) return Promise.resolve(); }
+    loadPrimeHistory();
+    loadPrimeTodos();
     refresh();
     startTaskPolling();
     startAgentsPolling();
     startWorklogPolling();
+    startQuotaPolling();
+    pollTokenQuota();
     return Promise.resolve();
   };
 })();

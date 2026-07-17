@@ -55,3 +55,43 @@ def build_lean_system_prompt(append_parts: list[str]) -> str | dict:
     logger.info("prime_lean_preset: system prompt %d chars ≈ %d token (lean)",
                 len(full_text), before_tokens)
     return full_text
+
+
+# ── Toolset presets (P3-C, bridge-parity-p2) ─────────────────────────────
+
+TOOLSET_LEAN = "lean"
+TOOLSET_FULL = "full"
+TOOLSET_READONLY = "readonly"
+TOOLSET_DEFAULT = TOOLSET_LEAN
+VALID_TOOLSETS = frozenset({TOOLSET_LEAN, TOOLSET_FULL, TOOLSET_READONLY})
+
+
+def resolve_prime_toolset(settings: dict | None = None) -> str:
+    """Return the active toolset name from settings, defaulting to lean."""
+    ts = str((settings or {}).get("toolset") or TOOLSET_DEFAULT).strip().lower()
+    return ts if ts in VALID_TOOLSETS else TOOLSET_DEFAULT
+
+
+def build_lean_system_prompt_with_toolset(
+    append_parts: list[str],
+    toolset: str = TOOLSET_DEFAULT,
+) -> str | dict:
+    """Like build_lean_system_prompt but respects the configured toolset.
+
+    lean (default): current lean preset — no change from P1 behaviour.
+    full: lean persona + append note that all tools are available.
+    readonly: lean persona + append note restricting to read-only tools.
+
+    The actual tool list sent to the model is controlled by the caller
+    (routes._hermes_prime_reply); this function only adjusts the system prompt
+    to set the right expectation for the model.
+    """
+    toolset = toolset if toolset in VALID_TOOLSETS else TOOLSET_DEFAULT
+    extra_note = ""
+    if toolset == TOOLSET_FULL:
+        extra_note = "\n\n[Toolset attivo: FULL — tutti gli strumenti disponibili sono abilitati.]"
+    elif toolset == TOOLSET_READONLY:
+        extra_note = "\n\n[Toolset attivo: READONLY — usa solo strumenti di lettura (Read, Grep, Glob, WebFetch, WebSearch). Non usare strumenti che scrivono o modificano file o chiamate esterne.]"
+    if extra_note:
+        append_parts = list(append_parts) + [extra_note]
+    return build_lean_system_prompt(append_parts)
