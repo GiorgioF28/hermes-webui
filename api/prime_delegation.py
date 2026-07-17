@@ -170,6 +170,7 @@ def _load_bg_tasks(workspace: str) -> None:
         for tid, rec in latest.items():
             if tid in _BG_TASKS:
                 continue
+            changed = False
             # Una delega rimasta "in_corso" prima del riavvio non gira piu':
             # marcala interrotta cosi' si vede che si era bloccata (token/crash).
             if rec.get("status") == "in_corso":
@@ -179,7 +180,17 @@ def _load_bg_tasks(workspace: str) -> None:
                 # resterebbe visibile per sempre come card fantasma (bug d53/d81).
                 if not rec.get("finished"):
                     rec["finished"] = rec.get("started") or time.time()
+                changed = True
+            if rec.get("librarian_status") == "in_corso":
+                rec["librarian_status"] = "interrotta"
+                rec["librarian_output"] = (
+                    str(rec.get("librarian_output") or "").strip()
+                    or "[librarian interrotto dal riavvio - non ri-eseguire automaticamente]"
+                )
+                changed = True
             _BG_TASKS[tid] = dict(rec)
+            if changed:
+                _persist_bg_task(tid, workspace)
         # Riallinea il contatore id per non riusare un "dN" gia' presente.
         used = [int(str(k)[1:]) for k in _BG_TASKS if str(k).startswith("d") and str(k)[1:].isdigit()]
         if used:

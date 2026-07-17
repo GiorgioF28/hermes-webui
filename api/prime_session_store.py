@@ -22,6 +22,7 @@ class PrimeSessionStore:
     def __init__(self, path: Path | None = None):
         self.path = path or (Path(SESSION_DIR) / "_bridge_prime_session.json")
         self._lock = threading.RLock()
+        self.recover_stale_pending_turn("interrupted by WebUI restart")
 
     def _empty(self) -> dict[str, Any]:
         now = time.time()
@@ -73,6 +74,40 @@ class PrimeSessionStore:
         journal.append({"ts": time.time(), "event": event, **payload})
         if len(journal) > 500:
             del journal[:-500]
+
+    def recover_stale_pending_turn(self, reason: str = "interrupted by WebUI restart") -> bool:
+        """Close a persisted in-flight Prime turn on cold load.
+
+        WebUI-owned Prime execution cannot survive a process restart. Keeping a
+        pending turn visible after load makes the browser/SDK treat stale work as
+        live; promote any partial text to an interrupted assistant message and
+        clear the pending marker instead.
+        """
+        with self._lock:
+            data = self._read_locked()
+            pending = data.get("pending_turn")
+            if not isinstance(pending, dict):
+                return False
+            stream_id = str(pending.get("stream_id") or "")
+            partial = str(pending.get("partial_output") or "")
+            if partial:
+                data["messages"].append(
+                    {
+                        "role": "assistant",
+                        "content": partial,
+                        "created_at": time.time(),
+                        "interrupted": True,
+                        "error": str(reason or "interrupted by WebUI restart"),
+                    }
+                )
+            data["pending_turn"] = None
+            self._append_journal_locked(
+                data,
+                "turn_interrupted_on_restart",
+                {"stream_id": stream_id, "partial_chars": len(partial)},
+            )
+            self._write_locked(data)
+            return True
 
     def begin_turn(self, message: str, attachments: list[dict] | None = None) -> str:
         stream_id = uuid.uuid4().hex

@@ -11389,7 +11389,7 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         logger.debug("prime turn: memory retrieval failed", exc_info=True)
 
     async def _drive(client):
-        await client.query(prompt_text)
+        await client.query(prompt_text, session_id=_PRIME_SDK_SESSION_ID)
         async for m in client.receive_response():
             if cancel_event.is_set():
                 try:
@@ -15133,6 +15133,7 @@ def _handle_claude_stream_event(inner, state, emit, *, session_id, clean_msg):
 
 _CLAUDE_REGISTRY = None
 _CLAUDE_REGISTRY_LOCK = threading.Lock()
+_PRIME_SDK_SESSION_ID = f"hermes-prime-{os.getpid()}-{uuid.uuid4().hex}"
 
 
 def _get_claude_registry():
@@ -15174,6 +15175,7 @@ def _get_claude_registry():
                     setting_sources=[],
                     plugins=[],
                     strict_mcp_config=True,
+                    session_id=_PRIME_SDK_SESSION_ID if session_id == "hermes-prime" else None,
                 )
                 client = ClaudeSDKClient(options=options)
                 await client.connect()

@@ -64,8 +64,9 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
         }
 
     class FakeClient:
-        async def query(self, message):
+        async def query(self, message, session_id="default"):
             assert message.endswith("stato di oggi")
+            assert session_id != "default"
 
         async def receive_response(self):
             yield ThinkingMessage()
