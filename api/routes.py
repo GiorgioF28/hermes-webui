@@ -11346,6 +11346,29 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
     }
 
 
+def _prime_claude_safe_model(model_state: dict | None, default: str = "claude-fable-5") -> str:
+    """Modello sicuro per il ramo CLAUDE di Prime.
+
+    GUARDIA (bug 2026-07-18): con lo store Prime senza modello salvato,
+    _resolve_prime_model_state ripiega sul default del catalogo WebUI — che qui
+    e' Codex/GPT ("codex 5.5") — e il CLI Claude muore con "There's an issue
+    with the selected model". Un modello non-Claude NON deve mai arrivare al
+    client Claude: fallback al default Claude.
+    """
+    state = model_state or {}
+    model = str(state.get("model") or "").strip()
+    provider = str(state.get("model_provider") or "").strip().lower()
+    provider_ok = (not provider) or ("anthropic" in provider) or ("claude" in provider)
+    model_ok = (not model) or model.lower().startswith("claude")
+    if not (provider_ok and model_ok):
+        logger.warning(
+            "prime claude-path: modello non-Claude risolto (%s / %s) — fallback a %s",
+            model or "?", provider or "provider assente", default,
+        )
+        return default
+    return model or default
+
+
 def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=None, on_status=None, model_state=None, stream_id=None):
     """One persistent Hermes Prime turn (può delegare ai sotto-agenti)."""
     from api.prime_delegation import get_background_tasks
@@ -11363,7 +11386,7 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     last_state = [None]
     cancel_event = threading.Event()
     model_state = dict(model_state or _resolve_prime_model_state())
-    effective_model = str(model_state.get("model") or "claude-fable-5")
+    effective_model = _prime_claude_safe_model(model_state)
 
     # Le foto allegate finiscono nell'inbox 'hermes-prime', già negli add_dirs
     # della sessione Prime: aggiungiamo la nota che gli dice di leggerle con Read.
