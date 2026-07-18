@@ -428,7 +428,7 @@
         '<aside class="cb-chat" id="cbChat">' +
           '<div class="cb-chat-head"><span class="cb-dot"></span><div style="flex:1;min-width:0">' +
             '<div class="cb-chat-name">Hermes Prime</div>' +
-            '<div class="cb-chat-role">chief of staff · voce attiva</div>' +
+            '<div class="cb-chat-role"></div>' +
           '</div>' +
             '<span class="cb-quota" id="cbQuotaPill" hidden></span>' +
             '<div class="cb-brainctl" id="cbBrainCtl" aria-label="Seleziona brain di Hermes Prime">' +
@@ -572,9 +572,9 @@
     if (codex) codex.classList.toggle('cb-active', lead === 'codex');
     if (auto) auto.classList.toggle('cb-auto-active', !manual);
     var role = document.querySelector('.cb-chat-role');
-    // Mostra il MODELLO vero del capo (es. "Fable 5"), non il generico CLOUD.
+    // Solo il MODELLO vero del capo (es. "Fable 5") — niente chief-of-staff/PIN/voce.
     var brainLabel = prettyModelName(state.model) || lead.toUpperCase();
-    if (role) role.textContent = 'chief of staff · ' + brainLabel + ' · ' + (manual ? 'PIN' : 'AUTO') + ' · ' + (voiceOn ? 'voce attiva' : 'voce muta');
+    if (role) role.textContent = brainLabel;
   }
 
   function setBrain(payload) {
