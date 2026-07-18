@@ -15133,7 +15133,11 @@ def _handle_claude_stream_event(inner, state, emit, *, session_id, clean_msg):
 
 _CLAUDE_REGISTRY = None
 _CLAUDE_REGISTRY_LOCK = threading.Lock()
-_PRIME_SDK_SESSION_ID = f"hermes-prime-{os.getpid()}-{uuid.uuid4().hex}"
+# DEVE essere un UUID puro: il CLI valida `--session-id` ("Invalid session ID.
+# Must be a valid UUID.") ed esce subito con exit 1 -> Prime non si connette mai
+# (bug visto dal vivo con l'id "hermes-prime-<pid>-<hex>"). Resta unico per
+# processo, quindi mantiene lo scopo anti-replay dopo un riavvio.
+_PRIME_SDK_SESSION_ID = str(uuid.uuid4())
 
 
 def _get_claude_registry():

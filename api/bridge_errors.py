@@ -20,6 +20,7 @@ CODEX_AUTH = "codex_auth"
 CODEX_EXIT = "codex_exit"
 PRIME_IDLE_TIMEOUT = "prime_idle_timeout"
 PRIME_HARDCAP = "prime_hardcap"
+CLI_STARTUP = "cli_startup"
 TRANSPORT_CUT = "transport_cut"
 UNKNOWN = "unknown"
 
@@ -52,6 +53,11 @@ _MESSAGES = {
     PRIME_HARDCAP: (
         "Il turno di Hermes Prime ha superato il tetto massimo di durata.",
         "Richiesta troppo lunga: spezzala o delega il lavoro pesante.",
+    ),
+    CLI_STARTUP: (
+        "Il processo Claude CLI di Prime non è partito (morto all'avvio).",
+        "Opzioni/config della sessione bridge rotte (es. --session-id non UUID, "
+        "flag invalido, login CLI): guarda lo stderr nel log del server.",
     ),
     TRANSPORT_CUT: (
         "La connessione con Hermes Prime si è interrotta a metà risposta.",
@@ -88,6 +94,16 @@ def classify_branch(exc) -> str:
         return TRANSPORT_CUT
 
     codexy = "codex" in text
+
+    # 1-bis) CLI di Prime morto all'avvio (connect/initialize): ProcessError del
+    # SDK ("Command failed with exit code N"), --session-id non UUID, flag rotti.
+    if not codexy and (
+        name in {"ProcessError", "CLIConnectionError"}
+        or "command failed with exit code" in text
+        or "invalid session id" in text
+        or "failed to start claude" in text
+    ):
+        return CLI_STARTUP
 
     # 2) Timeout (Codex exec vs stallo di Prime).
     if "timeoutexpired" in text or "timeout dopo" in text or "timed out" in text \
