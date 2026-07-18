@@ -24,3 +24,26 @@ def prompt_cache_hit_percent(cache_read_tokens, prompt_tokens):
     if cache_read <= 0 or prompt <= 0:
         return None
     return min(100, round((cache_read / prompt) * 100))
+
+
+def normalize_stream_usage(usage: dict | None) -> dict:
+    """Return a WebUI usage payload with Anthropic cache aliases.
+
+    Providers disagree on token field names. Preserve Anthropic's native cache
+    counters while also exposing the shorter names consumed by the existing UI.
+    """
+    source = usage if isinstance(usage, dict) else {}
+    cache_read = _to_int(source.get("cache_read_input_tokens", source.get("cache_read_tokens", 0)))
+    cache_write = _to_int(source.get("cache_creation_input_tokens", source.get("cache_write_tokens", 0)))
+    normalized = dict(source)
+    normalized["input_tokens"] = _to_int(
+        source.get("input_tokens", source.get("prompt_tokens", 0))
+    )
+    normalized["output_tokens"] = _to_int(
+        source.get("output_tokens", source.get("completion_tokens", 0))
+    )
+    normalized["cache_read_input_tokens"] = cache_read
+    normalized["cache_creation_input_tokens"] = cache_write
+    normalized["cache_read_tokens"] = cache_read
+    normalized["cache_write_tokens"] = cache_write
+    return normalized

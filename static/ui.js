@@ -2608,6 +2608,27 @@ if(typeof window!=='undefined'){
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
+function _fmtCompactTokens(n){return _fmtTokens(n);}
+function _formatAssistantUsageBadge(turnUsage){
+  const data=turnUsage||{};
+  const inTok=Number(data.input_tokens)||0;
+  const outTok=Number(data.output_tokens)||0;
+  const cacheRead=Number(data.cache_read_input_tokens!=null?data.cache_read_input_tokens:data.cache_read_tokens)||0;
+  const cacheWrite=Number(data.cache_creation_input_tokens!=null?data.cache_creation_input_tokens:data.cache_write_tokens)||0;
+  const cost=Number(data.estimated_cost)||0;
+  const parts=[`\u2191 ${_fmtCompactTokens(inTok)} in`, `\u2193 ${_fmtCompactTokens(outTok)} out`];
+  if(data.cache_hit_percent!=null) parts.push(t('usage_cached_percent',data.cache_hit_percent));
+  if(cost) parts.push(`~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`);
+  return {
+    text:parts.join(' \u00b7 '),
+    title:[
+      `Input tokens: ${inTok}`,
+      `Output tokens: ${outTok}`,
+      `Cache read input tokens: ${cacheRead}`,
+      `Cache creation input tokens: ${cacheWrite}`,
+    ].join('\n'),
+  };
+}
 function _formatTurnDuration(seconds){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'';
@@ -8849,14 +8870,10 @@ function renderMessages(options){
       if(window._showTokenUsage&&hasTurnUsage){
         const usage=document.createElement('span');
         usage.className='msg-usage-inline';
-        const inTok=msg._turnUsage.input_tokens||0;
-        const outTok=msg._turnUsage.output_tokens||0;
-        const cost=msg._turnUsage.estimated_cost;
-        let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-        const cacheHitPct=msg._turnUsage.cache_hit_percent;
-        if(cacheHitPct!=null) text+=` · ${t('usage_cached_percent',cacheHitPct)}`;
-        usage.textContent=text;
+        const formattedUsage=_formatAssistantUsageBadge(msg._turnUsage);
+        usage.textContent=formattedUsage.text;
+        usage.title=formattedUsage.title;
+        usage.setAttribute('aria-label',formattedUsage.title);
         fragments.push(usage);
       }
       if(fragments.length){

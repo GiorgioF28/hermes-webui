@@ -45,7 +45,7 @@ from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.todo_state import emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
-from api.usage import prompt_cache_hit_percent
+from api.usage import normalize_stream_usage, prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
     get_state_db_session_messages,
@@ -3090,6 +3090,45 @@ def _strip_native_image_parts_from_content(content):
     return clean_parts
 
 
+def _attachment_paths_for_placeholder(msg) -> list[str]:
+    attachments = msg.get('attachments') if isinstance(msg, dict) else None
+    if not isinstance(attachments, list):
+        return []
+    paths = []
+    for att in attachments:
+        if isinstance(att, dict):
+            path = att.get('path') or att.get('name') or att.get('file_path')
+        else:
+            path = att
+        text = str(path or '').strip()
+        if text:
+            paths.append(text)
+    return paths
+
+
+def _historical_image_placeholder(msg) -> dict:
+    paths = _attachment_paths_for_placeholder(msg)
+    suffix = f": {', '.join(paths)}" if paths else "."
+    return {
+        'type': 'text',
+        'text': f"[Allegato immagine rimosso dal contesto storico; usa Read sul file se serve{suffix}]",
+    }
+
+
+def _replace_stale_image_parts_from_content(content, msg):
+    if not isinstance(content, list):
+        return copy.deepcopy(content)
+    clean_parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get('type') == 'image_url' or 'image_url' in part:
+            clean_parts.append(_historical_image_placeholder(msg))
+        else:
+            clean_parts.append(copy.deepcopy(part))
+    return clean_parts
+
+
 def _content_has_reasoning_only_parts(content) -> bool:
     if not isinstance(content, list) or not content:
         return False
@@ -3149,10 +3188,19 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
     causing 400s on every later text-only turn (#2297).
     """
     strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
+    user_turns_after = {}
+    later_user_turns = 0
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if not isinstance(msg, dict):
+            continue
+        user_turns_after[idx] = later_user_turns
+        if msg.get('role') == 'user':
+            later_user_turns += 1
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
     valid_tool_call_ids: set = set()
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
             continue
         if msg.get('role') == 'assistant':
@@ -3164,7 +3212,7 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
 
     # Second pass: build the sanitized list, dropping orphaned tool messages.
     clean = []
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
             continue
         # Skip display-only Thinking entries. They are visible transcript
@@ -3188,9 +3236,11 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
             if not tid or tid not in valid_tool_call_ids:
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
-        sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        sanitized = {k: copy.deepcopy(v) for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
+        elif role == 'user' and user_turns_after.get(idx, 0) >= 2 and 'content' in sanitized:
+            sanitized['content'] = _replace_stale_image_parts_from_content(sanitized.get('content'), msg)
         if sanitized.get('role'):
             clean.append(sanitized)
 
@@ -5137,6 +5187,8 @@ def _run_agent_streaming(
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
+            return
+        if event != 'usage' and isinstance(data, dict) and data.get('type') == 'usage':
             return
         event_id = None
         if run_journal is not None:
@@ -7550,8 +7602,10 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
+            usage_payload = normalize_stream_usage(usage)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
-            put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+            put('usage', usage_payload)
+            put('done', {'session': redact_session_data(raw_session), 'usage': usage_payload})
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()
             meter_stats['session_id'] = session_id

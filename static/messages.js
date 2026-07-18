@@ -1360,6 +1360,44 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+function _normalizeUsagePayload(payload){
+  const raw=(payload&&payload.usage&&typeof payload.usage==='object')?payload.usage:(payload||{});
+  const {
+    input_tokens:input=raw.prompt_tokens||0,
+    output_tokens:output=raw.completion_tokens||0,
+    cache_read_input_tokens:cacheRead,
+    cache_creation_input_tokens:cacheWrite
+  }=raw;
+  const normalized={...raw};
+  normalized.input_tokens=Number(input)||0;
+  normalized.output_tokens=Number(output)||0;
+  normalized.cache_read_input_tokens=Number(cacheRead!=null?cacheRead:(raw.cache_read_tokens||0))||0;
+  normalized.cache_creation_input_tokens=Number(cacheWrite!=null?cacheWrite:(raw.cache_write_tokens||0))||0;
+  normalized.cache_read_tokens=Number(raw.cache_read_tokens!=null?raw.cache_read_tokens:normalized.cache_read_input_tokens)||0;
+  normalized.cache_write_tokens=Number(raw.cache_write_tokens!=null?raw.cache_write_tokens:normalized.cache_creation_input_tokens)||0;
+  return normalized;
+}
+
+function _turnUsageDeltaFromPayload(usage, previous){
+  const prev=previous||{};
+  const cur=_normalizeUsagePayload(usage);
+  const prevIn=Number(prev.input_tokens)||0;
+  const prevOut=Number(prev.output_tokens)||0;
+  const prevCost=Number(prev.estimated_cost)||0;
+  const prevCacheRead=Number(prev.cache_read_tokens)||0;
+  const prevCacheWrite=Number(prev.cache_write_tokens)||0;
+  return {
+    input_tokens:Math.max(0,(Number(cur.input_tokens)||0)-prevIn),
+    output_tokens:Math.max(0,(Number(cur.output_tokens)||0)-prevOut),
+    estimated_cost:Math.max(0,(Number(cur.estimated_cost)||0)-prevCost),
+    cache_read_tokens:Math.max(0,(Number(cur.cache_read_tokens)||0)-prevCacheRead),
+    cache_write_tokens:Math.max(0,(Number(cur.cache_write_tokens)||0)-prevCacheWrite),
+    cache_read_input_tokens:Math.max(0,(Number(cur.cache_read_input_tokens)||0)-(Number(prev.cache_read_input_tokens)||prevCacheRead)),
+    cache_creation_input_tokens:Math.max(0,(Number(cur.cache_creation_input_tokens)||0)-(Number(prev.cache_creation_input_tokens)||prevCacheWrite)),
+    cache_hit_percent:cur.turn_cache_hit_percent,
+  };
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -3109,6 +3147,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     });
 
+    source.addEventListener('usage',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}')||{};
+        if((d.session_id||activeSid)!==activeSid) return;
+        const usage=_normalizeUsagePayload(d);
+        S._pendingTurnUsage=usage;
+        if(typeof _syncCtxIndicator==='function'&&S.session&&S.session.session_id===activeSid){
+          S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
+            ? _mergeUsageForCtxIndicator(usage,S.lastUsage||{})
+            : {...(S.lastUsage||{}),...usage};
+          _syncCtxIndicator(S.lastUsage);
+        }
+        const lastAsst=[...(S.messages||[])].reverse().find(m=>m&&m.role==='assistant');
+        const turnUsage=_turnUsageDeltaFromPayload(usage,S.session||{});
+        if(lastAsst&&(turnUsage.input_tokens||turnUsage.output_tokens||turnUsage.cache_read_tokens||turnUsage.cache_write_tokens)){
+          lastAsst._turnUsage=turnUsage;
+          if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+        }
+      }catch(_){}
+    });
+
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
@@ -3143,6 +3202,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _smdEndParser();
         }
         const d=_doneData;
+        if(d.usage)d.usage=_normalizeUsagePayload(d.usage);
         const isActiveSession=_isSessionCurrentPane(activeSid);
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
@@ -3666,7 +3726,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','usage','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

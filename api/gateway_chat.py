@@ -26,6 +26,7 @@ from api.config import (
 from api.helpers import _redact_text, redact_session_data
 from api.models import get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter
+from api.usage import normalize_stream_usage
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +136,19 @@ def _gateway_stream_usage(payload: dict) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
-    return {
-        "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
-        "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
+    normalized = normalize_stream_usage(usage)
+    out = {
+        "input_tokens": normalized["input_tokens"],
+        "output_tokens": normalized["output_tokens"],
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
+    if normalized.get("cache_read_tokens"):
+        out["cache_read_input_tokens"] = normalized["cache_read_input_tokens"]
+        out["cache_read_tokens"] = normalized["cache_read_tokens"]
+    if normalized.get("cache_write_tokens"):
+        out["cache_creation_input_tokens"] = normalized["cache_creation_input_tokens"]
+        out["cache_write_tokens"] = normalized["cache_write_tokens"]
+    return out
 
 
 def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
@@ -382,8 +391,13 @@ def _run_gateway_chat_streaming(
                     if stream_id in STREAM_PARTIAL_TEXT:
                         STREAM_PARTIAL_TEXT[stream_id] += delta
                     put_gateway_event("token", {"text": delta})
-                usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                chunk_usage = _gateway_stream_usage(payload)
+                if chunk_usage:
+                    usage.update({k: v for k, v in chunk_usage.items() if v})
+                    usage = normalize_stream_usage(usage)
+                    put_gateway_event("usage", {"session_id": session_id, **usage})
         usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
+        usage = normalize_stream_usage(usage)
         assistant_text = final_text.strip()
         if not assistant_text:
             put_gateway_event("apperror", {
