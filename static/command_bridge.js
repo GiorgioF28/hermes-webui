@@ -541,6 +541,28 @@
   var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
   var _primeStreaming = false, _primeStreamId = null, _primeLiveTimer = null;
 
+  // Id modello -> nome umano per l'header (es. claude-fable-5 -> "Fable 5").
+  function prettyModelName(id) {
+    var raw = String(id || '').trim();
+    if (!raw) return '';
+    var m = raw.toLowerCase().replace(/^codex:/, '');
+    var known = [
+      [/^claude-fable-5/, 'Fable 5'],
+      [/^claude-opus-4-8/, 'Opus 4.8'],
+      [/^claude-opus-4-7/, 'Opus 4.7'],
+      [/^claude-sonnet-5/, 'Sonnet 5'],
+      [/^claude-sonnet-4-6/, 'Sonnet 4.6'],
+      [/^claude-haiku-4-5/, 'Haiku 4.5'],
+      [/^gpt-5\.5-codex|^codex-5\.5/, 'Codex 5.5'],
+      [/^gpt-5\.5/, 'GPT-5.5'],
+      [/^gpt-5/, 'GPT-5'],
+    ];
+    for (var i = 0; i < known.length; i++) {
+      if (known[i][0].test(m)) return known[i][1];
+    }
+    return raw.replace(/^codex:/, ''); // sconosciuto: mostra l'id cosi' com'e'
+  }
+
   function renderBrainState(state) {
     state = state || {};
     var lead = String(state.lead || 'claude').toLowerCase();
@@ -550,7 +572,9 @@
     if (codex) codex.classList.toggle('cb-active', lead === 'codex');
     if (auto) auto.classList.toggle('cb-auto-active', !manual);
     var role = document.querySelector('.cb-chat-role');
-    if (role) role.textContent = 'chief of staff · ' + lead.toUpperCase() + ' · ' + (manual ? 'PIN' : 'AUTO') + ' · ' + (voiceOn ? 'voce attiva' : 'voce muta');
+    // Mostra il MODELLO vero del capo (es. "Fable 5"), non il generico CLOUD.
+    var brainLabel = prettyModelName(state.model) || lead.toUpperCase();
+    if (role) role.textContent = 'chief of staff · ' + brainLabel + ' · ' + (manual ? 'PIN' : 'AUTO') + ' · ' + (voiceOn ? 'voce attiva' : 'voce muta');
   }
 
   function setBrain(payload) {

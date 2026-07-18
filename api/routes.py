@@ -12020,11 +12020,36 @@ def _handle_bridge_prime(handler, body):
     return True
 
 
+def _prime_lead_model_id(lead: str) -> str:
+    """Id del modello che il capo (brain) di Prime sta effettivamente usando.
+
+    claude -> il modello risolto per il ramo Claude (con la guardia anti-Codex);
+    codex  -> il model del Codex CLI da ~/.codex/config.toml (best-effort).
+    Serve alla UI del Command Bridge per mostrare il modello vero (es. Fable 5)
+    invece del generico CLOUD/CODEX.
+    """
+    if str(lead or "").strip().lower() == "codex":
+        try:
+            cfg = (Path.home() / ".codex" / "config.toml").read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'(?m)^\s*model\s*=\s*"([^"]+)"', cfg)
+            if m:
+                return "codex:" + m.group(1)
+        except Exception:
+            logger.debug("codex config model read failed", exc_info=True)
+        return "codex"
+    try:
+        return _prime_claude_safe_model(_resolve_prime_model_state())
+    except Exception:
+        logger.debug("prime lead model resolve failed", exc_info=True)
+        return "claude-fable-5"
+
+
 def _handle_bridge_prime_lead(handler, body):
     """POST /api/bridge/prime/lead — leggi o cambia il capo (brain) di Prime.
 
     Body: {} o {"action":"get"} → ritorna lo stato. {"action":"set","lead":
     "claude"|"codex"} → imposta il capo a mano (revert/forzatura). Niente segreti.
+    Ogni risposta include "model": l'id del modello effettivo del capo (per la UI).
     """
     from api import lead_brain
 
@@ -12035,11 +12060,12 @@ def _handle_bridge_prime_lead(handler, body):
         if lead not in (lead_brain.LEAD_CLAUDE, lead_brain.LEAD_CODEX):
             return bad(handler, "lead must be 'claude' or 'codex'")
         state = lead_brain.set_lead(workspace, lead, reason="manuale (UI)", manual=True)
-        return j(handler, {"ok": True, **state})
+        return j(handler, {"ok": True, **state, "model": _prime_lead_model_id(state.get("lead"))})
     if action == "auto":
         state = lead_brain.set_auto_failover(workspace)
-        return j(handler, {"ok": True, **state})
-    return j(handler, {"ok": True, **lead_brain.get_lead_state(workspace)})
+        return j(handler, {"ok": True, **state, "model": _prime_lead_model_id(state.get("lead"))})
+    state = lead_brain.get_lead_state(workspace)
+    return j(handler, {"ok": True, **state, "model": _prime_lead_model_id(state.get("lead"))})
 
 
 def _handle_bridge_prime_brief(handler, body):

@@ -40,3 +40,20 @@ def test_non_claude_provider_with_claude_model_falls_back():
     # con claude (catalogo di terze parti / proxy).
     state = {"model": "claude-opus-4-8", "model_provider": "openai-codex"}
     assert routes._prime_claude_safe_model(state) == "claude-fable-5"
+
+
+# --- modello mostrato nell'header della UI (_prime_lead_model_id) ------------
+
+def test_lead_model_id_claude_is_always_claude(monkeypatch):
+    # Anche se il resolver ripiega su un default Codex, l'id riportato alla UI
+    # per il capo Claude deve restare un modello claude*.
+    monkeypatch.setattr(
+        routes, "_resolve_prime_model_state",
+        lambda *a, **k: {"model": "gpt-5.5-codex", "model_provider": "openai-codex"},
+    )
+    assert routes._prime_lead_model_id("claude").startswith("claude")
+
+
+def test_lead_model_id_codex_is_codexish():
+    got = routes._prime_lead_model_id("codex")
+    assert got == "codex" or got.startswith("codex:")
