@@ -21,28 +21,64 @@ _ASK_USER_SCHEMA = {
         "question": {"type": "string", "description": "La domanda da porre all'utente"},
         "options": {
             "type": "array",
-            "items": {"type": "string"},
+            "items": {
+                "oneOf": [
+                    {"type": "string"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["label"],
+                    },
+                ]
+            },
             "description": "2-4 opzioni concise tra cui scegliere",
         },
+        "questions": {
+            "type": "array",
+            "description": "AskUserQuestion payload con domande multiple.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "header": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {"type": "array"},
+                    "multiSelect": {"type": "boolean"},
+                },
+                "required": ["question"],
+            },
+        },
+        "multiSelect": {
+            "type": "boolean",
+            "description": "Permette piu scelte per la domanda principale.",
+        },
     },
-    "required": ["question", "options"],
 }
 
 
 async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]:
     """Raw, unit-testable handler logic. Surfaces a clarify popup and blocks
     (off the event loop) until the user responds or the timeout elapses."""
-    question = str(args.get("question") or "").strip() or "Quale opzione preferisci?"
-    options = [str(o) for o in (args.get("options") or []) if str(o).strip()]
-    entry = clarify.submit_pending(
-        session_id,
-        {
-            "question": question,
-            "choices_offered": options,
-            "timeout_seconds": ASK_USER_TIMEOUT_SECONDS,
-            "source": "claude-ask-user",
-        },
+    raw = dict(args or {})
+    if not raw.get("question") and not raw.get("questions"):
+        raw["question"] = "Quale opzione preferisci?"
+    payload = clarify.normalize_prompt_payload(
+        raw,
+        session_id=session_id,
+        timeout_seconds=ASK_USER_TIMEOUT_SECONDS,
     )
+    payload["source"] = "claude-ask-user"
+    entry = clarify.submit_pending(session_id, payload)
+    if session_id == "hermes-prime":
+        try:
+            from api.prime_session_store import get_prime_session_store
+
+            get_prime_session_store().append_clarify_request(entry.clarify_id, entry.data)
+        except Exception:
+            logger.debug("Prime ask_user request persistence failed", exc_info=True)
     # entry.event is a threading.Event resolved from the HTTP thread; wait off
     # the asyncio loop so we never block the loop the SDK runs on.
     resolved = await asyncio.to_thread(entry.event.wait, ASK_USER_TIMEOUT_SECONDS)
@@ -55,7 +91,14 @@ async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]
                 }
             ]
         }
-    return {"content": [{"type": "text", "text": str(entry.result)}]}
+    if session_id == "hermes-prime":
+        try:
+            from api.prime_session_store import get_prime_session_store
+
+            get_prime_session_store().append_clarify_response(entry.clarify_id, entry.result)
+        except Exception:
+            logger.debug("Prime ask_user response persistence failed", exc_info=True)
+    return {"content": [{"type": "text", "text": clarify.format_response_for_agent(entry.data, entry.result)}]}
 
 
 def _ask_user_handler_for(session_id: str):

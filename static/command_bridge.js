@@ -219,6 +219,16 @@
 '.cb-attention-actions button:hover{border-color:rgba(255,255,255,.28);background:rgba(255,255,255,.1);}',
 '.cb-attention-actions button.deny{color:#ffb4a8;border-color:rgba(255,107,92,.34);}',
 '.cb-attention-input{width:100%;box-sizing:border-box;margin-top:9px;border:1px solid var(--cb-line);border-radius:8px;background:rgba(0,0,0,.2);color:#fff;padding:9px;font-size:12px;}',
+'.cb-question-block{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.07);}',
+'.cb-question-block:first-of-type{border-top:0;padding-top:0;}',
+'.cb-question-title{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:700;color:#fff;line-height:1.4;}',
+'.cb-question-chip{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--cb-accent-dim);border-radius:999px;padding:2px 6px;font-family:var(--cb-mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--cb-accent-2);background:rgba(255,106,0,.08);}',
+'.cb-option-label{display:block;}',
+'.cb-option-description{display:block;margin-top:3px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11px;font-weight:400;letter-spacing:0;line-height:1.35;}',
+'.cb-question-hint{font-size:10px;color:var(--cb-muted);font-family:var(--cb-mono);}',
+'.cb-other-row{display:flex;align-items:center;gap:7px;width:100%;font-family:var(--cb-mono);font-size:10px;color:var(--cb-muted);}',
+'.cb-other-row .cb-attention-input{margin-top:0;min-width:0;}',
+'.cb-attention-card.cb-readonly .cb-attention-actions button,.cb-attention-card.cb-readonly input{pointer-events:none;opacity:.68;}',
 '.cb-choice.selected{border-color:var(--cb-accent);box-shadow:0 0 0 2px rgba(255,106,0,.16) inset;}',
 '.cb-recovered .cb-who:after{content:" · recuperato";color:var(--cb-accent);}',
 '.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:2px solid var(--cb-accent);',
@@ -1200,38 +1210,158 @@
       actions.appendChild(b);
     });
   }
+  function bridgeQuestionId(q, idx) {
+    return String((q && q.id) || ('question_' + (idx + 1)));
+  }
+  function bridgeQuestionKey(q, idx) {
+    return String((q && (q.question || q.text || q.prompt || q.id || q.header)) || ('Domanda ' + (idx + 1)));
+  }
+  function bridgeNormalizeOptions(q) {
+    var raw = Array.isArray(q && q.options) ? q.options : (Array.isArray(q && q.choices) ? q.choices : []);
+    return raw.map(function (option) {
+      if (option && typeof option === 'object') {
+        return {
+          label: String(option.label || option.value || option.text || '').trim(),
+          description: String(option.description || option.detail || option.help || '').trim()
+        };
+      }
+      return { label: String(option || '').trim(), description: '' };
+    }).filter(function (option) { return option.label; });
+  }
+  function bridgeStructuredEcho(response) {
+    var answers = response && response.answers;
+    if (!answers || typeof answers !== 'object') return '';
+    return Object.keys(answers).map(function (question) {
+      var answer = answers[question];
+      var rendered = Array.isArray(answer) ? answer.join(', ') : String(answer || '');
+      return question + ': ' + rendered;
+    }).join('\n');
+  }
+  function bridgeResponseHasAnswer(response) {
+    var answers = response && response.answers;
+    if (!answers || typeof answers !== 'object') return false;
+    return Object.keys(answers).some(function (key) {
+      var value = answers[key];
+      if (Array.isArray(value)) return value.some(function (item) { return String(item || '').trim(); });
+      return String(value || '').trim();
+    });
+  }
+  function renderBridgeStructuredQuestions(card, questions, readOnly) {
+    var actions = card.querySelector('.cb-attention-actions');
+    var selections = {};
+    questions.forEach(function (q, idx) {
+      var qid = bridgeQuestionId(q, idx);
+      var block = el('div', 'cb-question-block');
+      block.setAttribute('data-question-id', qid);
+      var title = el('div', 'cb-question-title');
+      var header = String((q && q.header) || '').trim();
+      if (header) title.appendChild(el('span', 'cb-question-chip', esc(header)));
+      title.appendChild(el('span', '', esc(bridgeQuestionKey(q, idx))));
+      block.appendChild(title);
+      bridgeNormalizeOptions(q).forEach(function (option) {
+        var b = el('button', 'cb-choice');
+        b.type = 'button';
+        b.innerHTML = '<span class="cb-option-label">' + esc(option.label) + '</span>' +
+          (option.description ? '<span class="cb-option-description">' + esc(option.description) + '</span>' : '');
+        if (!readOnly) {
+          b.addEventListener('click', function () {
+            if (q && q.multiSelect) {
+              var arr = Array.isArray(selections[qid]) ? selections[qid].slice() : [];
+              var pos = arr.indexOf(option.label);
+              if (pos >= 0) arr.splice(pos, 1); else arr.push(option.label);
+              selections[qid] = arr;
+              b.classList.toggle('selected', pos < 0);
+            } else {
+              selections[qid] = option.label;
+              block.querySelectorAll('.cb-choice').forEach(function (btn) { btn.classList.remove('selected'); });
+              b.classList.add('selected');
+            }
+          });
+        }
+        block.appendChild(b);
+      });
+      var row = el('label', 'cb-other-row');
+      row.appendChild(el('span', '', 'Altro'));
+      var input = el('input', 'cb-attention-input cb-other-input');
+      input.type = 'text';
+      input.placeholder = 'Risposta libera';
+      input.setAttribute('data-question-id', qid);
+      if (!readOnly) {
+        input.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            var send = card.querySelector('.cb-clarify-send');
+            if (send) send.click();
+          }
+        });
+      }
+      row.appendChild(input);
+      block.appendChild(row);
+      if (q && q.multiSelect) block.appendChild(el('div', 'cb-question-hint', 'Selezione multipla consentita.'));
+      actions.appendChild(block);
+    });
+    return function collect() {
+      var answers = {};
+      questions.forEach(function (q, idx) {
+        var qid = bridgeQuestionId(q, idx);
+        var key = bridgeQuestionKey(q, idx);
+        var input = null;
+        card.querySelectorAll('.cb-other-input').forEach(function (candidate) {
+          if (!input && candidate.getAttribute('data-question-id') === qid) input = candidate;
+        });
+        var other = input ? String(input.value || '').trim() : '';
+        var selected = selections[qid];
+        if (q && q.multiSelect) {
+          var values = Array.isArray(selected) ? selected.slice() : (selected ? [selected] : []);
+          if (other) values.push(other);
+          answers[key] = values;
+        } else {
+          answers[key] = other || (Array.isArray(selected) ? (selected[0] || '') : (selected || ''));
+        }
+      });
+      return { answers: answers };
+    };
+  }
   function renderBridgeClarifyCard(payload) {
+    var options = arguments[1] || {};
     var pending = normalizeAttentionPending(payload);
     if (!pending) { sysNote('Clarify bridge risolto o scaduto.'); return; }
     var card = appendAttentionCard('clarify', pending); if (!card) return;
+    if (options.readOnly) card.classList.add('cb-readonly');
     var actions = card.querySelector('.cb-attention-actions');
     var selected = [];
-    var questions = Array.isArray(pending.questions) ? pending.questions : null;
-    var choices = questions && questions.length ? (questions[0].options || []).map(function (o) { return o.label || o.value || o.text || ''; }) : (pending.choices_offered || []);
-    choices.filter(Boolean).forEach(function (choice) {
-      var b = el('button', 'cb-choice'); b.type = 'button'; b.textContent = choice;
-      b.addEventListener('click', function () {
-        var multi = questions && questions[0] && questions[0].multiSelect;
-        if (multi) {
-          var idx = selected.indexOf(choice);
-          if (idx >= 0) selected.splice(idx, 1); else selected.push(choice);
-          b.classList.toggle('selected', selected.indexOf(choice) >= 0);
-        } else {
-          selected = [choice];
-          actions.querySelectorAll('.cb-choice').forEach(function (btn) { btn.classList.remove('selected'); });
-          b.classList.add('selected');
+    var questions = Array.isArray(pending.questions) ? pending.questions : [];
+    var collectStructured = questions.length ? renderBridgeStructuredQuestions(card, questions, !!options.readOnly) : null;
+    if (!questions.length) {
+      var choices = pending.choices_offered || [];
+      choices.filter(Boolean).forEach(function (choice) {
+        var b = el('button', 'cb-choice'); b.type = 'button'; b.textContent = choice;
+        if (!options.readOnly) {
+          b.addEventListener('click', function () {
+            selected = [choice];
+            actions.querySelectorAll('.cb-choice').forEach(function (btn) { btn.classList.remove('selected'); });
+            b.classList.add('selected');
+          });
         }
+        actions.appendChild(b);
       });
-      actions.appendChild(b);
-    });
-    var input = el('input', 'cb-attention-input');
-    input.type = 'text';
-    input.placeholder = 'Risposta libera';
-    card.appendChild(input);
-    var send = el('button', ''); send.type = 'button'; send.textContent = 'Send';
+    }
+    var input = null;
+    if (!questions.length) {
+      input = el('input', 'cb-attention-input');
+      input.type = 'text';
+      input.placeholder = 'Risposta libera';
+      card.appendChild(input);
+    }
+    if (options.readOnly) return card;
+    var send = el('button', 'cb-clarify-send'); send.type = 'button'; send.textContent = 'Send';
     send.addEventListener('click', function () {
-      var answer = input.value.trim() || selected.join(', ');
-      if (!answer) { input.focus(); return; }
+      var answer = collectStructured ? collectStructured() : (input.value.trim() || selected.join(', '));
+      if (collectStructured ? !bridgeResponseHasAnswer(answer) : !answer) {
+        var focusTarget = collectStructured ? card.querySelector('.cb-other-input') : input;
+        if (focusTarget) focusTarget.focus();
+        return;
+      }
       send.disabled = true;
       apiPost('/api/clarify/respond', {
         session_id: 'hermes-prime',
@@ -1239,6 +1369,7 @@
         response: answer
       }).then(function () {
         card.querySelector('.cb-attention-k').textContent = 'chiarimento inviato';
+        primeSay('user', collectStructured ? bridgeStructuredEcho(answer) : answer);
       }).catch(function (e) {
         send.disabled = false;
         sysNote('Clarify: ' + (e && e.message ? e.message : 'errore risposta'));
@@ -1251,9 +1382,20 @@
     _cbHistoryLoaded = true;
     return api('/api/bridge/prime/history').then(function (data) {
       var log = $('cbLog'); if (!log) return;
+      var pendingClarify = data.pending_clarify || null;
+      var pendingClarifyId = pendingClarify && pendingClarify.clarify_id;
       (data.messages || []).forEach(function (m) {
+        if (
+          m && m._bridge_clarify_event === 'request' &&
+          m._bridge_clarify_payload &&
+          m._bridge_clarify_id !== pendingClarifyId
+        ) {
+          renderBridgeClarifyCard({ pending: m._bridge_clarify_payload }, { readOnly: true });
+          return;
+        }
         primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '');
       });
+      if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
       var pending = data.pending_turn;
       if (pending && pending.partial_output) {
         var node = primeSay('prime', pending.partial_output || '');

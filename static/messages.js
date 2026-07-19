@@ -4963,7 +4963,11 @@ function showClarifyCard(pending) {
   _clarifySignature = sig;
   _clarifyStructuredMode = isStructured;
   _clarifyCurrentPending = pending;
-  _startClarifyCountdown(pending);
+  if (Number(pending.timeout_seconds) > 0) {
+    _startClarifyCountdown(pending);
+  } else {
+    _clearClarifyCountdownTimer();
+  }
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();

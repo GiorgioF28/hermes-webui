@@ -11641,6 +11641,9 @@ def _handle_bridge_prime_history(handler):
             hist["pending_briefs_count"] = get_brief_queue(workspace).get_pending_count()
         except Exception:
             hist["pending_briefs_count"] = 0
+        pending_clarify = get_clarify_pending("hermes-prime")
+        if pending_clarify:
+            hist["pending_clarify"] = pending_clarify
         return j(handler, hist, extra_headers={"Cache-Control": "no-store"}) or True
     except Exception as exc:
         logger.exception("bridge prime history failed")
@@ -18124,6 +18127,14 @@ def _handle_clarify_respond(handler, body):
             "error": "Clarification prompt expired or not found. The agent may have already proceeded.",
             "stale": True,
         }, status=409)
+
+    if sid == "hermes-prime" and clarify_id:
+        try:
+            from api.prime_session_store import get_prime_session_store
+
+            get_prime_session_store().append_clarify_response(clarify_id, response)
+        except Exception:
+            logger.debug("Prime clarify response persistence failed", exc_info=True)
 
     return j(handler, {"ok": True, "response": response})
 

@@ -167,6 +167,108 @@ class PrimeSessionStore:
             self._append_journal_locked(data, "turn_finished", {"stream_id": stream_id})
             self._write_locked(data)
 
+    def append_clarify_request(self, clarify_id: str, payload: dict[str, Any]) -> None:
+        """Persist a Prime AskUserQuestion/clarify card in the visible transcript."""
+        clarify_id = str(clarify_id or "").strip()
+        if not clarify_id:
+            return
+        with self._lock:
+            data = self._read_locked()
+            for msg in data.get("messages") or []:
+                if (
+                    isinstance(msg, dict)
+                    and msg.get("_bridge_clarify_id") == clarify_id
+                    and msg.get("_bridge_clarify_event") == "request"
+                ):
+                    return
+            data["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": self._clarify_request_text(payload),
+                    "created_at": time.time(),
+                    "_bridge_attention_kind": "clarify",
+                    "_bridge_clarify_event": "request",
+                    "_bridge_clarify_id": clarify_id,
+                    "_bridge_clarify_payload": dict(payload or {}),
+                }
+            )
+            self._append_journal_locked(
+                data,
+                "clarify_requested",
+                {"clarify_id": clarify_id, "kind": str((payload or {}).get("kind") or "clarify")},
+            )
+            self._write_locked(data)
+
+    def append_clarify_response(self, clarify_id: str, response: Any) -> None:
+        """Persist Giorgio's answer to a Prime clarify card."""
+        clarify_id = str(clarify_id or "").strip()
+        if not clarify_id:
+            return
+        with self._lock:
+            data = self._read_locked()
+            for msg in data.get("messages") or []:
+                if (
+                    isinstance(msg, dict)
+                    and msg.get("_bridge_clarify_id") == clarify_id
+                    and msg.get("_bridge_clarify_event") == "response"
+                ):
+                    return
+            data["messages"].append(
+                {
+                    "role": "user",
+                    "content": self._clarify_response_text(response),
+                    "created_at": time.time(),
+                    "_clarify_response": True,
+                    "_bridge_clarify_event": "response",
+                    "_bridge_clarify_id": clarify_id,
+                    "_bridge_clarify_response": response,
+                }
+            )
+            self._append_journal_locked(data, "clarify_responded", {"clarify_id": clarify_id})
+            self._write_locked(data)
+
+    @staticmethod
+    def _clarify_request_text(payload: dict[str, Any]) -> str:
+        payload = payload or {}
+        title = str(payload.get("question") or "Serve una scelta").strip()
+        questions = payload.get("questions") if isinstance(payload.get("questions"), list) else []
+        lines = [f"Domanda per Giorgio: {title}"]
+        for idx, q in enumerate(questions, 1):
+            if not isinstance(q, dict):
+                continue
+            q_text = str(q.get("question") or q.get("text") or q.get("prompt") or "").strip()
+            if q_text and q_text != title:
+                lines.append(f"{idx}. {q_text}")
+            options = q.get("options") if isinstance(q.get("options"), list) else q.get("choices")
+            labels = []
+            for opt in options or []:
+                if isinstance(opt, dict):
+                    label = str(opt.get("label") or opt.get("value") or opt.get("text") or "").strip()
+                else:
+                    label = str(opt or "").strip()
+                if label:
+                    labels.append(label)
+            if labels:
+                lines.append("Opzioni: " + ", ".join(labels))
+        if not questions:
+            choices = [str(c).strip() for c in (payload.get("choices_offered") or []) if str(c).strip()]
+            if choices:
+                lines.append("Opzioni: " + ", ".join(choices))
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _clarify_response_text(response: Any) -> str:
+        answers = response.get("answers") if isinstance(response, dict) else None
+        if isinstance(answers, dict) and answers:
+            lines = []
+            for question, answer in answers.items():
+                value = ", ".join(str(item) for item in answer) if isinstance(answer, list) else str(answer)
+                lines.append(f"{question}: {value}")
+            return "\n".join(lines)
+        if isinstance(response, (dict, list)):
+            return json.dumps(response, ensure_ascii=False)
+        return str(response or "").strip()
+
     def cancel_turn(self, stream_id: str, reason: str = "cancelled") -> dict[str, Any]:
         with self._lock:
             data = self._read_locked()
