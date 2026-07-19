@@ -303,6 +303,40 @@ class PrimeSessionStore:
                 del journal[:-500]
             self._write_locked(data)
 
+    def inject_assistant_message(self, content: str, meta: dict | None = None) -> None:
+        """Inject an assistant message directly into the transcript, bypassing turn lifecycle.
+
+        Used by prime_brief_queue to persist brief/fallback texts durably so they
+        survive browser refresh and server restart (spec §B Consegna fallback senza LLM).
+        The message is visible in GET /api/bridge/prime/history.
+
+        meta dict is merged into the message record (use for brief_id, task_id, etc.).
+        Never saves secrets — callers must not pass credentials.
+        """
+        with self._lock:
+            data = self._read_locked()
+            msg: dict = {
+                "role": "assistant",
+                "content": str(content or ""),
+                "created_at": time.time(),
+                "injected": True,
+            }
+            if meta:
+                # Only merge safe scalar/string keys, never nested secrets
+                for k, v in meta.items():
+                    if isinstance(k, str) and k not in ("content", "role"):
+                        msg[k] = v
+            data["messages"].append(msg)
+            self._append_journal_locked(
+                data,
+                "injected_message",
+                {
+                    "chars": len(str(content or "")),
+                    "meta_keys": sorted((meta or {}).keys()),
+                },
+            )
+            self._write_locked(data)
+
     def get_tool_events(self, stream_id: str | None = None) -> list[dict]:
         """Return tool events from the journal, optionally filtered by stream_id (P2-C)."""
         with self._lock:

@@ -10961,13 +10961,54 @@ def _handle_vault_graph(handler, parsed):
 
 
 def _handle_bridge_tasks(handler, parsed):
-    """GET /api/bridge/tasks — stato deleghe in background (polling UI)."""
+    """GET /api/bridge/tasks — stato deleghe in background (polling UI).
+
+    Fase 1: include anche le deleghe persistite nel canonical store che non
+    sono piu' in RAM (es. dopo un riavvio) e il cui brief non e' ancora
+    stato consegnato, cosi' la UI le vede finche' l'utente non le legge.
+    Il formato di risposta resta quello legacy (status: ok/in_corso/errore)
+    per compat con command_bridge.js.
+    """
     try:
         from api.prime_delegation import get_background_tasks
         tasks = get_background_tasks()
     except Exception as exc:
         logger.exception("bridge tasks failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    # Augment with canonical-store records not in RAM that have undelivered briefs
+    try:
+        from api.delegation_store import get_delegation_store, status_to_legacy
+        workspace = Path(str(DEFAULT_WORKSPACE))
+        canonical_recs = get_delegation_store(workspace).get_all()
+        live_ids = {t["id"] for t in tasks}
+        for rec in canonical_recs:
+            tid = rec.get("id", "")
+            if tid in live_ids:
+                continue
+            brief_status = (rec.get("brief") or {}).get("status", "")
+            if brief_status == "delivered":
+                continue
+            # Exposed to UI in legacy format
+            rt = rec.get("runtime") or {}
+            lib = rec.get("librarian") or {}
+            result = rec.get("result") or {}
+            tasks.append({
+                "id": tid,
+                "agent": rec.get("agent", ""),
+                "task_type": rec.get("task_type", ""),
+                "task": rec.get("task", ""),
+                "status": status_to_legacy(rec.get("status", "")),
+                "output": result.get("text", ""),
+                "finished": rec.get("finished_at"),
+                "librarian_status": lib.get("status", ""),
+                "librarian_output": lib.get("output", ""),
+                "runtime": rt.get("primary", ""),
+                "fallback_runtime": rt.get("fallback_runtime", ""),
+                "fallback_model": rt.get("fallback_model", ""),
+                "fallback_reason": rt.get("fallback_reason", ""),
+            })
+    except Exception:
+        logger.debug("bridge tasks: delegation_store augmentation failed", exc_info=True)
     return j(handler, {"ok": True, "tasks": tasks}) or True
 
 
@@ -11585,10 +11626,22 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
 
 
 def _handle_bridge_prime_history(handler):
-    """GET /api/bridge/prime/history -- persisted Command Bridge transcript."""
+    """GET /api/bridge/prime/history -- persisted Command Bridge transcript.
+
+    Fase 1: include pending_briefs_count so the UI can surface pending briefs
+    that survived a server restart (e.g. badge "N brief in attesa").
+    """
     try:
         from api.prime_session_store import get_prime_session_store
-        return j(handler, get_prime_session_store().history(), extra_headers={"Cache-Control": "no-store"}) or True
+        hist = get_prime_session_store().history()
+        # Fase 1: annotate with pending brief count (best-effort)
+        try:
+            from api.prime_brief_queue import get_brief_queue
+            workspace = Path(str(DEFAULT_WORKSPACE))
+            hist["pending_briefs_count"] = get_brief_queue(workspace).get_pending_count()
+        except Exception:
+            hist["pending_briefs_count"] = 0
+        return j(handler, hist, extra_headers={"Cache-Control": "no-store"}) or True
     except Exception as exc:
         logger.exception("bridge prime history failed")
         return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
@@ -11985,6 +12038,15 @@ def _handle_bridge_prime(handler, body):
                 store.update_todo_snapshot(snap)
         except Exception:
             logger.debug("bridge prime todo snapshot update failed", exc_info=True)
+        # Fase 1: drain pending briefs (fallback no-LLM only; LLM cost already paid)
+        try:
+            from api.prime_brief_queue import get_brief_queue
+            get_brief_queue(workspace).drain_pending(
+                try_llm=False,
+                workspace=workspace,
+            )
+        except Exception:
+            logger.debug("bridge prime: brief drain failed", exc_info=True)
         emit(
             "done",
             {
@@ -12070,11 +12132,16 @@ def _handle_bridge_prime_lead(handler, body):
 
 
 def _handle_bridge_prime_brief(handler, body):
-    """POST /api/bridge/prime/brief — a delega finita, Prime fa un brief all'utente.
+    """POST /api/bridge/prime/brief — idempotent brief delivery via queue (Fase 1).
 
-    Il frontend lo chiama quando una card passa a ok/errore: ri-invoca la sessione
-    persistente di Prime (che ricorda di aver delegato) con il risultato e gli chiede
-    1-2 frasi di sintesi. NON deve delegare di nuovo (vietato nel messaggio)."""
+    Il frontend chiama questo endpoint quando una card delega passa a ok/errore.
+    Fase 1 aggiunge:
+    - Idempotenza: lo stesso brief_id e' consegnato una sola volta.
+    - Persistenza garantita: il fallback no-LLM e' SEMPRE scritto in
+      PrimeSessionStore, anche se Prime/Claude non e' disponibile.
+    - Coda durevole: il brief resta in tasks/prime-brief-queue.jsonl finche'
+      non e' consegnato (sopravvive a refresh, chiusura browser, riavvio).
+    """
     task_id = str((body or {}).get("task_id") or "").strip()
     if not task_id:
         return bad(handler, "task_id is required")
@@ -12082,6 +12149,29 @@ def _handle_bridge_prime_brief(handler, body):
     t = get_background_task(task_id)
     if not t or t.get("status") == "in_corso":
         return j(handler, {"reply": ""})
+    workspace = Path(str(DEFAULT_WORKSPACE))
+    # Enqueue brief (idempotent via brief_id=brief-<task_id>)
+    brief_id = f"brief-{task_id}"
+    try:
+        from api.prime_brief_queue import get_brief_queue
+        from api.delegation_store import classify_error as _clf_err
+        status_canonical = "done" if t.get("status") == "ok" else "failed"
+        error_cat = ""
+        if status_canonical == "failed":
+            error_cat = _clf_err(str(t.get("output") or "")).get("category", "unknown")
+        queue = get_brief_queue(workspace)
+        brief_id = queue.enqueue(
+            task_id,
+            agent=str(t.get("agent") or ""),
+            task_type=str(t.get("task_type") or ""),
+            task=str(t.get("task") or ""),
+            status=status_canonical,
+            output=str(t.get("output") or ""),
+            error_category=error_cat,
+        )
+    except Exception:
+        logger.debug("bridge prime brief: queue enqueue failed for %s", task_id, exc_info=True)
+    # Attempt LLM brief (synchronous, as before)
     esito = "completato" if t.get("status") == "ok" else "fallito"
     brief_msg = (
         "[BRIEF AUTOMATICO] Il sotto-agente " + str(t.get("agent") or "operativo") +
@@ -12092,13 +12182,45 @@ def _handle_bridge_prime_brief(handler, body):
         "prossimo passo. NON delegare di nuovo, NON usare il tool delega: rispondi solo "
         "all'utente a parole."
     )
-    workspace = Path(str(DEFAULT_WORKSPACE))
+    reply = ""
     try:
         result = _hermes_prime_reply(brief_msg, workspace)
-        return j(handler, {"reply": result.get("reply") or ""})
+        reply = result.get("reply") or ""
     except Exception as exc:
-        logger.exception("hermes prime brief failed")
-        return j(handler, {"reply": "", "error": _sanitize_error(exc)})
+        logger.debug("hermes prime brief LLM failed for %s: %s", task_id, exc)
+    # Persist to PrimeSessionStore (LLM reply OR fallback no-LLM)
+    try:
+        from api.prime_brief_queue import get_brief_queue as _gbq
+        from api.prime_session_store import get_prime_session_store
+        _queue = _gbq(workspace)
+        _store = get_prime_session_store()
+        if reply:
+            # LLM succeeded: persist reply, mark brief delivered
+            _store.inject_assistant_message(
+                reply,
+                meta={"brief_id": brief_id, "task_id": task_id, "brief_type": "llm"},
+            )
+            _queue.mark_delivered(brief_id)
+        else:
+            # LLM failed: persist fallback text, still mark delivered
+            pending_briefs = _queue.get_pending()
+            brief_rec = next(
+                (b for b in pending_briefs if b.get("brief_id") == brief_id), None
+            )
+            fb_text = (brief_rec or {}).get("fallback_text") or ""
+            if fb_text:
+                _store.inject_assistant_message(
+                    fb_text,
+                    meta={
+                        "brief_id": brief_id,
+                        "task_id": task_id,
+                        "brief_type": "fallback_no_llm",
+                    },
+                )
+            _queue.mark_delivered(brief_id)
+    except Exception:
+        logger.debug("bridge prime brief: persist failed for %s", task_id, exc_info=True)
+    return j(handler, {"reply": reply, "brief_id": brief_id})
 
 
 def _handle_clarify_pending(handler, parsed):

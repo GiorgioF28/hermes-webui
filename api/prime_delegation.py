@@ -143,6 +143,12 @@ def _persist_bg_task(task_id: str, workspace: str) -> None:
             fh.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
     except Exception:
         logger.debug("delegation persist failed for %s", task_id, exc_info=True)
+    # Fase 1: sync to canonical store (delegations-state.json)
+    try:
+        from api.delegation_store import get_delegation_store, bg_task_to_canonical
+        get_delegation_store(workspace).upsert(bg_task_to_canonical(t))
+    except Exception:
+        logger.debug("delegation_store sync failed for %s", task_id, exc_info=True)
 
 
 def _load_bg_tasks(workspace: str) -> None:
@@ -197,6 +203,19 @@ def _load_bg_tasks(workspace: str) -> None:
             _TASK_SEQ = itertools.count(max(used) + 1)
     except Exception:
         logger.debug("delegation reload failed", exc_info=True)
+    # Fase 1: recover crashed delegations in canonical store
+    try:
+        from api.delegation_store import get_delegation_store
+        _store = get_delegation_store(workspace)
+        _live_ids = set(_BG_TASKS.keys())
+        _recovered = _store.recover_crashed(_live_ids)
+        if _recovered:
+            logger.info(
+                "delegation_store: recovered %d crashed delegation(s): %s",
+                len(_recovered), _recovered,
+            )
+    except Exception:
+        logger.debug("delegation_store crash recovery failed", exc_info=True)
 
 
 async def _run_and_store(task_id, task_type, task, model, label, workspace):
@@ -211,6 +230,19 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
             output = await _run_worker(task, model, workspace, agent_id=t.get("agent_id"), progress=t)
         t.update(status="ok", output=output, finished=time.time())
         _persist_bg_task(task_id, workspace)
+        # Fase 1: enqueue brief for delivery (idempotent)
+        try:
+            from api.prime_brief_queue import get_brief_queue
+            get_brief_queue(workspace).enqueue(
+                task_id,
+                agent=str(t.get("agent") or ""),
+                task_type=task_type,
+                task=task,
+                status="done",
+                output=output,
+            )
+        except Exception:
+            logger.debug("brief queue enqueue failed for %s", task_id, exc_info=True)
         try:
             _enqueue_librarian_pass(task_id, task_type, task, output, workspace)
         except Exception:
@@ -223,6 +255,23 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
         combined = (partial + "\n\n[interrotta: " + msg + "]").strip() if partial else msg
         t.update(status="errore", output=combined, finished=time.time())
         _persist_bg_task(task_id, workspace)
+        # Fase 1: enqueue brief for failed delegation (high priority)
+        try:
+            from api.prime_brief_queue import get_brief_queue
+            from api.delegation_store import classify_error as _clf_err
+            _err_cat = _clf_err(e).get("category", "unknown")
+            get_brief_queue(workspace).enqueue(
+                task_id,
+                agent=str(t.get("agent") or ""),
+                task_type=task_type,
+                task=task,
+                status="failed",
+                output=combined,
+                error_category=_err_cat,
+                priority="high",
+            )
+        except Exception:
+            logger.debug("brief queue enqueue (error) failed for %s", task_id, exc_info=True)
 
 
 def get_background_tasks(max_age: float = 600.0) -> list:
