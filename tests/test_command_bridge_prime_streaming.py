@@ -64,9 +64,13 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
         }
 
     class FakeClient:
+        # Il factory reale aggancia al client l'id SDK fresco della sessione
+        # (bug "Session ID already in use"): il turno deve usare QUELLO.
+        _hermes_sdk_session_id = "11111111-2222-4333-8444-555555555555"
+
         async def query(self, message, session_id="default"):
             assert message.endswith("stato di oggi")
-            assert session_id != "default"
+            assert session_id == "11111111-2222-4333-8444-555555555555"
 
         async def receive_response(self):
             yield ThinkingMessage()

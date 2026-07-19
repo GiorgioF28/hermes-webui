@@ -15,11 +15,20 @@ from api import routes
 # --- 1) contratto: session id SDK di Prime = UUID valido ---------------------
 
 def test_prime_sdk_session_id_is_valid_uuid():
-    sid = routes._PRIME_SDK_SESSION_ID
+    sid = routes._fresh_prime_sdk_session_id()
     # uuid.UUID solleva ValueError se il formato non e' un UUID: il vecchio
     # "hermes-prime-<pid>-<hex>" faceva morire il CLI all'avvio.
     parsed = uuid.UUID(str(sid))
     assert str(parsed) == str(sid).lower()
+
+
+def test_prime_sdk_session_id_is_fresh_per_connect():
+    # Bug 2026-07-18 #3: con un UUID fisso per processo, ogni ricreazione della
+    # sessione rilanciava il CLI con lo stesso --session-id -> "Session ID ...
+    # is already in use" (exit 1, ramo cli_startup) fino al riavvio. L'id deve
+    # essere NUOVO ad ogni chiamata.
+    ids = {routes._fresh_prime_sdk_session_id() for _ in range(5)}
+    assert len(ids) == 5
 
 
 # --- 2) classificazione: crash di startup del CLI != unknown -----------------

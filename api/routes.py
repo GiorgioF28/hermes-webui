@@ -11412,7 +11412,8 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         logger.debug("prime turn: memory retrieval failed", exc_info=True)
 
     async def _drive(client):
-        await client.query(prompt_text, session_id=_PRIME_SDK_SESSION_ID)
+        _sid = getattr(client, "_hermes_sdk_session_id", None) or "default"
+        await client.query(prompt_text, session_id=_sid)
         async for m in client.receive_response():
             if cancel_event.is_set():
                 try:
@@ -15184,9 +15185,16 @@ _CLAUDE_REGISTRY = None
 _CLAUDE_REGISTRY_LOCK = threading.Lock()
 # DEVE essere un UUID puro: il CLI valida `--session-id` ("Invalid session ID.
 # Must be a valid UUID.") ed esce subito con exit 1 -> Prime non si connette mai
-# (bug visto dal vivo con l'id "hermes-prime-<pid>-<hex>"). Resta unico per
-# processo, quindi mantiene lo scopo anti-replay dopo un riavvio.
-_PRIME_SDK_SESSION_ID = str(uuid.uuid4())
+# (bug visto dal vivo con l'id "hermes-prime-<pid>-<hex>").
+#
+# E DEVE essere FRESCO ad ogni creazione del client (bug 2026-07-18 #3): con un
+# UUID fisso per processo, la prima connect funziona ma ogni RICREAZIONE della
+# sessione (reset dopo turno anomalo/quota/Ctrl+F5) rilancia il CLI con lo
+# stesso --session-id e il CLI muore con "Session ID ... is already in use"
+# -> cli_startup fino al riavvio dell'infrastruttura. Un UUID nuovo per connect
+# conserva comunque l'anti-replay (mai riusare la history CLI precedente).
+def _fresh_prime_sdk_session_id() -> str:
+    return str(uuid.uuid4())
 
 
 def _get_claude_registry():
@@ -15208,10 +15216,12 @@ def _get_claude_registry():
                     pass
                 _mcp = {"hermes": build_ask_user_server(session_id)}
                 _allowed = ["mcp__hermes__ask_user"]
+                _sdk_session_id = None
                 if session_id == "hermes-prime":
                     from api.prime_delegation import build_prime_delegation_server
                     _mcp["team"] = build_prime_delegation_server(session_id, str(cwd))
                     _allowed.append("mcp__team__delega")
+                    _sdk_session_id = _fresh_prime_sdk_session_id()
                 options = ClaudeAgentOptions(
                     cwd=str(cwd),
                     add_dirs=_add_dirs,
@@ -15228,9 +15238,12 @@ def _get_claude_registry():
                     setting_sources=[],
                     plugins=[],
                     strict_mcp_config=True,
-                    session_id=_PRIME_SDK_SESSION_ID if session_id == "hermes-prime" else None,
+                    session_id=_sdk_session_id,
                 )
                 client = ClaudeSDKClient(options=options)
+                # La query del turno deve usare LO STESSO id del client corrente
+                # (non un modulo-costante): lo agganciamo al client stesso.
+                client._hermes_sdk_session_id = _sdk_session_id
                 await client.connect()
                 return client
 
