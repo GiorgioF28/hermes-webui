@@ -12,6 +12,10 @@ import * as THREE from './vendor/three/three.module.js';
 import { OrbitControls } from './vendor/three/OrbitControls.js';
 
 const mountedStar = new WeakSet();
+const SUN_BASE_COLOR = new THREE.Color(0xfff0c2);
+const SUN_EMISSIVE_COLOR = new THREE.Color(0xfff6d8);
+const SUN_LISTENING_COLOR = new THREE.Color(0xf7fbff);
+const SUN_LIGHT_COLOR = new THREE.Color(0xfffbf0);
 
 function reduceMotion() {
   try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
@@ -98,7 +102,7 @@ function solarTexture() {
       const fil = Math.pow(fbm(x / 85 + n * 2.8, y / 18, 71, 4), 2.2);
       const heat = 0.38 + n * 0.38 + gran * 0.18 + fil * 0.16 - lat * 0.09;
       bump[i] = heat;
-      putPixel(img.data, i * 4, mix(0.38, 0.98, heat), mix(0.045, 0.24, heat), mix(0.018, 0.055, heat));
+      putPixel(img.data, i * 4, mix(0.84, 1.0, heat), mix(0.56, 0.94, heat), mix(0.22, 0.68, heat));
     }
   }
   g.putImageData(img, 0, 0);
@@ -228,9 +232,9 @@ window.cbInitStar = function (container) {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(45, w / h, 1, 6000);
 
-  const starLight = new THREE.PointLight(0xff8a38, 1.65, 0, 0);
+  const starLight = new THREE.PointLight(SUN_LIGHT_COLOR, 1.22, 0, 0);
   scene.add(starLight);
-  scene.add(new THREE.AmbientLight(0x24304a, 0.78));
+  scene.add(new THREE.AmbientLight(0x303238, 0.64));
 
   // ── Star = Hermes Prime ───────────────────────────────────────────────
   const R = 26;
@@ -238,22 +242,22 @@ window.cbInitStar = function (container) {
   const starCore = new THREE.Mesh(new THREE.SphereGeometry(R, 72, 48), new THREE.MeshStandardMaterial({
     map: solar.map,
     emissiveMap: solar.emissiveMap,
-    emissive: 0xff4a20,
-    emissiveIntensity: 0.68,
+    emissive: SUN_EMISSIVE_COLOR,
+    emissiveIntensity: 0.56,
     bumpMap: solar.bumpMap,
     bumpScale: 1.25,
-    color: 0xff5a22,
+    color: SUN_BASE_COLOR,
     roughness: 1,
     metalness: 0
   }));
   scene.add(starCore);
   const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: radialTexture([[0, 'rgba(255,76,28,.52)'], [0.2, 'rgba(255,86,34,.34)'], [0.48, 'rgba(255,74,22,.15)'], [0.78, 'rgba(190,34,12,.05)'], [1, 'rgba(120,20,10,0)']]),
+    map: radialTexture([[0, 'rgba(255,246,216,.34)'], [0.2, 'rgba(255,238,186,.22)'], [0.48, 'rgba(255,232,170,.09)'], [0.78, 'rgba(255,220,150,.025)'], [1, 'rgba(255,220,150,0)']]),
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
   }));
   glow.scale.setScalar(R * 7.2); scene.add(glow);
   const corona = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: radialTexture([[0, 'rgba(255,126,45,.32)'], [0.46, 'rgba(224,58,18,.12)'], [1, 'rgba(160,24,8,0)']]),
+    map: radialTexture([[0, 'rgba(255,246,216,.18)'], [0.46, 'rgba(255,232,180,.06)'], [1, 'rgba(255,232,180,0)']]),
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
   }));
   corona.scale.setScalar(R * 11.5); scene.add(corona);
@@ -394,7 +398,6 @@ window.cbInitStar = function (container) {
 
   // ── Voice Orb interface ───────────────────────────────────────────────
   let mode = 'idle', amp = 0, manualPulse = 0, beatPhase = 0;
-  const COOL = new THREE.Color(0x9fd6ff), WARM = new THREE.Color(0xff6a2d);
   function matchingPlanets(name) {
     if (!name) return [];
     const q = String(name).toLowerCase();
@@ -448,16 +451,16 @@ window.cbInitStar = function (container) {
     const contract = 1 - beat * 0.16;
     starCore.scale.setScalar(contract);
     if (!reduceMotion()) starCore.rotation.y += dt * 0.035;
-    const tint = WARM.clone().lerp(COOL, cool * 0.6);
+    const tint = SUN_BASE_COLOR.clone().lerp(SUN_LISTENING_COLOR, cool * 0.35);
     starCore.material.color.copy(tint);
-    starCore.material.emissiveIntensity = 0.58 + bright * 0.12;
+    starCore.material.emissiveIntensity = 0.48 + bright * 0.1;
     glow.material.color.copy(tint);
     glow.scale.setScalar(R * (6.9 + beat * 0.24 + Math.sin(t * 0.7) * 0.05));
-    glow.material.opacity = Math.min(0.48, 0.26 * bright);
+    glow.material.opacity = Math.min(0.34, 0.18 * bright);
     corona.scale.setScalar(R * (10.9 + beat * 0.36 + Math.sin(t * 0.42) * 0.08));
-    corona.material.opacity = Math.min(0.32, 0.18 * bright);
-    starLight.intensity = 1.55 * bright;
-    starLight.color.copy(tint);
+    corona.material.opacity = Math.min(0.2, 0.1 * bright);
+    starLight.intensity = 1.16 * bright;
+    starLight.color.copy(SUN_LIGHT_COLOR);
 
     // heartbeat ripples: thin wavy ring expanding to ~Social, fading as it goes
     for (let i = 0; i < rings.length; i++) {
