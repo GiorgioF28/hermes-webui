@@ -12223,6 +12223,14 @@ def _handle_bridge_prime_brief(handler, body):
             _queue.mark_delivered(brief_id)
     except Exception:
         logger.debug("bridge prime brief: persist failed for %s", task_id, exc_info=True)
+    # Punto 3 fix d153: aggiorna anche il canonical store (delegations-state.json)
+    # cosi' la prossima augmentation di /api/bridge/tasks non ri-espone la card
+    # come "undelivered" dopo un riavvio.
+    try:
+        from api.delegation_store import get_delegation_store
+        get_delegation_store(workspace).mark_brief_delivered(task_id)
+    except Exception:
+        logger.debug("bridge prime brief: canonical store mark_brief_delivered failed for %s", task_id, exc_info=True)
     return j(handler, {"reply": reply, "brief_id": brief_id})
 
 

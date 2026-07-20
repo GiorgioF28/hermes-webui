@@ -130,6 +130,44 @@ def _delegations_log_path(workspace: str) -> Path:
     return Path(workspace) / "tasks" / "delegations.jsonl"
 
 
+# Mappa status CANONICO -> LEGACY per la normalizzazione al caricamento.
+# Serve perche' DelegationStore.upsert() appende record in schema canonico allo
+# stesso delegations.jsonl; se l'ultima riga per un id e' quella canonica,
+# _BG_TASKS finisce con status="done", finished=None, output="" -> le card
+# riappaiono dopo il riavvio (bug diagnosticato in d153).
+_CANONICAL_STATUS_TO_LEGACY: dict[str, str] = {
+    "done": "ok",
+    "failed": "errore",
+    "running": "in_corso",
+    "pending": "in_corso",
+}
+
+
+def _canonical_to_legacy(rec: dict) -> dict:
+    """Normalizza un record in schema canonico al formato legacy atteso da _BG_TASKS.
+
+    Non-distruttivo: opera su una copia. Converte:
+    - status:    done->ok, failed->errore, running/pending->in_corso
+    - output:    usa result.text se output e' assente/vuoto
+    - started:   usa started_at come fallback
+    - finished:  usa finished_at come fallback
+    """
+    rec = dict(rec)
+    raw_status = str(rec.get("status") or "")
+    if raw_status in _CANONICAL_STATUS_TO_LEGACY:
+        rec["status"] = _CANONICAL_STATUS_TO_LEGACY[raw_status]
+    # output: il campo canonico e' result.text
+    if not rec.get("output"):
+        result = rec.get("result") or {}
+        rec["output"] = str(result.get("text") or "")
+    # timestamps: il campo canonico usa il suffisso _at
+    if not rec.get("started") and rec.get("started_at"):
+        rec["started"] = rec["started_at"]
+    if not rec.get("finished") and rec.get("finished_at"):
+        rec["finished"] = rec["finished_at"]
+    return rec
+
+
 def _persist_bg_task(task_id: str, workspace: str) -> None:
     """Appende lo stato corrente di una delega al log durevole (crash-safe)."""
     t = _BG_TASKS.get(task_id)
@@ -172,7 +210,13 @@ def _load_bg_tasks(workspace: str) -> None:
                 continue
             tid = rec.get("id")
             if tid:
-                latest[tid] = rec
+                # Punto 1 fix d153: normalizza record canonici (appesi da
+                # DelegationStore.upsert) al formato legacy prima di metterli
+                # in _BG_TASKS. Senza questa conversione l'ultima riga per
+                # ogni id e' quella canonica (status=done, finished=None,
+                # output="") e get_background_tasks() non la filtra per eta',
+                # facendo riapparire le card dopo il riavvio.
+                latest[tid] = _canonical_to_legacy(rec)
         for tid, rec in latest.items():
             if tid in _BG_TASKS:
                 continue
@@ -275,16 +319,29 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
 
 
 def get_background_tasks(max_age: float = 600.0) -> list:
-    """Snapshot JSON-safe delle deleghe in background (in corso + completate recenti)."""
+    """Snapshot JSON-safe delle deleghe in background (in corso + completate recenti).
+
+    Punto 2 fix d153: usa finished_at come fallback di finished e result.text
+    come fallback di output, cosi' i record con schema canonico gia' in memoria
+    vengono filtrati correttamente per max_age anche senza la normalizzazione
+    al load (safety-net in caso di record inseriti direttamente in _BG_TASKS).
+    """
     now = time.time()
+    # Status che indicano una delega ancora in esecuzione (legacy + canonico).
+    _RUNNING_STATUSES = frozenset({"in_corso", "running", "pending"})
     out = []
     for t in list(_BG_TASKS.values()):
-        if t.get("status") != "in_corso" and t.get("finished") and (now - t["finished"]) > max_age:
+        # Fallback: finished_at usato se finished e' assente (record canonico).
+        finished = t.get("finished") or t.get("finished_at")
+        is_running = t.get("status") in _RUNNING_STATUSES
+        if not is_running and finished and (now - finished) > max_age:
             continue
+        # Fallback: result.text usato se output e' assente (record canonico).
+        output = t.get("output") or (t.get("result") or {}).get("text", "")
         out.append({
             "id": t["id"], "agent": t["agent"], "task_type": t["task_type"],
-            "task": t["task"], "status": t["status"], "output": t.get("output", ""),
-            "finished": t.get("finished"),
+            "task": t["task"], "status": t["status"], "output": output,
+            "finished": finished,
             "librarian_status": t.get("librarian_status"),
             "librarian_output": t.get("librarian_output", ""),
             "runtime": t.get("runtime"),
