@@ -42,6 +42,7 @@ _DELEGATIONS: dict[str, list] = {}
 _BG_TASKS: dict[str, dict] = {}
 _BG_REFS: set = set()
 _TASK_SEQ = itertools.count(1)
+_DELEGATION_ANCHORS: dict[str, dict[str, Any]] = {}
 _MEMORY_MCP_SERVER_NAMES = ("hermes-memory", "notion")
 _LIBRARIAN_AGENT_ID = "memory-librarian"
 _LIBRARIAN_MODEL = "claude-sonnet-4-6"
@@ -123,11 +124,61 @@ _PERSIST_FIELDS = (
     "id", "agent", "agent_id", "task_type", "task", "status", "output",
     "started", "finished", "librarian_status", "librarian_output",
     "runtime", "fallback_runtime", "fallback_model", "fallback_reason",
+    "anchor_session_id", "anchor_message_index", "anchor_created_at", "summary",
 )
 
 
 def _delegations_log_path(workspace: str) -> Path:
     return Path(workspace) / "tasks" / "delegations.jsonl"
+
+
+def set_delegation_anchor_context(
+    session_id: str,
+    *,
+    message_index: int | None = None,
+    created_at: float | None = None,
+) -> None:
+    """Set the chat message anchor used by newly-created delegations.
+
+    The Command Bridge creates background cards from a polling endpoint, so the
+    anchor must live in the durable delegation record rather than only in the DOM.
+    """
+    sid = str(session_id or "hermes-prime")
+    _DELEGATION_ANCHORS[sid] = {
+        "anchor_session_id": sid,
+        "anchor_message_index": message_index,
+        "anchor_created_at": created_at,
+    }
+
+
+def _delegation_anchor(session_id: str) -> dict[str, Any]:
+    return dict(_DELEGATION_ANCHORS.get(str(session_id or "hermes-prime")) or {
+        "anchor_session_id": str(session_id or "hermes-prime"),
+        "anchor_message_index": None,
+        "anchor_created_at": None,
+    })
+
+
+def _brief_summary(t: dict) -> str:
+    tid = str(t.get("id") or "").strip()
+    task = re.sub(r"\s+", " ", str(t.get("task") or "").strip())
+    output = re.sub(r"\s+", " ", str(t.get("output") or "").strip())
+    status = str(t.get("status") or "")
+    if status == "in_corso":
+        state = "in corso"
+    elif status in ("ok", "parziale"):
+        state = "completato"
+    elif status == "interrotta":
+        state = "interrotta"
+    else:
+        state = "errore"
+    subject = task or str(t.get("task_type") or t.get("agent") or "delega")
+    commit = ""
+    match = re.search(r"\b(?:commit\s+)?([0-9a-f]{7,12})\b", output, flags=re.I)
+    if match:
+        commit = ", commit " + match.group(1)
+    text = f"{tid} - {subject[:72]}: {state}{commit}".strip()
+    return text[:140]
 
 
 # Mappa status CANONICO -> LEGACY per la normalizzazione al caricamento.
@@ -165,6 +216,15 @@ def _canonical_to_legacy(rec: dict) -> dict:
         rec["started"] = rec["started_at"]
     if not rec.get("finished") and rec.get("finished_at"):
         rec["finished"] = rec["finished_at"]
+    ui = rec.get("ui") or {}
+    if not rec.get("anchor_session_id"):
+        rec["anchor_session_id"] = ui.get("anchor_session_id") or rec.get("session_id")
+    if rec.get("anchor_message_index") is None and ui.get("anchor_message_index") is not None:
+        rec["anchor_message_index"] = ui.get("anchor_message_index")
+    if not rec.get("anchor_created_at"):
+        rec["anchor_created_at"] = ui.get("anchor_created_at")
+    if not rec.get("summary"):
+        rec["summary"] = ui.get("summary") or _brief_summary(rec)
     return rec
 
 
@@ -338,10 +398,17 @@ def get_background_tasks(max_age: float = 600.0) -> list:
             continue
         # Fallback: result.text usato se output e' assente (record canonico).
         output = t.get("output") or (t.get("result") or {}).get("text", "")
+        view = dict(t)
+        view["output"] = output
+        view["finished"] = finished
         out.append({
             "id": t["id"], "agent": t["agent"], "task_type": t["task_type"],
             "task": t["task"], "status": t["status"], "output": output,
             "finished": finished,
+            "anchor_session_id": t.get("anchor_session_id") or t.get("session_id") or "hermes-prime",
+            "anchor_message_index": t.get("anchor_message_index"),
+            "anchor_created_at": t.get("anchor_created_at"),
+            "summary": t.get("summary") or _brief_summary(view),
             "librarian_status": t.get("librarian_status"),
             "librarian_output": t.get("librarian_output", ""),
             "runtime": t.get("runtime"),
@@ -362,6 +429,10 @@ def get_background_task(task_id: str) -> dict | None:
         "id": t["id"], "agent": t["agent"], "task_type": t["task_type"],
         "task": t["task"], "status": t["status"], "output": t.get("output", ""),
         "finished": t.get("finished"),
+        "anchor_session_id": t.get("anchor_session_id") or t.get("session_id") or "hermes-prime",
+        "anchor_message_index": t.get("anchor_message_index"),
+        "anchor_created_at": t.get("anchor_created_at"),
+        "summary": t.get("summary") or _brief_summary(t),
         "librarian_status": t.get("librarian_status"),
         "librarian_output": t.get("librarian_output", ""),
         "runtime": t.get("runtime"),
@@ -828,6 +899,7 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             "fallback_runtime": "",
             "fallback_model": "",
             "fallback_reason": "",
+            **_delegation_anchor(session_id),
         }
         # Logga SEMPRE l'uso: se non c'e' un agente esplicito, usa il label/modello.
         try:
@@ -876,6 +948,7 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             "task_type": "memoria", "task": "Task concluso: " + nome,
             "status": ("ok" if stato != "parziale" else "parziale"),
             "output": riassunto, "started": time.time(), "finished": time.time(),
+            **_delegation_anchor(session_id),
         }
         _persist_bg_task(task_id, workspace)
         # Salvataggio in memoria (Vault -> Graphify -> Notion) via Librarian, async.

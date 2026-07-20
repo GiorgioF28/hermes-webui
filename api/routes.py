@@ -11000,6 +11000,10 @@ def _handle_bridge_tasks(handler, parsed):
                 "status": status_to_legacy(rec.get("status", "")),
                 "output": result.get("text", ""),
                 "finished": rec.get("finished_at"),
+                "anchor_session_id": (rec.get("ui") or {}).get("anchor_session_id") or rec.get("session_id") or "hermes-prime",
+                "anchor_message_index": (rec.get("ui") or {}).get("anchor_message_index"),
+                "anchor_created_at": (rec.get("ui") or {}).get("anchor_created_at"),
+                "summary": (rec.get("ui") or {}).get("summary") or "",
                 "librarian_status": lib.get("status", ""),
                 "librarian_output": lib.get("output", ""),
                 "runtime": rt.get("primary", ""),
@@ -11966,7 +11970,18 @@ def _handle_bridge_prime(handler, body):
 
     from api.streaming import _sse
 
+    anchor_message_index = len((store.history() or {}).get("messages") or [])
+    anchor_created_at = time.time()
     stream_id = store.begin_turn(msg, attachments)
+    try:
+        from api.prime_delegation import set_delegation_anchor_context
+        set_delegation_anchor_context(
+            "hermes-prime",
+            message_index=anchor_message_index,
+            created_at=anchor_created_at,
+        )
+    except Exception:
+        logger.debug("bridge prime delegation anchor setup failed", exc_info=True)
     write_lock = threading.Lock()
 
     def emit(event, payload):

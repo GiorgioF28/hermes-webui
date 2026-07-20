@@ -614,6 +614,26 @@ class TestPersistBgTaskSync(unittest.TestCase):
         self.assertIsNotNone(rec, "Canonical record must exist after _persist_bg_task")
         self.assertEqual(rec["status"], "done")
 
+    def test_persist_bg_task_writes_chat_anchor(self):
+        """Delegation cards need a durable chat anchor to survive reload/restart."""
+        store = self._patch_workspace()
+        import api.prime_delegation as pd
+        pd._BG_TASKS["d50"] = {
+            "id": "d50", "agent": "programmatore", "agent_id": "programmatore",
+            "task_type": "codice", "task": "fix card position",
+            "status": "ok", "output": "Completato, commit 9dd9b9b6",
+            "started": time.time(), "finished": time.time(),
+            "runtime": "codex", "fallback_runtime": "", "fallback_model": "", "fallback_reason": "",
+            "librarian_status": "", "librarian_output": "", "session_id": "hermes-prime",
+            "anchor_session_id": "hermes-prime", "anchor_message_index": 4, "anchor_created_at": 1234.5,
+        }
+        pd._persist_bg_task("d50", str(self.ws))
+        rec = store.get("d50")
+        self.assertEqual(rec["ui"]["anchor_session_id"], "hermes-prime")
+        self.assertEqual(rec["ui"]["anchor_message_index"], 4)
+        self.assertEqual(rec["ui"]["anchor_created_at"], 1234.5)
+        self.assertIn("commit 9dd9b9b6", rec["ui"]["summary"])
+
     def tearDown(self):
         import api.prime_delegation as pd
         pd._BG_TASKS.pop("d50", None)

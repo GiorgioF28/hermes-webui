@@ -231,9 +231,15 @@
 '.cb-attention-card.cb-readonly .cb-attention-actions button,.cb-attention-card.cb-readonly input{pointer-events:none;opacity:.68;}',
 '.cb-choice.selected{border-color:var(--cb-accent);box-shadow:0 0 0 2px rgba(255,106,0,.16) inset;}',
 '.cb-recovered .cb-who:after{content:" · recuperato";color:var(--cb-accent);}',
-'.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:2px solid var(--cb-accent);',
-'  border-radius:8px;padding:9px 12px;background:rgba(255,106,0,.05);font-family:var(--cb-mono);font-size:11px;}',
+'.cb-deleg{align-self:flex-start;max-width:96%;border:1px solid var(--cb-accent-dim);border-left:3px solid var(--cb-accent);',
+'  border-radius:8px;padding:9px 12px;background:rgba(255,106,0,.07);font-family:var(--cb-mono);font-size:11px;box-shadow:0 12px 30px -24px rgba(255,106,0,.75);}',
 '.cb-deleg b{color:var(--cb-accent-2);font-weight:600;}',
+'.cb-deleg.cb-deleg-done{border-color:rgba(72,199,116,.38);border-left-color:#48c774;background:rgba(72,199,116,.08);box-shadow:0 12px 30px -24px rgba(72,199,116,.75);}',
+'.cb-deleg.cb-deleg-error{border-color:rgba(255,92,92,.42);border-left-color:#ff6b5c;background:rgba(255,92,92,.08);box-shadow:0 12px 30px -24px rgba(255,92,92,.75);}',
+'.cb-deleg-summary{margin-top:6px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-deleg-details{margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px;}',
+'.cb-deleg-details summary{cursor:pointer;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;}',
+'.cb-deleg-details[open] .cb-deleg-full{margin-top:6px;color:var(--cb-text);font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;}',
 /* input: a single compact row, fixed at the bottom of the chat console */
 '.cb-chat-input{display:flex;padding:12px 14px 14px;border-top:1px solid var(--cb-line2);}',
 '.cb-chat-input textarea{flex:1;min-width:0;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:12px;',
@@ -816,22 +822,51 @@
   // delegation cards: update-in-place by id (in_corso -> ok/errore), background-aware
   var _cbTasks = {};
   var _cbActiveAgents = {};
+  function taskStateClass(status) {
+    if (status === 'ok' || status === 'parziale') return 'cb-deleg-done';
+    if (status === 'errore' || status === 'interrotta') return 'cb-deleg-error';
+    return 'cb-deleg-running';
+  }
+  function taskStateLabel(status) {
+    if (status === 'in_corso') return 'in corso';
+    if (status === 'ok' || status === 'parziale') return 'completato';
+    if (status === 'interrotta') return 'interrotta';
+    return 'errore';
+  }
+  function taskSummary(t) {
+    if (t && t.summary) return String(t.summary);
+    var id = t && t.id ? String(t.id) : 'delega';
+    var task = String((t && t.task) || (t && t.task_type) || 'task').replace(/\s+/g, ' ').trim();
+    return id + ' - ' + task.slice(0, 72) + ': ' + taskStateLabel(t && t.status);
+  }
+  function placeTaskCard(card, t) {
+    var log = $('cbLog'); if (!log || !card) return;
+    var anchorIdx = Number(t && t.anchor_message_index);
+    var anchor = Number.isFinite(anchorIdx) ? log.querySelector('[data-cb-msg-index="' + anchorIdx + '"]') : null;
+    if (anchor && anchor.parentNode === log) {
+      var next = anchor.nextSibling;
+      while (next && next.classList && next.classList.contains('cb-deleg') && next.getAttribute('data-anchor-index') === String(anchorIdx)) next = next.nextSibling;
+      log.insertBefore(card, next);
+    } else if (card.parentNode !== log) {
+      log.appendChild(card);
+    }
+  }
   function renderTask(t) {
     if (!t || !t.id) return;
     var log = $('cbLog'); if (!log) return;
     var prev = _cbTasks[t.id];
-    var sl = t.status === 'in_corso' ? '&#8230;' : (t.status === 'ok' ? '&#10003;' : '&#10007;');
-    var body = t.status === 'in_corso'
-      ? '<span style="color:var(--cb-muted);font-style:italic">il sotto-agente sta lavorando&#8230;</span>'
-      : '<div style="color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.45">' + esc((t.output || '').slice(0, 600)) + '</div>';
+    var sl = t.status === 'in_corso' ? '&#8230;' : (t.status === 'ok' || t.status === 'parziale' ? '&#10003;' : '&#10007;');
+    var full = String(t.output || '').trim();
+    var detail = full ? '<details class="cb-deleg-details"><summary>dettaglio</summary><div class="cb-deleg-full">' + esc(full) + '</div></details>' : '';
     var html = '<b>&#9883; ' + esc(t.agent || 'agente') + '</b> &middot; ' + esc(t.task_type || '') +
       ' <span style="float:right">' + sl + '</span>' +
-      '<div style="margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px">' + esc((t.task || '').slice(0, 120)) + '</div>' +
-      '<div style="margin-top:6px">' + body + '</div>';
-    if (prev && prev.el) { prev.el.innerHTML = html; }
+      '<div class="cb-deleg-summary">' + esc(taskSummary(t)) + '</div>' + detail;
+    if (prev && prev.el) { prev.el.innerHTML = html; prev.el.className = 'cb-deleg ' + taskStateClass(t.status); placeTaskCard(prev.el, t); }
     else {
-      var c = el('div', 'cb-deleg'); c.innerHTML = html;
-      var _sb = nearBottom(log); log.appendChild(c); if (_sb) log.scrollTop = log.scrollHeight;
+      var c = el('div', 'cb-deleg ' + taskStateClass(t.status)); c.innerHTML = html;
+      c.setAttribute('data-task-id', t.id);
+      if (t.anchor_message_index != null) c.setAttribute('data-anchor-index', String(t.anchor_message_index));
+      var _sb = nearBottom(log); placeTaskCard(c, t); if (_sb) log.scrollTop = log.scrollHeight;
       _cbTasks[t.id] = { el: c, status: t.status };
       // light up the matching planet in the star system
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
@@ -1405,18 +1440,22 @@
       var log = $('cbLog'); if (!log) return;
       var pendingClarify = data.pending_clarify || null;
       var pendingClarifyId = pendingClarify && pendingClarify.clarify_id;
-      (data.messages || []).forEach(function (m) {
+      (data.messages || []).forEach(function (m, idx) {
+        var node = null;
         if (
           m && m._bridge_clarify_event === 'request' &&
           m._bridge_clarify_payload &&
           m._bridge_clarify_id !== pendingClarifyId
         ) {
-          renderBridgeClarifyCard({ pending: m._bridge_clarify_payload }, { readOnly: true });
+          node = renderBridgeClarifyCard({ pending: m._bridge_clarify_payload }, { readOnly: true });
+          if (node) node.setAttribute('data-cb-msg-index', String(idx));
           return;
         }
-        primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '');
+        node = primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '');
+        if (node) node.setAttribute('data-cb-msg-index', String(idx));
       });
       if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
+      pollTasks();
       var pending = data.pending_turn;
       if (pending && pending.partial_output) {
         var node = primeSay('prime', pending.partial_output || '');

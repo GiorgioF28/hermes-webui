@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -130,6 +131,19 @@ def status_to_legacy(canonical: str) -> str:
     return m.get(canonical, canonical)
 
 
+def _ui_summary_from_legacy_task(t: dict) -> str:
+    tid = str(t.get("id") or "").strip()
+    task = " ".join(str(t.get("task") or t.get("task_type") or "task").split())
+    output = " ".join(str(t.get("output") or "").split())
+    status = str(t.get("status") or "")
+    state = "in corso" if status == "in_corso" else ("completato" if status in ("ok", "parziale") else ("interrotta" if status == "interrotta" else "errore"))
+    commit = ""
+    match = re.search(r"\b(?:commit\s+)?([0-9a-f]{7,12})\b", output, flags=re.I)
+    if match:
+        commit = ", commit " + match.group(1)
+    return f"{tid} - {task[:72]}: {state}{commit}"[:140]
+
+
 # ── Canonical record builder ──────────────────────────────────────────────────
 
 def make_canonical_record(
@@ -149,6 +163,7 @@ def make_canonical_record(
     runtime: dict | None = None,
     librarian: dict | None = None,
     brief: dict | None = None,
+    ui: dict | None = None,
 ) -> dict[str, Any]:
     """Build a full canonical record matching the spec §A schema."""
     now = time.time()
@@ -203,6 +218,12 @@ def make_canonical_record(
             "last_error": None,
             "fallback_text": "",
         },
+        "ui": ui or {
+            "anchor_session_id": session_id,
+            "anchor_message_index": None,
+            "anchor_created_at": None,
+            "summary": "",
+        },
     }
 
 
@@ -254,6 +275,12 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
             "finished_at": None,
             "error": None,
             "output": str(t.get("librarian_output") or ""),
+        },
+        ui={
+            "anchor_session_id": str(t.get("anchor_session_id") or t.get("session_id") or "hermes-prime"),
+            "anchor_message_index": t.get("anchor_message_index"),
+            "anchor_created_at": t.get("anchor_created_at"),
+            "summary": str(t.get("summary") or _ui_summary_from_legacy_task(t)),
         },
     )
 

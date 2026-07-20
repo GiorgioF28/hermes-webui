@@ -535,6 +535,19 @@ def test_command_bridge_frontend_loads_history_and_renders_attention_cards():
     assert "cb-recovered" in source
 
 
+def test_command_bridge_frontend_anchors_delegation_cards_and_collapses_details():
+    source = Path("static/command_bridge.js").read_text(encoding="utf-8")
+
+    assert "data-cb-msg-index" in source
+    assert "anchor_message_index" in source
+    assert "function placeTaskCard(card, t)" in source
+    assert "log.querySelector('[data-cb-msg-index=\"" in source
+    assert "cb-deleg-done" in source
+    assert "cb-deleg-error" in source
+    assert "cb-deleg-summary" in source
+    assert "<details class=\"cb-deleg-details\">" in source
+
+
 def test_command_bridge_frontend_renders_usage_quota_and_default_view():
     bridge = Path("static/command_bridge.js").read_text(encoding="utf-8")
     panels = Path("static/panels.js").read_text(encoding="utf-8")
