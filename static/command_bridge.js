@@ -815,6 +815,7 @@
 
   // delegation cards: update-in-place by id (in_corso -> ok/errore), background-aware
   var _cbTasks = {};
+  var _cbActiveAgents = {};
   function renderTask(t) {
     if (!t || !t.id) return;
     var log = $('cbLog'); if (!log) return;
@@ -868,9 +869,29 @@
       .catch(function () { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); setOrb('idle', 0); });
   }
   var _cbPollTimer = null;
+  function syncStarActiveAgents(tasks) {
+    if (!window.cbStar || !window.cbStar.setAgentActive) return;
+    var next = {};
+    (tasks || []).forEach(function (t) {
+      if (t && t.status === 'in_corso') {
+        var key = (t.agent || t.task_type || '').trim();
+        var label = ((t.agent || '') + ' ' + (t.task_type || '')).trim();
+        if (key) next[key] = label || key;
+      }
+    });
+    Object.keys(next).forEach(function (name) {
+      if (!_cbActiveAgents[name]) window.cbStar.setAgentActive(next[name], true);
+    });
+    Object.keys(_cbActiveAgents).forEach(function (name) {
+      if (!next[name]) window.cbStar.setAgentActive(_cbActiveAgents[name], false);
+    });
+    _cbActiveAgents = next;
+  }
   function pollTasks() {
     api('api/bridge/tasks').then(function (d) {
-      if (d && d.tasks) d.tasks.forEach(renderTask);
+      var tasks = d && d.tasks ? d.tasks : [];
+      if (tasks.length) tasks.forEach(renderTask);
+      syncStarActiveAgents(tasks);
     }).catch(function () {});
   }
   function startTaskPolling() { if (!_cbPollTimer) _cbPollTimer = setInterval(pollTasks, 3000); }
