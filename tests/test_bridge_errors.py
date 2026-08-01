@@ -51,6 +51,27 @@ def test_claude_quota_named_exception():
     assert be.classify_branch(_ClaudeExhausted("api_error_status=429")) == be.CLAUDE_QUOTA
 
 
+def test_claude_plan_credits_not_confused_with_quota():
+    # Caso reale (2026-08-01): Fable 5 non e' incluso nel piano Pro e l'API
+    # risponde 429 -> il bridge diceva "quota esaurita" e mandava l'utente ad
+    # aspettare un reset che non sarebbe mai arrivato. E' un problema di PIANO.
+    exc = RuntimeError(
+        "api_error_status=429: Fable 5 requires usage credits. "
+        "Run /usage-credits to continue or switch models with /model."
+    )
+    assert be.classify_branch(exc) == be.CLAUDE_PLAN_CREDITS
+
+
+def test_claude_plan_credits_wins_over_quota_wording():
+    # Il messaggio del pin manuale contiene la parola "quota": il ramo piano
+    # deve comunque vincere, altrimenti la causa vera resta nascosta.
+    exc = RuntimeError(
+        "Claude e' pinnato manualmente e ha rifiutato il turno per quota "
+        "(api_error_status=429: Fable 5 requires usage credits)."
+    )
+    assert be.classify_branch(exc) == be.CLAUDE_PLAN_CREDITS
+
+
 def test_transport_cut():
     assert be.classify_branch(BrokenPipeError("[Errno 32] Broken pipe")) == be.TRANSPORT_CUT
     assert be.classify_branch(ConnectionResetError("WinError 10054")) == be.TRANSPORT_CUT

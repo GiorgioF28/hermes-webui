@@ -11391,7 +11391,7 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
     }
 
 
-def _prime_claude_safe_model(model_state: dict | None, default: str = "claude-fable-5") -> str:
+def _prime_claude_safe_model(model_state: dict | None, default: str = "claude-opus-5") -> str:
     """Modello sicuro per il ramo CLAUDE di Prime.
 
     GUARDIA (bug 2026-07-18): con lo store Prime senza modello salvato,
@@ -11399,6 +11399,11 @@ def _prime_claude_safe_model(model_state: dict | None, default: str = "claude-fa
     e' Codex/GPT ("codex 5.5") — e il CLI Claude muore con "There's an issue
     with the selected model". Un modello non-Claude NON deve mai arrivare al
     client Claude: fallback al default Claude.
+
+    Il default e' Opus 5 e NON Fable 5 (bug 2026-08-01): Fable 5 non e' incluso
+    negli abbonamenti e richiede crediti a consumo, quindi l'API rispondeva 429
+    a ogni turno e il bridge lo mostrava come "quota esaurita". Il default deve
+    restare un modello coperto dall'abbonamento.
     """
     state = model_state or {}
     model = str(state.get("model") or "").strip()
@@ -11575,8 +11580,15 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
             if cancel_event.is_set():
                 timed_out = True
             elif lead_brain.is_claude_quota_error(turn_exc):
+                # Conserva il motivo VERO. Se turn_exc e' gia' un _ClaudeExhausted
+                # sollevato piu' in basso, porta con se' il dettaglio del CLI (es.
+                # "requires usage credits"): sovrascriverlo col nome del tipo
+                # cancellava l'unico indizio utile e lasciava all'utente un
+                # "_ClaudeExhausted" indecifrabile (bug 2026-08-01).
                 raise _ClaudeExhausted(
-                    partial="".join(parts), reason=f"{type(turn_exc).__name__}",
+                    partial="".join(parts),
+                    reason=(getattr(turn_exc, "reason", "") or str(turn_exc)
+                            or type(turn_exc).__name__),
                 ) from turn_exc
             else:
                 raise
@@ -12122,7 +12134,7 @@ def _prime_lead_model_id(lead: str) -> str:
         return _prime_claude_safe_model(_resolve_prime_model_state())
     except Exception:
         logger.debug("prime lead model resolve failed", exc_info=True)
-        return "claude-fable-5"
+        return "claude-opus-5"
 
 
 def _handle_bridge_prime_lead(handler, body):
@@ -15376,7 +15388,7 @@ def _get_claude_registry():
                     system_prompt=system_prompt,
                     permission_mode="bypassPermissions",
                     include_partial_messages=True,
-                    model=str(model or "claude-fable-5"),
+                    model=str(model or "claude-opus-5"),
                     mcp_servers=_mcp,
                     allowed_tools=_allowed,
                     # Isolate the bridge from the user's global Claude Code config:

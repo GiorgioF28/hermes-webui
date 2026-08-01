@@ -136,8 +136,12 @@ def result_message_quota_reason(msg) -> str:
     if status is None and not is_err:
         return ""
     # 429 = rate/usage limit per la finestra corrente → crediti finiti per ora.
+    # Il testo del result va portato dietro: lo stesso 429 copre sia la quota
+    # esaurita sia "modello non incluso nel piano" (Fable 5 su Pro), e senza il
+    # dettaglio i due casi diventano indistinguibili per l'utente.
     if status == 429:
-        return "api_error_status=429"
+        detail = str(getattr(msg, "result", "") or "").strip()
+        return f"api_error_status=429: {detail}"[:300] if detail else "api_error_status=429"
     # 5xx (incluso 529 overloaded): transitorio, non e' quota → non flippare.
     if isinstance(status, int) and 500 <= status < 600:
         return ""

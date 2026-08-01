@@ -62,6 +62,18 @@ def test_result_message_quota_429_triggers_handoff():
     assert lb.result_message_quota_reason(msg)
 
 
+def test_result_message_429_keeps_the_real_detail():
+    # Senza il testo del result l'utente vede solo "429" e non sa che il modello
+    # non e' incluso nel piano (caso Fable 5 su Pro, 2026-08-01).
+    msg = _FakeResult(
+        is_error=True, api_error_status=429, subtype="success",
+        result="Fable 5 requires usage credits. Run /usage-credits to continue.",
+    )
+    reason = lb.result_message_quota_reason(msg)
+    assert "429" in reason
+    assert "requires usage credits" in reason
+
+
 def test_result_message_quota_text_marker():
     msg = _FakeResult(is_error=True, result="Your credit balance is too low")
     assert lb.result_message_quota_reason(msg)

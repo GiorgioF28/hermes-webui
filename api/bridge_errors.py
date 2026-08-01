@@ -14,6 +14,7 @@ from __future__ import annotations
 # Rami stabili. Il valore stringa è parte del contratto (lo usa anche il frontend
 # per decidere il messaggio) → non rinominare senza aggiornare la UI e i test.
 CLAUDE_QUOTA = "claude_quota"
+CLAUDE_PLAN_CREDITS = "claude_plan_credits"
 CODEX_TIMEOUT = "codex_timeout"
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_AUTH = "codex_auth"
@@ -29,6 +30,11 @@ _MESSAGES = {
     CLAUDE_QUOTA: (
         "Claude ha esaurito crediti/quota per questa finestra.",
         "Passa a Codex dalla UI (CODEX) o aspetta il reset della finestra.",
+    ),
+    CLAUDE_PLAN_CREDITS: (
+        "Il modello scelto non è incluso nel tuo piano: richiede crediti extra.",
+        "Non è quota finita e non si sblocca aspettando: scegli un modello incluso "
+        "nell'abbonamento (es. Opus 5 o Sonnet 5) oppure attiva i crediti a consumo.",
     ),
     CODEX_TIMEOUT: (
         "Codex ha superato il tempo massimo per un singolo turno.",
@@ -123,6 +129,16 @@ def classify_branch(exc) -> str:
         "auth.json", "authentication", "credential",
     )):
         return CODEX_AUTH
+
+    # 4-bis) Modello non incluso nel piano (richiede crediti a consumo). PRIMA
+    # della quota: l'API risponde 429 e il messaggio del pin manuale contiene la
+    # parola "quota", quindi senza questa precedenza finirebbe in CLAUDE_QUOTA e
+    # manderebbe l'utente ad aspettare un reset che non arriva mai.
+    if any(k in text for k in (
+        "requires usage credits", "usage credits", "usage-credits",
+        "extra usage", "not included in your plan",
+    )):
+        return CLAUDE_PLAN_CREDITS
 
     # 5) Quota/crediti Claude finiti (include il limite di sessione Pro/Max).
     if name == "_ClaudeExhausted" or any(k in text for k in (
