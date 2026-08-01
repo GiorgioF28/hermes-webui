@@ -42,6 +42,29 @@ def test_non_claude_provider_with_claude_model_falls_back():
     assert routes._prime_claude_safe_model(state) == "claude-opus-5"
 
 
+# --- il modello scelto a mano deve sopravvivere al resolver ------------------
+
+def test_saved_claude_model_survives_codex_profile(monkeypatch):
+    """Regressione 2026-08-01: la scelta dalla tendina veniva buttata via.
+
+    Il profilo attivo della WebUI e' Codex, quindi il resolver considerava
+    "claude-sonnet-5" un residuo cross-provider e lo riscriveva al default
+    Codex. Risultato: la tendina salvava, Prime ignorava. Un modello salvato
+    nelle settings di Prime E' una scelta esplicita dell'utente.
+    """
+    monkeypatch.setattr(routes, "_prime_store_settings", lambda: {"model": "claude-sonnet-5"})
+    monkeypatch.setattr(
+        routes, "_prime_profile_model_config", lambda *a, **k: ("openai-codex", "gpt-5.5-codex")
+    )
+    monkeypatch.setattr(
+        routes, "get_available_models",
+        lambda *a, **k: {"default_model": "gpt-5.5-codex", "active_provider": "openai-codex"},
+    )
+    state = routes._resolve_prime_model_state()
+    assert state["model"] == "claude-sonnet-5"
+    assert not state["normalized_model"]
+
+
 # --- modello mostrato nell'header della UI (_prime_lead_model_id) ------------
 
 def test_lead_model_id_claude_is_always_claude(monkeypatch):

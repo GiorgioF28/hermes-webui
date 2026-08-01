@@ -195,11 +195,17 @@
 '.cb-voicetoggle{background:transparent;border:1px solid var(--cb-line);color:var(--cb-faint);border-radius:8px;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;transition:.15s;}',
 '.cb-voicetoggle:hover{color:var(--cb-text);}',
 '.cb-voicetoggle.cb-on{color:var(--cb-accent);border-color:var(--cb-accent-dim);}',
-'.cb-brainctl{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--cb-line);border-radius:9px;background:rgba(255,255,255,.025);}',
-'.cb-brainbtn{border:0;border-radius:6px;background:transparent;color:var(--cb-faint);font:600 8.5px var(--cb-mono);letter-spacing:.08em;padding:5px 6px;cursor:pointer;transition:.15s;}',
-'.cb-brainbtn:hover{color:var(--cb-text);background:rgba(255,255,255,.05);}',
-'.cb-brainbtn.cb-active{color:#160900;background:var(--cb-accent);}',
-'.cb-brainbtn.cb-auto-active{color:var(--cb-accent-2);box-shadow:inset 0 0 0 1px var(--cb-accent-dim);}',
+'.cb-brainctl{display:flex;align-items:center;padding:2px;border:1px solid var(--cb-line);border-radius:9px;background:rgba(255,255,255,.025);}',
+'.cb-brainsel{appearance:none;-webkit-appearance:none;border:0;border-radius:7px;background:transparent;color:var(--cb-accent);font:600 9px var(--cb-mono);letter-spacing:.08em;padding:5px 20px 5px 8px;cursor:pointer;transition:.15s;max-width:150px;'
+  + 'background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 12 12\'%3E%3Cpath d=\'M2.5 4.5L6 8l3.5-3.5\' fill=\'none\' stroke=\'%23888\' stroke-width=\'1.4\' stroke-linecap=\'round\'/%3E%3C/svg%3E");'
+  + 'background-repeat:no-repeat;background-position:right 5px center;background-size:10px;}',
+'.cb-brainsel:hover{background-color:rgba(255,255,255,.05);color:var(--cb-text);}',
+'.cb-brainsel:focus-visible{outline:2px solid var(--cb-accent-dim);outline-offset:1px;}',
+// La tendina e\' scura come il resto: senza questo il menu nativo su Windows
+// esce bianco e le voci disabilitate diventano illeggibili.
+'.cb-brainsel option{background:#12151c;color:var(--cb-text);font:600 11px var(--cb-mono);}',
+'.cb-brainsel option:disabled{color:#5a6070;font-style:italic;}',
+'.cb-brainsel.cb-codex{color:var(--cb-accent-2);}',
 '.cb-brainctl.cb-busy{opacity:.55;pointer-events:none;}',
 '.cb-chat-log{flex:1;min-height:0;overflow-y:auto;padding:18px 20px;display:flex;flex-direction:column;gap:14px;}',
 '.cb-msg{max-width:92%;font-size:13.5px;line-height:1.5;}',
@@ -447,10 +453,22 @@
             '<div class="cb-chat-role"></div>' +
           '</div>' +
             '<span class="cb-quota" id="cbQuotaPill" hidden></span>' +
-            '<div class="cb-brainctl" id="cbBrainCtl" aria-label="Seleziona brain di Hermes Prime">' +
-              '<button type="button" class="cb-brainbtn" id="cbBrainClaude" data-lead="claude" title="Usa Claude cloud e pinna la scelta">CLOUD</button>' +
-              '<button type="button" class="cb-brainbtn" id="cbBrainAuto" data-action="auto" title="Riabilita il failover automatico">AUTO</button>' +
-              '<button type="button" class="cb-brainbtn" id="cbBrainCodex" data-lead="codex" title="Usa Codex locale e pinna la scelta">CODEX</button>' +
+            '<div class="cb-brainctl" id="cbBrainCtl">' +
+              '<select class="cb-brainsel" id="cbBrainSel" aria-label="Modello o brain di Hermes Prime" title="Scegli il modello di Hermes Prime">' +
+                '<optgroup label="Claude (inclusi nel piano)">' +
+                  '<option value="model:claude-opus-5">Opus 5</option>' +
+                  '<option value="model:claude-sonnet-5">Sonnet 5</option>' +
+                  '<option value="model:claude-haiku-4-5">Haiku 4.5</option>' +
+                  // Fable 5 non e' incluso in nessun abbonamento: richiede crediti a
+                  // consumo e l'API risponde 429. Visibile ma disabilitato, cosi' si
+                  // capisce PERCHE' non e' selezionabile (bug 2026-08-01).
+                  '<option value="model:claude-fable-5" disabled>Fable 5 — richiede crediti</option>' +
+                '</optgroup>' +
+                '<optgroup label="Altro brain">' +
+                  '<option value="lead:codex">Codex (locale)</option>' +
+                  '<option value="action:auto">AUTO — failover</option>' +
+                '</optgroup>' +
+              '</select>' +
             '</div>' +
             '<button type="button" class="cb-voicetoggle cb-on" id="cbVoice" aria-label="Voce on/off" title="Voce on/off">' +
               '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg></button>' +
@@ -564,6 +582,7 @@
     var m = raw.toLowerCase().replace(/^codex:/, '');
     var known = [
       [/^claude-fable-5/, 'Fable 5'],
+      [/^claude-opus-5/, 'Opus 5'],
       [/^claude-opus-4-8/, 'Opus 4.8'],
       [/^claude-opus-4-7/, 'Opus 4.7'],
       [/^claude-sonnet-5/, 'Sonnet 5'],
@@ -583,10 +602,31 @@
     state = state || {};
     var lead = String(state.lead || 'claude').toLowerCase();
     var manual = !!state.manual;
-    var claude = $('cbBrainClaude'), codex = $('cbBrainCodex'), auto = $('cbBrainAuto');
-    if (claude) claude.classList.toggle('cb-active', lead === 'claude');
-    if (codex) codex.classList.toggle('cb-active', lead === 'codex');
-    if (auto) auto.classList.toggle('cb-auto-active', !manual);
+    var sel = $('cbBrainSel');
+    if (sel) {
+      var model = String(state.model || '').replace(/^codex:/, '');
+      if (lead === 'codex') {
+        sel.value = 'lead:codex';
+      } else {
+        var want = 'model:' + model, has = false;
+        for (var i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === want) { has = true; break; }
+        }
+        // Modello risolto fuori lista (profilo o override manuale): aggiungilo,
+        // altrimenti la tendina resterebbe su una voce che non e' quella attiva
+        // e mostrerebbe il modello sbagliato.
+        if (!has && model) {
+          var opt = document.createElement('option');
+          opt.value = want;
+          opt.textContent = prettyModelName(model) || model;
+          sel.getElementsByTagName('optgroup')[0].appendChild(opt);
+        }
+        if (model) sel.value = want;
+      }
+      sel.classList.toggle('cb-codex', lead === 'codex');
+      sel.title = (manual ? 'Scelta pinnata a mano' : 'Failover automatico attivo')
+        + ' — cambia modello o brain di Hermes Prime';
+    }
     var role = document.querySelector('.cb-chat-role');
     // Solo il MODELLO vero del capo (es. "Fable 5") — niente chief-of-staff/PIN/voce.
     var brainLabel = prettyModelName(state.model) || lead.toUpperCase();
@@ -616,11 +656,38 @@
 
   function refreshBrainState() { return setBrain({ action: 'get' }); }
 
+  function setPrimeModel(modelId) {
+    var ctl = $('cbBrainCtl'); if (ctl) ctl.classList.add('cb-busy');
+    var cfg = window.__HERMES_CONFIG__ || {};
+    return fetch(new URL('api/bridge/prime/model', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: JSON.stringify({ action: 'set', model: modelId })
+    }).then(function (r) {
+      if (!r.ok) return r.json().catch(function () { return {}; }).then(function (d) { throw new Error(d.error || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function () {
+      // Scegliere un modello Claude implica che il capo sia Claude: se restasse
+      // pinnato Codex la tendina mentirebbe (mostra Opus, risponde Codex).
+      return setBrain({ action: 'set', lead: 'claude' });
+    }).catch(function (err) {
+      sysNote('Cambio modello fallito: ' + String(err && err.message || err));
+      return refreshBrainState();
+    }).then(function (state) {
+      if (ctl) ctl.classList.remove('cb-busy');
+      return state;
+    });
+  }
+
   function wireBrainControls() {
-    var claude = $('cbBrainClaude'), codex = $('cbBrainCodex'), auto = $('cbBrainAuto');
-    if (claude) claude.addEventListener('click', function () { setBrain({ action: 'set', lead: 'claude' }); });
-    if (codex) codex.addEventListener('click', function () { setBrain({ action: 'set', lead: 'codex' }); });
-    if (auto) auto.addEventListener('click', function () { setBrain({ action: 'auto' }); });
+    var sel = $('cbBrainSel');
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+      var v = String(sel.value || '');
+      if (v.indexOf('model:') === 0) return setPrimeModel(v.slice(6));
+      if (v === 'lead:codex') return setBrain({ action: 'set', lead: 'codex' });
+      if (v === 'action:auto') return setBrain({ action: 'auto' });
+    });
   }
 
   function setPrimeStreaming(active, streamId) {

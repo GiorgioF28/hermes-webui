@@ -11168,7 +11168,12 @@ def _resolve_prime_model_state(settings: dict | None = None, *, model=None, prof
         requested_provider,
         profile_provider=pp_provider,
         profile_default_model=pp_default,
-        explicit_model_pick=bool(model),
+        # Anche un modello gia' salvato nelle settings di Prime e' una scelta
+        # esplicita: l'utente l'ha preso dalla tendina. Guardando solo l'argomento
+        # `model`, il resolver lo trattava come residuo cross-provider e lo
+        # riscriveva al default Codex del profilo -> la scelta veniva ignorata
+        # in silenzio a ogni turno (bug 2026-08-01).
+        explicit_model_pick=bool(requested_model),
         prefer_cached_catalog=True,
     )
     return {

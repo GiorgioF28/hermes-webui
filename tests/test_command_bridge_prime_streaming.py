@@ -517,9 +517,17 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "if (!reply && ph && ph.parentNode)" in source
     assert "api('api/bridge/tasks')" in source
     assert "setInterval(pollTasks, 3000)" in source
-    assert 'id="cbBrainClaude"' in source
-    assert 'id="cbBrainCodex"' in source
+    # Selettore unico modello+brain (2026-08-01): la tendina ha sostituito i tre
+    # bottoni CLOUD/AUTO/CODEX, ma Codex e AUTO devono restare raggiungibili --
+    # sono la via di fuga quando Claude esaurisce la finestra.
+    assert 'id="cbBrainSel"' in source
+    assert 'value="model:claude-opus-5"' in source
+    assert 'value="lead:codex"' in source
+    assert 'value="action:auto"' in source
+    # Fable 5 elencato ma NON selezionabile: richiede crediti a consumo.
+    assert 'value="model:claude-fable-5" disabled' in source
     assert "api/bridge/prime/lead" in source
+    assert "api/bridge/prime/model" in source
     assert "action: 'auto'" in source
 
 
