@@ -756,17 +756,29 @@ async def _run_codex_worker_with_fallback(task: str, workspace: str, *, progress
 
 
 def _codex_exec_blocking(task: str, workspace: str) -> str:
-    """Run one Codex CLI exec turn (blocking) and return stdout (or raise)."""
+    """Run one Codex CLI exec turn (blocking) and return stdout (or raise).
+
+    Il prompt viaggia su STDIN (`codex exec -`), MAI come argomento.
+    Su Windows l'eseguibile e' `codex.cmd`: un batch file. CreateProcess lo
+    lancia tramite `cmd.exe /c`, che RI-PARSA la riga di comando, quindi i
+    metacaratteri del task (`&`, `|`, `(`, `)`, `^`, `<`, `>`, newline)
+    troncano l'argomento e possono persino far eseguire pezzi di testo come
+    comandi. Sintomo osservato: il sotto-agente riceve solo l'inizio del task
+    e risponde con un generico "Ricevuto, dimmi cosa verificare".
+    Riproduzione: un task con `... (1) righe & (2) prime 10.` fa uscire il
+    wrapper con exit 255 e l'errore cmd "prime non atteso".
+    """
     exe = _resolve_codex_executable()
     cmd = [
         exe, "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "-C", str(workspace),
-        str(task),
+        "-",  # prompt da stdin: nessun parsing di cmd.exe sul testo del task
     ]
     proc = subprocess.run(
         cmd,
         cwd=str(workspace),
+        input=str(task),
         capture_output=True,
         text=True,
         encoding="utf-8",
