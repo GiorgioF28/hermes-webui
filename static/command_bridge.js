@@ -961,23 +961,41 @@
     setOrb('thinking', 0);
     var ph = pendingBubble(); // riusa la bolla "sto ragionando…" di Hermes Prime
     var cfg = window.__HERMES_CONFIG__ || {};
+    var finish = function (reply) {
+      reply = String(reply || '').trim();
+      if (ph && ph.parentNode) {
+        if (reply) {
+          var bub = ph.querySelector('.cb-bubble');
+          if (bub) { bub.removeAttribute('style'); renderRich(bub, reply); }
+          if (userEngaged) speak(reply);
+        } else { ph.parentNode.removeChild(ph); }
+      }
+      setOrb('idle', 0);
+    };
+    // Il brief gira in background lato server: qui si fa solo polling leggero,
+    // cosi' nessuna connessione resta appesa per minuti (spam "Request timed out").
+    var BRIEF_POLL_MS = 3000;
+    var BRIEF_MAX_MS = 15 * 60 * 1000;
+    var t0 = Date.now();
+    var pollStatus = function () {
+      if (Date.now() - t0 > BRIEF_MAX_MS) { finish(''); return; }
+      api('api/bridge/prime/brief/status?task_id=' + encodeURIComponent(t.id))
+        .then(function (s) {
+          if (s && s.pending) { setTimeout(pollStatus, BRIEF_POLL_MS); return; }
+          finish((s && s.reply) || '');
+        })
+        .catch(function () { setTimeout(pollStatus, BRIEF_POLL_MS); });
+    };
     fetch(new URL('api/bridge/prime/brief', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
       body: JSON.stringify({ task_id: t.id })
     }).then(function (r) { return r.json(); })
       .then(function (d) {
-        var reply = String((d && d.reply) || '').trim();
-        if (ph && ph.parentNode) {
-          if (reply) {
-            var bub = ph.querySelector('.cb-bubble');
-            if (bub) { bub.removeAttribute('style'); renderRich(bub, reply); }
-            if (userEngaged) speak(reply);
-          } else { ph.parentNode.removeChild(ph); }
-        }
-        setOrb('idle', 0);
+        if (d && d.pending) { setTimeout(pollStatus, BRIEF_POLL_MS); return; }
+        finish((d && d.reply) || '');
       })
-      .catch(function () { if (ph && ph.parentNode) ph.parentNode.removeChild(ph); setOrb('idle', 0); });
+      .catch(function () { finish(''); });
   }
   var _cbPollTimer = null;
   function syncStarActiveAgents(tasks) {

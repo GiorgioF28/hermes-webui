@@ -1,3 +1,15 @@
+// Anti-spam del toast di timeout: quando il pool di connessioni del browser si
+// satura, decine di richieste di polling scadono insieme. Un toast ogni 60s basta.
+const _TIMEOUT_TOAST_COOLDOWN_MS=60000;
+let _lastTimeoutToastAt=0;
+function _showTimeoutToastThrottled(){
+  if(typeof showToast!=='function') return;
+  const now=Date.now();
+  if(now-_lastTimeoutToastAt<_TIMEOUT_TOAST_COOLDOWN_MS) return;
+  _lastTimeoutToastAt=now;
+  showToast('Request timed out. Please try again.',5000,'error');
+}
+
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
@@ -72,7 +84,7 @@ async function api(path,opts={}){
         const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
         err.name='TimeoutError';
         err.timeout=true;
-        if(timeoutToast&&typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
+        if(timeoutToast) _showTimeoutToastThrottled();
         throw err;
       }
       // Only retry on network errors (TypeError from fetch), not on HTTP errors

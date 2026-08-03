@@ -6433,6 +6433,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/prime/live":
         return _handle_bridge_prime_live(handler)
 
+    if parsed.path == "/api/bridge/prime/brief/status":
+        return _handle_bridge_prime_brief_status(handler, parsed)
+
     if parsed.path == "/api/bridge/prime/todos":
         return _handle_bridge_prime_todos(handler)
 
@@ -12166,6 +12169,66 @@ def _handle_bridge_prime_lead(handler, body):
     return j(handler, {"ok": True, **state, "model": _prime_lead_model_id(state.get("lead"))})
 
 
+# ── Brief asincrono (fix spam "Request timed out") ───────────────────────────
+# Il turno LLM del brief dura anche 4 minuti: se lo eseguiamo dentro la POST,
+# la connessione resta occupata e insieme alle SSE satura il pool di connessioni
+# del browser (~6 per origine). Tutte le fetch di polling si accodano, superano
+# il timeout di 30s di workspace.js e sparano il toast a raffica.
+# Soluzione: la POST avvia un job in background e ritorna subito; il frontend
+# recupera l'esito da GET /api/bridge/prime/brief/status.
+_BRIEF_JOBS = {}
+_BRIEF_JOBS_LOCK = threading.Lock()
+_BRIEF_JOBS_MAX = 50
+
+
+def _brief_job_set(task_id, **fields):
+    with _BRIEF_JOBS_LOCK:
+        rec = _BRIEF_JOBS.setdefault(task_id, {})
+        rec.update(fields)
+        # garbage collection semplice: tieni solo gli ultimi N job
+        if len(_BRIEF_JOBS) > _BRIEF_JOBS_MAX:
+            done = [
+                (k, v.get("finished_at") or 0.0)
+                for k, v in _BRIEF_JOBS.items()
+                if v.get("state") in ("done", "error")
+            ]
+            done.sort(key=lambda kv: kv[1])
+            for k, _ in done[: max(0, len(_BRIEF_JOBS) - _BRIEF_JOBS_MAX)]:
+                _BRIEF_JOBS.pop(k, None)
+        return dict(rec)
+
+
+def _brief_job_get(task_id):
+    with _BRIEF_JOBS_LOCK:
+        rec = _BRIEF_JOBS.get(task_id)
+        return dict(rec) if rec else None
+
+
+def _handle_bridge_prime_brief_status(handler, parsed):
+    """GET /api/bridge/prime/brief/status?task_id=... — esito del brief asincrono."""
+    qs = parse_qs(parsed.query or "")
+    task_id = str((qs.get("task_id") or [""])[0] or "").strip()
+    if not task_id:
+        return bad(handler, "task_id is required")
+    rec = _brief_job_get(task_id)
+    if not rec:
+        return j(
+            handler,
+            {"state": "unknown", "reply": "", "pending": False},
+            extra_headers={"Cache-Control": "no-store"},
+        )
+    return j(
+        handler,
+        {
+            "state": rec.get("state") or "unknown",
+            "pending": rec.get("state") == "running",
+            "reply": rec.get("reply") or "",
+            "brief_id": rec.get("brief_id") or "",
+        },
+        extra_headers={"Cache-Control": "no-store"},
+    )
+
+
 def _handle_bridge_prime_brief(handler, body):
     """POST /api/bridge/prime/brief — idempotent brief delivery via queue (Fase 1).
 
@@ -12176,6 +12239,9 @@ def _handle_bridge_prime_brief(handler, body):
       PrimeSessionStore, anche se Prime/Claude non e' disponibile.
     - Coda durevole: il brief resta in tasks/prime-brief-queue.jsonl finche'
       non e' consegnato (sopravvive a refresh, chiusura browser, riavvio).
+
+    La risposta e' immediata: il turno LLM gira in un thread di background e
+    l'esito si legge da GET /api/bridge/prime/brief/status?task_id=...
     """
     task_id = str((body or {}).get("task_id") or "").strip()
     if not task_id:
@@ -12184,6 +12250,14 @@ def _handle_bridge_prime_brief(handler, body):
     t = get_background_task(task_id)
     if not t or t.get("status") == "in_corso":
         return j(handler, {"reply": ""})
+    existing = _brief_job_get(task_id)
+    if existing and existing.get("state") == "running":
+        # job gia' in corso: non duplicare il turno LLM
+        return j(
+            handler,
+            {"reply": "", "pending": True, "async": True, "brief_id": existing.get("brief_id") or ""},
+            extra_headers={"Cache-Control": "no-store"},
+        )
     workspace = Path(str(DEFAULT_WORKSPACE))
     # Enqueue brief (idempotent via brief_id=brief-<task_id>)
     brief_id = f"brief-{task_id}"
@@ -12206,7 +12280,6 @@ def _handle_bridge_prime_brief(handler, body):
         )
     except Exception:
         logger.debug("bridge prime brief: queue enqueue failed for %s", task_id, exc_info=True)
-    # Attempt LLM brief (synchronous, as before)
     esito = "completato" if t.get("status") == "ok" else "fallito"
     brief_msg = (
         "[BRIEF AUTOMATICO] Il sotto-agente " + str(t.get("agent") or "operativo") +
@@ -12217,6 +12290,30 @@ def _handle_bridge_prime_brief(handler, body):
         "prossimo passo. NON delegare di nuovo, NON usare il tool delega: rispondi solo "
         "all'utente a parole."
     )
+    _brief_job_set(
+        task_id,
+        state="running",
+        reply="",
+        brief_id=brief_id,
+        started_at=time.time(),
+        finished_at=0.0,
+    )
+    worker = threading.Thread(
+        target=_run_prime_brief_job,
+        args=(task_id, brief_id, brief_msg, workspace),
+        name="prime-brief-" + task_id[:12],
+        daemon=True,
+    )
+    worker.start()
+    return j(
+        handler,
+        {"reply": "", "pending": True, "async": True, "brief_id": brief_id},
+        extra_headers={"Cache-Control": "no-store"},
+    )
+
+
+def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace):
+    """Turno LLM del brief + persistenza. Gira in un thread, mai dentro la POST."""
     reply = ""
     try:
         result = _hermes_prime_reply(brief_msg, workspace)
@@ -12263,7 +12360,14 @@ def _handle_bridge_prime_brief(handler, body):
         get_delegation_store(workspace).mark_brief_delivered(task_id)
     except Exception:
         logger.debug("bridge prime brief: canonical store mark_brief_delivered failed for %s", task_id, exc_info=True)
-    return j(handler, {"reply": reply, "brief_id": brief_id})
+    _brief_job_set(
+        task_id,
+        state="done",
+        reply=reply,
+        brief_id=brief_id,
+        finished_at=time.time(),
+    )
+    return reply
 
 
 def _handle_clarify_pending(handler, parsed):
