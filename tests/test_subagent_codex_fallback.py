@@ -97,7 +97,7 @@ async def test_codex_quota_falls_back_to_sonnet_and_reuses_cooldown(monkeypatch,
     codex_calls = []
     worker_calls = []
 
-    async def fake_codex(task, workspace):
+    async def fake_codex(task, workspace, *, agent_id=None):
         codex_calls.append((task, workspace))
         raise RuntimeError("Codex CLI exit 1: HTTP 429 usage_limit_exceeded")
 

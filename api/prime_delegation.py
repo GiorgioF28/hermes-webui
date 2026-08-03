@@ -329,7 +329,9 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
         return
     try:
         if model == _CODEX_MODEL:
-            output = await _run_codex_worker_with_fallback(task, workspace, progress=t)
+            output = await _run_codex_worker_with_fallback(
+                task, workspace, agent_id=t.get("agent_id"), progress=t
+            )
         else:
             output = await _run_worker(task, model, workspace, agent_id=t.get("agent_id"), progress=t)
         t.update(status="ok", output=output, finished=time.time())
@@ -478,6 +480,59 @@ def _agent_slug(value: str) -> str:
     return slug or "agent"
 
 
+# Nomi con cui Prime chiama gli agenti -> slug della nota in 06-Agents.
+# Senza questa tabella `agent="programmatore"` non trovava
+# "Programmatore Project Engineer.md" (match solo esatto) e il sotto-agente
+# partiva con la persona generica, perdendo il suo contratto operativo.
+_AGENT_NOTE_ALIASES = {
+    "programmatore": "programmatore-project-engineer",
+    "programmer": "programmatore-project-engineer",
+    "sviluppatore": "programmatore-project-engineer",
+    "developer": "programmatore-project-engineer",
+    "dev": "programmatore-project-engineer",
+    "coder": "programmatore-project-engineer",
+    "codex": "programmatore-project-engineer",
+    "ricercatore": "research-analyst",
+    "researcher": "research-analyst",
+    "research": "research-analyst",
+    "analista": "research-analyst",
+    "social": "social-client-contact",
+    "outreach": "social-client-contact",
+    "orchestratore": "orchestratore",
+    "orchestrator": "orchestratore",
+    "librarian": "memory-librarian",
+    "memory-librarian": "memory-librarian",
+    "memoria": "memory-librarian",
+    "qa": "qa-reviewer",
+    "reviewer": "qa-reviewer",
+    "n8n": "n8n-workflow-engineer",
+    "pdf": "pdf-ebook-designer",
+    "ebook": "pdf-ebook-designer",
+    "business": "business-strategist",
+    "strategist": "business-strategist",
+    "ops": "ops-automation-engineer",
+}
+
+
+def _agent_note_candidates(agents_dir: Path) -> list[tuple[str, Path]]:
+    """(slug, path) per ogni nota agente: slug del file e slug del titolo H1."""
+    out: list[tuple[str, Path]] = []
+    for path in sorted(agents_dir.glob("*.md"), key=lambda p: p.name.lower()):
+        slugs = {_agent_slug(path.stem)}
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        match = re.search(r"(?m)^#\s+(.+?)\s*$", text)
+        if match:
+            title = re.sub(r"^Agent:\s*", "", match.group(1).strip(), flags=re.I)
+            slugs.add(_agent_slug(title))
+        for slug in slugs:
+            if slug:
+                out.append((slug, path))
+    return out
+
+
 def _agent_note_path(agent_id: str | None, workspace: str) -> Path | None:
     if not agent_id:
         return None
@@ -485,16 +540,20 @@ def _agent_note_path(agent_id: str | None, workspace: str) -> Path | None:
     if not agents_dir.is_dir():
         return None
     wanted = _agent_slug(agent_id)
-    for path in sorted(agents_dir.glob("*.md"), key=lambda p: p.name.lower()):
-        if _agent_slug(path.stem) == wanted:
+    candidates = _agent_note_candidates(agents_dir)
+    # 1) alias esplicito (deterministico)
+    alias = _AGENT_NOTE_ALIASES.get(wanted)
+    if alias:
+        for slug, path in candidates:
+            if slug == alias:
+                return path
+    # 2) match esatto su nome file o titolo
+    for slug, path in candidates:
+        if slug == wanted:
             return path
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        match = re.search(r"(?m)^#\s+(.+?)\s*$", text)
-        title = re.sub(r"^Agent:\s*", "", match.group(1).strip(), flags=re.I) if match else ""
-        if _agent_slug(title) == wanted:
+    # 3) prefisso: "programmatore" -> "programmatore-project-engineer"
+    for slug, path in candidates:
+        if slug.startswith(wanted + "-"):
             return path
     return None
 
@@ -727,19 +786,27 @@ def _set_progress_fallback(progress: dict | None, reason: str) -> None:
     )
 
 
-async def _run_codex_worker_with_fallback(task: str, workspace: str, *, progress: dict | None = None) -> str:
+async def _run_codex_worker_with_fallback(
+    task: str,
+    workspace: str,
+    *,
+    agent_id: str | None = None,
+    progress: dict | None = None,
+) -> str:
     """Run a Codex sub-agent, falling back to Sonnet 4.6 only for quota exhaustion."""
     status = _codex_fallback_status()
     if status["active"]:
         reason = status.get("reason") or "cooldown quota Codex"
         _set_progress_fallback(progress, reason)
         logger.warning("Codex subagent fallback active -> %s (%.0fs remaining)", status["model"], status["remaining"])
-        return await _run_worker(task, codex_fallback_model(), workspace, progress=progress)
+        return await _run_worker(
+            task, codex_fallback_model(), workspace, agent_id=agent_id, progress=progress
+        )
 
     if progress is not None:
         progress["runtime"] = "codex"
     try:
-        output = await _run_codex_worker(task, workspace)
+        output = await _run_codex_worker(task, workspace, agent_id=agent_id)
         _clear_codex_fallback()
         return output
     except Exception as exc:
@@ -752,7 +819,9 @@ async def _run_codex_worker_with_fallback(task: str, workspace: str, *, progress
             status["model"],
             status["remaining"],
         )
-        return await _run_worker(task, codex_fallback_model(), workspace, progress=progress)
+        return await _run_worker(
+            task, codex_fallback_model(), workspace, agent_id=agent_id, progress=progress
+        )
 
 
 def _codex_exec_blocking(task: str, workspace: str) -> str:
@@ -794,10 +863,32 @@ def _codex_exec_blocking(task: str, workspace: str) -> str:
     return out or err
 
 
-async def _run_codex_worker(task: str, workspace: str) -> str:
+def _codex_worker_prompt(task: str, agent_id: str | None, workspace: str) -> str:
+    """Prompt completo per Codex: istruzioni di sistema + task.
+
+    Il Codex CLI non ha un flag di system prompt (`codex exec --help`: solo
+    prompt posizionale/stdin), quindi la persona viaggia in testa allo stesso
+    messaggio, delimitata. Fino a oggi il path Codex mandava il task NUDO: il
+    sotto-agente non vedeva ne' la persona, ne' le regole di sicurezza, ne' la
+    sua nota agente in obsidian-vault/06-Agents — a differenza del path Claude,
+    che le passa via ClaudeAgentOptions.system_prompt. Per migliorare un agente
+    si edita la sua nota nel Vault: da qui in poi vale per entrambi i runtime.
+    """
+    system = _worker_system_prompt(agent_id, workspace).strip()
+    return (
+        "# ISTRUZIONI DI SISTEMA (vincolanti, non sono il task)\n"
+        f"{system}\n\n"
+        "---\n\n"
+        "# TASK DA ESEGUIRE ORA\n"
+        f"{str(task).strip()}\n"
+    )
+
+
+async def _run_codex_worker(task: str, workspace: str, *, agent_id: str | None = None) -> str:
     """Run a Codex CLI exec turn off the event loop (non-blocking)."""
+    prompt = _codex_worker_prompt(task, agent_id, workspace)
     try:
-        return await asyncio.to_thread(_codex_exec_blocking, task, workspace)
+        return await asyncio.to_thread(_codex_exec_blocking, prompt, workspace)
     except FileNotFoundError as e:
         raise RuntimeError("Codex CLI non trovato (codex.cmd non nel PATH)") from e
     except subprocess.TimeoutExpired as e:
