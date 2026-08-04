@@ -5670,3 +5670,113 @@ main.main.showing-logs > #mainLogs{display:flex;}
   display: block;
 }
 .interim-collapse-toggle:hover { text-decoration: underline; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Chat: nessuno scroll orizzontale (fix mobile/desktop)
+   La colonna messaggi non deve MAI poter scrollare a destra. Qualunque
+   contenuto non wrappabile (URL lunghe, code block, tabelle, card con
+   width fisse) deve essere contenuto, non allargare il container.
+   Difensivo per costruzione: sta in fondo al file per vincere in cascata.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* NB: overflow-x NON va messo su .messages-shell — le card assolute
+   (approval/queue/clarify) sporgono con bottom negativo e verrebbero
+   tagliate, perche' overflow-x:hidden forza overflow-y da visible ad auto. */
+.messages-shell {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.messages {
+  overflow-x: hidden;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* Figli flex/grid: senza min-width:0 un figlio non comprimibile allarga il padre */
+.messages > *,
+.messages-inner,
+.messages-inner > *,
+.msg-row,
+.msg-row > *,
+.assistant-turn,
+.assistant-turn-blocks,
+.assistant-turn-blocks > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.msg-row {
+  box-sizing: border-box;
+}
+
+.msg-body,
+.msg-files,
+.msg-usage,
+.msg-foot {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* .msg-body ha max-width: var(--msg-max): resta valido ma non deve mai superare il container */
+.msg-body { max-width: min(var(--msg-max), 100%); }
+
+.msg-body p,
+.msg-body li,
+.msg-body h1,
+.msg-body h2,
+.msg-body h3,
+.msg-body h4,
+.msg-body h5,
+.msg-body h6,
+.msg-body blockquote,
+.msg-body a,
+.msg-body code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+/* Code block: lo scroll resta INTERNO al blocco, non arriva mai al container */
+.msg-body pre,
+.preview-md pre {
+  max-width: 100%;
+  overflow-x: auto;
+  box-sizing: border-box;
+}
+
+/* Tabelle: scroll interno al proprio box */
+.msg-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  box-sizing: border-box;
+}
+
+.msg-body img,
+.msg-body svg,
+.msg-body video,
+.msg-body iframe,
+.msg-body canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Card e allegati dentro il flusso chat */
+.messages .status-card,
+.messages .tool-card,
+.messages .thinking-card,
+.messages .agent-activity-group,
+.messages .msg-edit-area {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* KaTeX: le formule larghe scrollano dentro il proprio box */
+.msg-body .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
