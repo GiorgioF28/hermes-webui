@@ -468,10 +468,12 @@
                   '<option value="model:claude-opus-5">Opus 5</option>' +
                   '<option value="model:claude-sonnet-5">Sonnet 5</option>' +
                   '<option value="model:claude-haiku-4-5">Haiku 4.5</option>' +
-                  // Fable 5 non e' incluso in nessun abbonamento: richiede crediti a
-                  // consumo e l'API risponde 429. Visibile ma disabilitato, cosi' si
-                  // capisce PERCHE' non e' selezionabile (bug 2026-08-01).
-                  '<option value="model:claude-fable-5" disabled>Fable 5 — richiede crediti</option>' +
+                  // Fable 5: disabilitato dal 2026-08-01 perche' sul piano Pro non era
+                  // incluso e l'API rispondeva 429. Dal 2026-08-05 l'account e' su piano
+                  // Max, quindi il gate lato UI e' rimosso: l'entitlement vero lo decide
+                  // comunque l'API (se non fosse coperto tornerebbe 429 e bridge_errors
+                  // lo mostra come "richiede crediti").
+                  '<option value="model:claude-fable-5">Fable 5</option>' +
                 '</optgroup>' +
                 '<optgroup label="Altro brain">' +
                   '<option value="lead:codex">Codex (locale)</option>' +

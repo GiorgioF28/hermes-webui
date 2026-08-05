@@ -524,8 +524,10 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert 'value="model:claude-opus-5"' in source
     assert 'value="lead:codex"' in source
     assert 'value="action:auto"' in source
-    # Fable 5 elencato ma NON selezionabile: richiede crediti a consumo.
-    assert 'value="model:claude-fable-5" disabled' in source
+    # Fable 5 selezionabile dal 2026-08-05 (account passato al piano Max): il gate
+    # UI "disabled" e' stato rimosso, l'entitlement reale lo applica l'API.
+    assert 'value="model:claude-fable-5">' in source
+    assert 'claude-fable-5" disabled' not in source
     assert "api/bridge/prime/lead" in source
     assert "api/bridge/prime/model" in source
     assert "action: 'auto'" in source
