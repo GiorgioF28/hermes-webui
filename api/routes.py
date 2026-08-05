@@ -11101,6 +11101,15 @@ def _hermes_prime_system_prompt(workspace):
         "e usa la sua risposta. Rispondi breve (2-4 frasi), in italiano, da capo di "
         "stato maggiore."
     )
+    append_parts.append(
+        "Quando ci sono piu' approcci validi e la scelta dipende da una preferenza "
+        "tua o dell'utente, o quando qualcosa non e' chiaro e ti serve un "
+        "chiarimento, NON decidere da solo e NON scrivere le alternative in prosa: "
+        "chiama il tool mcp__hermes__ask_user passando la domanda e 2-4 opzioni "
+        "concise, e aspetta la risposta prima di proseguire. Usalo per scelte di "
+        "design/approccio e per disambiguare richieste vaghe, non per chiedere "
+        "permessi banali."
+    )
     return build_lean_system_prompt(append_parts)
 
 
@@ -11573,6 +11582,7 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
             started_at=time.time(),
         )
         started = time.monotonic()
+        last_watchdog_check = started
         try:
             while True:
                 if cancel_event.is_set():
@@ -11590,6 +11600,14 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
                     break
                 except _futures.TimeoutError:
                     now = time.monotonic()
+                    # ask_user is intentionally silent while a human decides.
+                    # Do not classify that interval as an SDK stall, and exclude
+                    # it from the absolute cap as well (the tool owns its timeout).
+                    waiting_for_user = bool(get_clarify_pending_count("hermes-prime"))
+                    if waiting_for_user:
+                        started += max(0.0, now - last_watchdog_check)
+                        last_activity[0] = now
+                    last_watchdog_check = now
                     stalled = (now - last_activity[0]) >= idle_timeout
                     over_cap = (now - started) >= hard_cap
                     if stalled or over_cap:

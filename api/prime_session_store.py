@@ -206,12 +206,25 @@ class PrimeSessionStore:
             return
         with self._lock:
             data = self._read_locked()
+            # The request message is the durable card state. Mark it resolved so
+            # replay can restore the green, disabled card and selected answer.
+            for msg in data.get("messages") or []:
+                if (
+                    isinstance(msg, dict)
+                    and msg.get("_bridge_clarify_id") == clarify_id
+                    and msg.get("_bridge_clarify_event") == "request"
+                ):
+                    msg["_bridge_clarify_resolved"] = True
+                    msg["_bridge_clarify_response"] = response
+                    msg["_bridge_clarify_resolved_at"] = time.time()
+                    break
             for msg in data.get("messages") or []:
                 if (
                     isinstance(msg, dict)
                     and msg.get("_bridge_clarify_id") == clarify_id
                     and msg.get("_bridge_clarify_event") == "response"
                 ):
+                    self._write_locked(data)
                     return
             data["messages"].append(
                 {

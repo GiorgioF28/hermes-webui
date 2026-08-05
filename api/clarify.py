@@ -172,6 +172,31 @@ def normalize_prompt_payload(
     }
 
 
+def is_valid_ask_user_payload(payload: Any) -> bool:
+    """Return whether an ask-user payload has a question and real choices.
+
+    ``ask_user`` is a choice tool, not a generic empty clarification prompt.
+    Requiring at least two options prevents malformed/empty SDK tool calls from
+    becoming a second, unanswerable card in the browser.
+    """
+    if not isinstance(payload, dict):
+        return False
+    questions = payload.get("questions")
+    if isinstance(questions, list) and questions:
+        for question in questions:
+            if not isinstance(question, dict):
+                return False
+            if not _clean_text(question.get("question")):
+                return False
+            if len(_normalize_options(question.get("options") or question.get("choices"))) < 2:
+                return False
+        return True
+    return bool(
+        _clean_text(payload.get("question"))
+        and len(_normalize_options(payload.get("choices_offered"))) >= 2
+    )
+
+
 def format_response_for_agent(prompt: dict[str, Any] | None, response: Any) -> str:
     """Return the string sent back to the blocked tool call."""
     if response is None:

@@ -63,14 +63,25 @@ async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]
     """Raw, unit-testable handler logic. Surfaces a clarify popup and blocks
     (off the event loop) until the user responds or the timeout elapses."""
     raw = dict(args or {})
-    if not raw.get("question") and not raw.get("questions"):
-        raw["question"] = "Quale opzione preferisci?"
     payload = clarify.normalize_prompt_payload(
         raw,
         session_id=session_id,
         timeout_seconds=ASK_USER_TIMEOUT_SECONDS,
     )
     payload["source"] = "claude-ask-user"
+    if not clarify.is_valid_ask_user_payload(payload):
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Errore: ask_user richiede una domanda non vuota e almeno due "
+                        "opzioni valide per ogni domanda. Richiama il tool con un payload completo."
+                    ),
+                }
+            ],
+            "is_error": True,
+        }
     entry = clarify.submit_pending(session_id, payload)
     if session_id == "hermes-prime":
         try:
