@@ -252,6 +252,9 @@ def test_first_prime_turn_after_restart_does_not_create_new_delegation(monkeypat
         def __init__(self):
             self.closed = []
 
+        def get(self, session_id):
+            return None  # simula assenza sessione → system prompt calcolato
+
         def get_or_create(self, session_id, **kwargs):
             assert session_id == "hermes-prime"
             return client

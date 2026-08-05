@@ -11459,13 +11459,20 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     # Cantiere 2: iniezione selettiva della memoria per-turno.
     # Solo i corpi delle note rilevanti per il messaggio corrente, entro budget
     # (HERMES_MEMORY_BUDGET_TOKENS, default 2000 tok). L'indice è nel system prompt.
+    #
+    # [perf/prompt-cache-breakpoints] La memoria viene APPESA IN FONDO (suffisso)
+    # al testo utente invece di essere preposta (prefisso). Questo garantisce che
+    # la parte stabile del messaggio (la richiesta reale dell'utente) sia in testa,
+    # compatibile con i breakpoint di cache impostati internamente dal CLI claude.
+    # Con il prefisso, ogni turno iniziava con contenuto variabile → cache miss
+    # sistematico sul token iniziale del messaggio corrente.
     try:
         from api import memory_retrieval
         _mem_ctx = memory_retrieval.build_prime_memory_context(
             str(message or ""), workspace
         )
         if _mem_ctx:
-            prompt_text = _mem_ctx + "\n\n---\n\n" + prompt_text
+            prompt_text = prompt_text + "\n\n---\n\n## Memoria rilevante\n" + _mem_ctx
     except Exception:
         logger.debug("prime turn: memory retrieval failed", exc_info=True)
 
@@ -11537,9 +11544,19 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     try:
         _status("reasoning")
         last_state[0] = "reasoning"
+        # [perf/prompt-cache-breakpoints] Lazy evaluation: il system prompt
+        # (che legge project-inventory.csv + MEMORY.md + hermes-lean.md) viene
+        # calcolato SOLO se la sessione non esiste ancora. get_or_create() con
+        # sessione esistente ignora system_prompt; la chiamata precedente lo
+        # leggiccava a vuoto ogni turno (costo I/O a vuoto).
+        _prime_session_exists = reg.get("hermes-prime") is not None
         reg.get_or_create(
             "hermes-prime", cwd=workspace, add_dir=workspace,
-            system_prompt=_hermes_prime_system_prompt(workspace),
+            system_prompt=(
+                _hermes_prime_system_prompt(workspace)
+                if not _prime_session_exists
+                else ""  # non usato: get_or_create ritorna il client esistente
+            ),
             model=effective_model,
         )
         # Start the watchdog only after this HTTP turn owns the Prime session.

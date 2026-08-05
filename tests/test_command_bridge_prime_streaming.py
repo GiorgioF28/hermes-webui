@@ -69,7 +69,8 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
         _hermes_sdk_session_id = "11111111-2222-4333-8444-555555555555"
 
         async def query(self, message, session_id="default"):
-            assert message.endswith("stato di oggi")
+            # Dopo perf/prompt-cache-breakpoints il messaggio utente PRECEDE la memoria.
+            assert message.startswith("stato di oggi")
             assert session_id == "11111111-2222-4333-8444-555555555555"
 
         async def receive_response(self):
@@ -89,6 +90,9 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
             return False
 
     class FakeRegistry:
+        def get(self, session_id):
+            return None  # simula sessione non esistente → system prompt viene calcolato
+
         def get_or_create(self, session_id, **kwargs):
             assert session_id == "hermes-prime"
 
@@ -238,6 +242,9 @@ def test_second_prime_turn_queues_without_interrupting_first(monkeypatch):
             self.calls = 0
             self.closed = []
 
+        def get(self, session_id):
+            return None
+
         def get_or_create(self, session_id, **kwargs):
             assert session_id == "hermes-prime"
 
@@ -314,6 +321,9 @@ def test_prime_reply_finalizes_gracefully_on_stalled_turn(monkeypatch):
         def __init__(self):
             self.closed = []
 
+        def get(self, session_id):
+            return None
+
         def get_or_create(self, session_id, **kwargs):
             assert session_id == "hermes-prime"
 
@@ -359,6 +369,9 @@ def test_prime_reply_resets_session_when_turn_disconnects(monkeypatch):
     class FakeRegistry:
         def __init__(self):
             self.closed = []
+
+        def get(self, session_id):
+            return None
 
         def get_or_create(self, session_id, **kwargs):
             assert session_id == "hermes-prime"
