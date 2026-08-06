@@ -158,6 +158,7 @@
 '  --cb-bg:#06070b; --cb-bg2:#0a0c12; --cb-core:#ffffff;',
 '  --cb-accent:#ff6a00; --cb-accent-2:#ff9248; --cb-accent-dim:rgba(255,106,0,.22);',
 '  --cb-text:#e9e9ee; --cb-muted:#7d808c; --cb-faint:#494c58;',
+'  --cb-success:#86c08b; --cb-warning:#e0b15d; --cb-error:#f87171;',
 '  --cb-line:rgba(255,255,255,.07); --cb-line2:rgba(255,255,255,.04);',
 '  --cb-disp:"Chakra Petch",system-ui,sans-serif;',
 '  --cb-mono:"IBM Plex Mono",ui-monospace,monospace;',
@@ -300,7 +301,7 @@
 '#cbMemToggle{right:calc(22px + min(34%,470px) + 14px);}',
 '.cb-hero.cb-collapsed #cbToggle svg{transform:rotate(180deg);}',
 '.cb-hero.cb-mem-collapsed #cbMemToggle svg{transform:rotate(180deg);}',
-'.cb-hero.cb-mem-collapsed .cb-mem{opacity:0;pointer-events:none;transform:translateX(14px);}',
+'.cb-hero.cb-mem-collapsed .cb-right{opacity:0;pointer-events:none;transform:translateX(14px);}',
 '.cb-hero.cb-mem-collapsed .cb-petals{right:30px;}',
 '@media(max-width:980px){#cbMemToggle{display:none;}}',
 /* Hermes Prime petal-core: the luminous center; sub-agents radiate outward */
@@ -311,8 +312,27 @@
 '.cb-petal-label .cb-h{font-family:var(--cb-disp);font-weight:700;font-size:13px;letter-spacing:.34em;text-transform:uppercase;',
 '  background:linear-gradient(90deg,#fff 0%,#fff 30%,#ffb673 70%,var(--cb-accent) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;}',
 '.cb-petal-label .cb-s{font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.16em;color:var(--cb-muted);margin-top:4px;}',
-/* memory planet panel (right): the vault graph, kept as the live memory view */
-'.cb-mem{position:absolute;right:22px;top:22px;bottom:22px;width:min(34%,470px);z-index:2;display:flex;flex-direction:column;transition:opacity .25s,transform .25s;',
+/* right rail: compact live/repo status above the existing memory planet */
+'.cb-right{position:absolute;right:22px;top:22px;bottom:22px;width:min(34%,470px);z-index:2;display:flex;flex-direction:column;gap:10px;transition:opacity .25s,transform .25s;}',
+'.cb-repo{flex:0 0 auto;border:1px solid var(--cb-line);border-radius:14px;overflow:hidden;background:linear-gradient(180deg,rgba(8,9,14,.5),rgba(6,7,11,.66));backdrop-filter:blur(6px);}',
+'.cb-repo-head{width:100%;display:flex;align-items:center;gap:9px;padding:11px 14px;border:0;border-bottom:1px solid var(--cb-line2);background:transparent;color:var(--cb-muted);cursor:pointer;text-align:left;font-family:var(--cb-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;}',
+'.cb-repo-head:hover,.cb-repo-head:focus-visible{color:var(--cb-text);}',
+'.cb-repo-refresh{margin-left:auto;color:var(--cb-faint);font-size:9px;letter-spacing:.08em;text-transform:none;}',
+'.cb-repo-list{padding:5px 10px 7px;}',
+'.cb-repo-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:7px;align-items:center;min-height:25px;border-bottom:1px solid var(--cb-line2);font-family:var(--cb-mono);font-size:9px;color:var(--cb-muted);}',
+'.cb-repo-row:last-child{border-bottom:0;}',
+'.cb-repo-main{min-width:0;display:flex;gap:5px;align-items:baseline;overflow:hidden;}',
+'.cb-repo-name{color:var(--cb-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-repo-branch{color:var(--cb-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-repo-badge{border:1px solid var(--cb-line);border-radius:999px;padding:2px 5px;white-space:nowrap;}',
+'.cb-repo-badge.ok{color:var(--cb-success);border-color:color-mix(in srgb,var(--cb-success) 34%,transparent);}',
+'.cb-repo-badge.warn{color:var(--cb-warning);border-color:color-mix(in srgb,var(--cb-warning) 36%,transparent);}',
+'.cb-repo-badge.error{color:var(--cb-error);border-color:color-mix(in srgb,var(--cb-error) 38%,transparent);}',
+'.cb-repo-dirty,.cb-repo-headhash{white-space:nowrap;color:var(--cb-faint);}',
+'.cb-repo-workflow{grid-template-columns:minmax(0,1fr) auto;color:var(--cb-faint);}',
+'.cb-repo-workflow .cb-repo-name{color:var(--cb-muted);}',
+'/* memory planet panel (right): the vault graph, kept as the live memory view */',
+'.cb-mem{min-height:0;flex:1;display:flex;flex-direction:column;',
 '  border:1px solid var(--cb-line);border-radius:16px;overflow:hidden;',
 '  background:linear-gradient(180deg,rgba(8,9,14,.34),rgba(6,7,11,.52));backdrop-filter:blur(6px);',
 '  box-shadow:0 30px 90px -40px rgba(0,0,0,.9);}',
@@ -353,7 +373,7 @@
 '.cb-flex-summary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
 '.cb-planet{position:relative;flex:1;min-height:0;}',
 '.cb-planet canvas{display:block;}',
-'@media(max-width:980px){.cb-mem{display:none;}.cb-petals{left:0;right:0;}}',
+'@media(max-width:980px){.cb-right{display:none;}.cb-petals{left:0;right:0;}}',
 /* memory stat row (inside the planet panel) */
 '.cb-stats{display:flex;gap:14px;justify-content:space-around;padding:11px 12px 13px;border-top:1px solid var(--cb-line2);}',
 '.cb-stat{text-align:center;}',
@@ -514,8 +534,13 @@
           '<div class="cb-petals" id="cbPetals">' +
             '<div class="cb-petal-label"><div class="cb-h">Hermes Prime</div><div class="cb-s">stella viva · agenti in orbita</div></div>' +
           '</div>' +
-          '<div class="cb-mem" id="cbMem">' +
-            '<div class="cb-mem-head"><span class="cb-mem-dot"></span>Memoria · Vault</div>' +
+          '<div class="cb-right" id="cbRight">' +
+            '<section class="cb-repo" id="cbRepoPanel">' +
+              '<button type="button" class="cb-repo-head" id="cbRepoRefresh" title="Aggiorna stato repository"><span class="cb-mem-dot"></span>Stato repo / Live<span class="cb-repo-refresh">refresh</span></button>' +
+              '<div class="cb-repo-list" id="cbRepoList"><div class="cb-empty">caricamento repo</div></div>' +
+            '</section>' +
+            '<div class="cb-mem" id="cbMem">' +
+              '<div class="cb-mem-head"><span class="cb-mem-dot"></span>Memoria · Vault</div>' +
             '<details class="cb-agents" id="cbAgents" open>' +
               '<summary><span>Agenti</span><span class="cb-agents-count" id="cbAgentsCount">--</span></summary>' +
               '<div class="cb-agent-list" id="cbAgentList"><div class="cb-empty">caricamento agenti</div></div>' +
@@ -524,7 +549,8 @@
               '<div class="cb-empty">caricamento work log</div>' +
             '</section>' +
             '<div class="cb-planet" id="cbPlanet"></div>' +
-            '<div class="cb-stats" id="cbStats"></div>' +
+              '<div class="cb-stats" id="cbStats"></div>' +
+            '</div>' +
           '</div>' +
         '</section>' +
       '</div>' +
@@ -540,6 +566,8 @@
     if (toggle && hero) toggle.addEventListener('click', function () { hero.classList.toggle('cb-collapsed'); });
     var memToggle = $('cbMemToggle');
     if (memToggle && hero) memToggle.addEventListener('click', function () { hero.classList.toggle('cb-mem-collapsed'); });
+    var repoRefresh = $('cbRepoRefresh');
+    if (repoRefresh) repoRefresh.addEventListener('click', refreshRepoStatus);
     var form = $('cbForm');
     if (form) form.addEventListener('submit', onPrimeSubmit);
     // Textarea che cresce mentre scrivi e torna piccola all'invio; Invio manda,
@@ -2182,6 +2210,45 @@
       '<div class="cb-flex-recent">' + recentHtml + '</div>';
   }
 
+  function renderRepoStatus(data) {
+    var list = $('cbRepoList');
+    if (!list) return;
+    var repos = data && Array.isArray(data.repos) ? data.repos : [];
+    var rows = repos.map(function (repo) {
+      if (!repo || repo.status !== 'ok') {
+        return '<div class="cb-repo-row"><div class="cb-repo-main"><span class="cb-repo-name">' + esc(repo && repo.name || 'Repo') + '</span><span class="cb-repo-branch">n/d</span></div><span class="cb-repo-badge error">n/d</span><span class="cb-repo-dirty">--</span><span class="cb-repo-headhash">--</span></div>';
+      }
+      var ahead = Number(repo.ahead || 0), behind = Number(repo.behind || 0), dirty = Number(repo.dirty || 0);
+      var level = behind > 0 ? 'error' : ((ahead > 0 || dirty > 0) ? 'warn' : 'ok');
+      var head = repo.head || {};
+      return '<div class="cb-repo-row">' +
+        '<div class="cb-repo-main"><span class="cb-repo-name">' + esc(repo.name) + '</span><span class="cb-repo-branch" title="' + esc(repo.branch || '') + '">' + esc(repo.branch || 'n/d') + '</span></div>' +
+        '<span class="cb-repo-badge ' + level + '">↑' + ahead + ' ↓' + behind + '</span>' +
+        '<span class="cb-repo-dirty" title="File modificati">Δ' + dirty + '</span>' +
+        '<span class="cb-repo-headhash" title="' + esc(head.subject || '') + '">' + esc(head.hash || '--') + '</span>' +
+      '</div>';
+    });
+    var workflow = data && data.workflow;
+    if (workflow) {
+      rows.push('<div class="cb-repo-row cb-repo-workflow"><span class="cb-repo-name">Workflow n8n ' + esc(workflow.id || '') + '</span><span>' + esc(workflow.label || '') + '</span></div>');
+    }
+    list.innerHTML = rows.length ? rows.join('') : '<div class="cb-empty">stato repo n/d</div>';
+  }
+
+  var _repoStatusTimer = null;
+  function refreshRepoStatus() {
+    return api('/api/repo-status').then(renderRepoStatus).catch(function () {
+      var list = $('cbRepoList');
+      if (list) list.innerHTML = '<div class="cb-empty">stato repo n/d</div>';
+    });
+  }
+
+  function startRepoStatusRefresh() {
+    refreshRepoStatus();
+    if (_repoStatusTimer) clearInterval(_repoStatusTimer);
+    _repoStatusTimer = setInterval(refreshRepoStatus, 60000);
+  }
+
   // Phase 4 will fly the planet camera here; for now scroll to the stage and pulse.
   function focusProject(id, path) {
     try { document.dispatchEvent(new CustomEvent('cb:focus-project', { detail: { id: id, path: path } })); } catch (e) {}
@@ -2205,6 +2272,7 @@
 
   function refresh() {
     refreshBrainState();
+    startRepoStatusRefresh();
     api('api/vault/graph').then(function (g) { renderStats(g); mountPlanet(g); }).catch(function () {});
     api('api/projects/overview').then(renderProjects).catch(function () {
       var grid = $('cbGrid'); if (grid) grid.innerHTML = '<div class="cb-loading">vault non disponibile.</div>';
