@@ -996,17 +996,23 @@
   function requestBrief(t) {
     setOrb('thinking', 0);
     var ph = pendingBubble(); // riusa la bolla "sto ragionando…" di Hermes Prime
+    var turnUi = createPrimeTurnUi(ph);
     var cfg = window.__HERMES_CONFIG__ || {};
     var finish = function (reply) {
+      if (turnUi.isClosed()) return;
       reply = String(reply || '').trim();
-      if (ph && ph.parentNode) {
-        if (reply) {
-          var bub = ph.querySelector('.cb-bubble');
-          if (bub) { bub.removeAttribute('style'); renderRich(bub, reply); }
-          if (userEngaged) speak(reply);
-        } else { ph.parentNode.removeChild(ph); }
+      try {
+        if (ph && ph.parentNode) {
+          if (reply) {
+            var bub = ph.querySelector('.cb-bubble');
+            if (bub) { bub.removeAttribute('style'); renderRich(bub, reply); }
+            if (userEngaged) speak(reply);
+          } else { ph.parentNode.removeChild(ph); }
+        }
+      } finally {
+        turnUi.close();
+        setOrb('idle', 0);
       }
-      setOrb('idle', 0);
     };
     // Il brief gira in background lato server: qui si fa solo polling leggero,
     // cosi' nessuna connessione resta appesa per minuti (spam "Request timed out").
@@ -1091,10 +1097,45 @@
       .replace(/\s+/g, ' ')
       .trim();
   }
+  function createPrimeTurnUi(root) {
+    var closed = false;
+    function statusNodes() {
+      if (!root || typeof root.querySelectorAll !== 'function') return [];
+      return Array.prototype.slice.call(root.querySelectorAll('.cb-prime-status'));
+    }
+    function dedupeStatusNodes() {
+      var nodes = statusNodes();
+      nodes.slice(1).forEach(function (node) { if (node && node.remove) node.remove(); });
+      return nodes.length ? [nodes[0]] : [];
+    }
+    return {
+      isClosed: function () { return closed; },
+      updateStatus: function (label, hasReply) {
+        if (closed) return false;
+        var nodes = dedupeStatusNodes();
+        var status = nodes[0] || null;
+        var bubble = root && root.querySelector ? root.querySelector('.cb-bubble') : null;
+        if (hasReply) {
+          if (status) { status.textContent = label; status.hidden = false; }
+        } else {
+          if (status) status.hidden = true;
+          if (bubble) bubble.textContent = label;
+        }
+        return true;
+      },
+      close: function () {
+        if (closed) return false;
+        closed = true;
+        statusNodes().forEach(function (node) { if (node && node.remove) node.remove(); });
+        if (root && root.setAttribute) root.setAttribute('data-prime-settled', 'true');
+        return true;
+      }
+    };
+  }
   function pendingBubble() {
     var log = $('cbLog'); if (!log) return null;
     var m = el('div', 'cb-msg cb-from-prime');
-    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status">in corso</div><div class="cb-msg-foot" hidden></div>';
+    m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status" hidden></div><div class="cb-msg-foot" hidden></div>';
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight; return m;
   }
   function streamPrimeResponse(response, handlers) {
@@ -1729,7 +1770,7 @@
     setOrb('thinking', 0);
     var ph = pendingBubble();
     var bubble = ph ? ph.querySelector('.cb-bubble') : null;
-    var statusLine = ph ? ph.querySelector('.cb-prime-status') : null;
+    var turnUi = createPrimeTurnUi(ph);
     var footLine = ph ? ph.querySelector('.cb-msg-foot') : null;
     var liveUsage = $('cbLiveUsage');
     if (liveUsage) { liveUsage.hidden = true; liveUsage.textContent = ''; }
@@ -1746,6 +1787,7 @@
       }
     };
     var showStatus = function (state, tool) {
+      if (settled) return;
       var labels = {
         started: 'in corso',
         queued: 'in coda\u2026',
@@ -1756,15 +1798,13 @@
         cancelled: 'interrotto'
       };
       var label = labels[state]; if (!label) return;
-      if (statusLine) statusLine.textContent = label;
-      if (!reply && bubble) bubble.textContent = label;
+      turnUi.updateStatus(label, !!reply);
       if (state === 'done' && bubble && !reply) bubble.textContent = 'Ricevuto.';
     };
     var finish = function (label) {
       if (settled) return;
       settled = true;
       try {
-        if (statusLine) statusLine.textContent = label || '\u2713 completato';
         if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
         if (finalUsage) showUsage(finalUsage);
         flushSpokenSentences(reply, speech, true);
@@ -1776,12 +1816,14 @@
           console.error('[Hermes Prime] Anche il fallback a testo grezzo e fallito.', fallbackError);
         }
       } finally {
+        turnUi.close();
         if (liveUsage) liveUsage.hidden = true;
         setPrimeStreaming(false, null);
         if (!_ttsActive) setOrb('idle', 0);
       }
     };
     var showToken = function (text) {
+      if (settled) return;
       text = String(text || ''); if (!text) return;
       var log = $('cbLog'); var _sb = nearBottom(log);
       reply += text;
@@ -1789,6 +1831,7 @@
         bubble.removeAttribute('style');
         bubble.textContent = reply;
       }
+      turnUi.updateStatus('sta scrivendo\u2026', true);
       flushSpokenSentences(reply, speech, false); // legge le frasi gia' complete
       if (_sb && log) log.scrollTop = log.scrollHeight;
     };
@@ -1797,7 +1840,8 @@
       settled = true;
       try {
         if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
-        ph = null; bubble = null; statusLine = null;
+        turnUi.close();
+        ph = null; bubble = null;
         sysNote(text);
       } finally {
         if (liveUsage) liveUsage.hidden = true;

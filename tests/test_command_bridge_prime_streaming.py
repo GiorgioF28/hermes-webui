@@ -1,8 +1,12 @@
 import io
 import json
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from api import routes
 
@@ -566,6 +570,69 @@ def test_command_bridge_frontend_always_clears_streaming_after_final_render():
     # Chiusura del body senza evento `done`: la continuation post-pump deve
     # finalizzare il parziale invece di lasciare `in corso` appeso.
     assert "if (!settled && reply) finish('\\u2713 risposta ricevuta');" in source
+
+
+def _run_prime_turn_ui_scenarios():
+    """Esegue il vero helper JS con un DOM minimo, senza dipendenze jsdom."""
+    source = Path("static/command_bridge.js").read_text(encoding="utf-8")
+    start = source.index("function createPrimeTurnUi(root)")
+    end = source.index("function pendingBubble", start)
+    helper = source[start:end]
+    script = helper + r"""
+function statusNode(label) {
+  return {
+    textContent: label || '', hidden: false, removed: false,
+    remove: function () { this.removed = true; }
+  };
+}
+var bubble = { textContent: 'sto ragionando...' };
+var first = statusNode('in corso');
+var duplicate = statusNode('sto ragionando...');
+var statuses = [first, duplicate];
+var root = {
+  querySelectorAll: function () { return statuses.filter(function (n) { return !n.removed; }); },
+  querySelector: function () { return bubble; },
+  setAttribute: function () {}
+};
+var turn = createPrimeTurnUi(root);
+turn.updateStatus('sto ragionando...', false);
+var visibleBeforeClose = statuses.filter(function (n) { return !n.removed && !n.hidden; }).length;
+turn.close();
+var remainingAfterClose = statuses.filter(function (n) { return !n.removed; }).length;
+var bubbleAfterClose = bubble.textContent;
+var acceptedLate = turn.updateStatus('sto ragionando...', false);
+console.log(JSON.stringify({
+  visibleBeforeClose: visibleBeforeClose,
+  remainingAfterClose: remainingAfterClose,
+  acceptedLate: acceptedLate,
+  lateDidNotMutate: bubble.textContent === bubbleAfterClose
+}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=False, timeout=10
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+@pytest.fixture(scope="module")
+def prime_turn_ui_scenarios():
+    if shutil.which("node") is None:
+        pytest.skip("node non disponibile")
+    return _run_prime_turn_ui_scenarios()
+
+
+def test_prime_indicator_is_removed_when_stream_settles(prime_turn_ui_scenarios):
+    assert prime_turn_ui_scenarios["remainingAfterClose"] == 0
+
+
+def test_prime_turn_never_shows_duplicate_indicators(prime_turn_ui_scenarios):
+    assert prime_turn_ui_scenarios["visibleBeforeClose"] <= 1
+
+
+def test_late_event_cannot_reopen_closed_prime_turn(prime_turn_ui_scenarios):
+    assert prime_turn_ui_scenarios["acceptedLate"] is False
+    assert prime_turn_ui_scenarios["lateDidNotMutate"] is True
 
 
 def test_command_bridge_frontend_loads_history_and_renders_attention_cards():
