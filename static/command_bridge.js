@@ -44,10 +44,16 @@
   // Render Prime text as markdown (reuses the main chat renderer); plain fallback.
   function renderRich(node, text) {
     if (!node) return;
+    var raw = String(text || '');
     if (typeof window.renderMd === 'function') {
-      try { node.innerHTML = window.renderMd(String(text || '')); return; } catch (e) {}
+      try {
+        node.innerHTML = window.renderMd(raw);
+        return;
+      } catch (e) {
+        console.error('[Hermes Prime] Rendering markdown finale fallito; mostro il testo grezzo.', e);
+      }
     }
-    node.textContent = String(text || '');
+    node.textContent = raw;
   }
   function _fmtCompactTokens(value) {
     var n = Number(value) || 0;
@@ -1757,13 +1763,23 @@
     var finish = function (label) {
       if (settled) return;
       settled = true;
-      if (statusLine) statusLine.textContent = label || '\u2713 completato';
-      if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
-      if (finalUsage) showUsage(finalUsage);
-      if (liveUsage) liveUsage.hidden = true;
-      setPrimeStreaming(false, null);
-      flushSpokenSentences(reply, speech, true);
-      if (!_ttsActive) setOrb('idle', 0);
+      try {
+        if (statusLine) statusLine.textContent = label || '\u2713 completato';
+        if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
+        if (finalUsage) showUsage(finalUsage);
+        flushSpokenSentences(reply, speech, true);
+      } catch (e) {
+        console.error('[Hermes Prime] Finalizzazione risposta fallita; chiudo comunque lo stato in corso.', e);
+        // Ultima rete di sicurezza: il testo streamato deve restare visibile anche
+        // se una fase accessoria (markdown, usage o TTS) fallisce.
+        try { if (bubble && reply) bubble.textContent = reply; } catch (fallbackError) {
+          console.error('[Hermes Prime] Anche il fallback a testo grezzo e fallito.', fallbackError);
+        }
+      } finally {
+        if (liveUsage) liveUsage.hidden = true;
+        setPrimeStreaming(false, null);
+        if (!_ttsActive) setOrb('idle', 0);
+      }
     };
     var showToken = function (text) {
       text = String(text || ''); if (!text) return;
@@ -1779,12 +1795,15 @@
     var fail = function (text) {
       if (settled) return;
       settled = true;
-      if (liveUsage) liveUsage.hidden = true;
-      setPrimeStreaming(false, null);
-      if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
-      ph = null; bubble = null; statusLine = null;
-      sysNote(text);
-      setOrb('idle', 0);
+      try {
+        if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
+        ph = null; bubble = null; statusLine = null;
+        sysNote(text);
+      } finally {
+        if (liveUsage) liveUsage.hidden = true;
+        setPrimeStreaming(false, null);
+        setOrb('idle', 0);
+      }
     };
     var cfg = window.__HERMES_CONFIG__ || {};
     fetch(new URL('api/bridge/prime', document.baseURI || location.href).href, {
@@ -1820,6 +1839,8 @@
         }
       });
     }).then(function () {
+      // EOF e' un terminale valido anche senza evento `done`: proxy/browser e
+      // rami backend eccezionali possono chiudere il body dopo gli ultimi token.
       if (!settled && reply) finish('\u2713 risposta ricevuta');
       else if (!settled) fail('La risposta di Hermes Prime si è interrotta prima del completamento.');
     })

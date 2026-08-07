@@ -546,6 +546,28 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "action: 'auto'" in source
 
 
+def test_command_bridge_frontend_always_clears_streaming_after_final_render():
+    source = Path("static/command_bridge.js").read_text(encoding="utf-8")
+
+    finish_start = source.index("var finish = function (label)")
+    finish_end = source.index("var showToken = function", finish_start)
+    finish = source[finish_start:finish_end]
+    assert "} finally {" in finish
+    assert "setPrimeStreaming(false, null);" in finish
+    assert "bubble.textContent = reply" in finish
+    assert "console.error('[Hermes Prime] Finalizzazione risposta fallita" in finish
+
+    render_start = source.index("function renderRich(node, text)")
+    render_end = source.index("function _fmtCompactTokens", render_start)
+    render = source[render_start:render_end]
+    assert "Rendering markdown finale fallito" in render
+    assert "node.textContent = raw" in render
+
+    # Chiusura del body senza evento `done`: la continuation post-pump deve
+    # finalizzare il parziale invece di lasciare `in corso` appeso.
+    assert "if (!settled && reply) finish('\\u2713 risposta ricevuta');" in source
+
+
 def test_command_bridge_frontend_loads_history_and_renders_attention_cards():
     source = Path("static/command_bridge.js").read_text(encoding="utf-8")
 
