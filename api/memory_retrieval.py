@@ -27,6 +27,7 @@ La directory si risolve in quest'ordine:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -34,6 +35,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEMORY_BUDGET_TOKENS = 2_000
+DEFAULT_UNLOCKED_MEMORY_TOP_K = 6
+DEFAULT_UNLOCKED_MEMORY_MAX_CHARS = 12_000
+DEFAULT_UNLOCKED_MEMORY_MIN_SCORE = 1.0
 # Stima conservativa: 1 token ≈ 4 caratteri
 _CHARS_PER_TOKEN = 4.0
 
@@ -62,6 +66,33 @@ def memory_budget_tokens() -> int:
         except (TypeError, ValueError):
             pass
     return DEFAULT_MEMORY_BUDGET_TOKENS
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0, maximum: int = 1_000_000) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, minimum), maximum)
+
+
+def unlocked_memory_top_k() -> int:
+    return _env_int("HERMES_PRIME_MEMORY_TOP_K", DEFAULT_UNLOCKED_MEMORY_TOP_K, maximum=50)
+
+
+def unlocked_memory_max_chars() -> int:
+    return _env_int(
+        "HERMES_PRIME_MEMORY_MAX_CHARS",
+        DEFAULT_UNLOCKED_MEMORY_MAX_CHARS,
+        maximum=200_000,
+    )
+
+
+def unlocked_memory_min_score() -> float:
+    try:
+        return max(float(os.getenv("HERMES_PRIME_MEMORY_MIN_SCORE", "") or DEFAULT_UNLOCKED_MEMORY_MIN_SCORE), 0.0)
+    except (TypeError, ValueError):
+        return DEFAULT_UNLOCKED_MEMORY_MIN_SCORE
 
 
 # ── Directory discovery ───────────────────────────────────────────────────────
@@ -104,6 +135,72 @@ VALID_SCOPES = frozenset({"hermes", "visionbuilts", "rap", "global"})
 _SCOPE_RE = re.compile(r"^scope:\s*(\w+)", re.MULTILINE)
 
 
+def _frontmatter_list_value(frontmatter: str, key: str) -> list[str]:
+    """Parser YAML minimale per alias/tags, senza dipendenze aggiuntive."""
+    lines = frontmatter.splitlines()
+    values: list[str] = []
+    collecting = False
+    for line in lines:
+        direct = re.match(rf"^{re.escape(key)}\s*:\s*(.*)$", line, re.IGNORECASE)
+        if direct:
+            collecting = True
+            raw = direct.group(1).strip()
+            if raw.startswith("[") and raw.endswith("]"):
+                values.extend(part.strip(" \t'\"") for part in raw[1:-1].split(","))
+            elif raw:
+                values.append(raw.strip("'\""))
+            continue
+        if collecting:
+            item = re.match(r"^\s*-\s*(.+?)\s*$", line)
+            if item:
+                values.append(item.group(1).strip("'\""))
+                continue
+            if line.strip():
+                break
+    return [value for value in values if value]
+
+
+def parse_note_metadata_fast(mem_dir: Path, filename: str) -> dict:
+    """Legge solo il front-matter utile al retrieval: scope, aliases e tags."""
+    default = {"scope": "global", "aliases": [], "tags": [], "always_active": False}
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return default
+    path = mem_dir / filename
+    if not path.is_file():
+        return default
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            lines = []
+            for index, line in enumerate(fh):
+                if index >= 120:
+                    break
+                lines.append(line)
+                if index > 0 and line.strip() == "---":
+                    break
+        head = "".join(lines)
+    except OSError:
+        return default
+    scope_match = _SCOPE_RE.search(head)
+    aliases = _frontmatter_list_value(head, "aliases")
+    if not aliases:
+        aliases = _frontmatter_list_value(head, "alias")
+    tags = _frontmatter_list_value(head, "tags")
+    active_match = re.search(
+        r"^(?:always_active|always-active|sempre_attiva)\s*:\s*(true|yes|1|on)\s*$",
+        head,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    active_tags = {tag.casefold().lstrip("#") for tag in tags}
+    return {
+        "scope": normalize_scope(scope_match.group(1)) if scope_match else "global",
+        "aliases": aliases,
+        "tags": tags,
+        "always_active": bool(active_match) or bool(
+            active_tags & {"always-active", "always_active", "regole-operative", "regole/operative"}
+        ),
+    }
+
+
 def normalize_scope(scope: str) -> str:
     """Normalizza uno scope: lowercase, solo valori noti. Default 'global'."""
     s = (scope or "").strip().lower()
@@ -119,25 +216,7 @@ def parse_note_scope_fast(mem_dir: Path, filename: str) -> str:
 
     Path safety: stesse regole di load_memory_body (no traversal, no slash).
     """
-    if not filename or "/" in filename or "\\" in filename or ".." in filename:
-        return "global"
-    path = mem_dir / filename
-    if not path.is_file():
-        return "global"
-    try:
-        lines: list[str] = []
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                if i >= 15:
-                    break
-                lines.append(line)
-        head = "".join(lines)
-        m = _SCOPE_RE.search(head)
-        if m:
-            return normalize_scope(m.group(1))
-    except Exception:
-        logger.debug("parse_note_scope_fast: error reading '%s'", filename, exc_info=True)
-    return "global"
+    return parse_note_metadata_fast(mem_dir, filename)["scope"]
 
 
 # ── Index parsing ──────────────────────────────────────────────────────────────
@@ -166,12 +245,19 @@ def parse_memory_index(mem_dir: Path) -> list[dict]:
         if not m:
             continue
         filename = m.group("filename").strip()
-        scope = parse_note_scope_fast(mem_dir, filename)
+        metadata = parse_note_metadata_fast(mem_dir, filename)
+        title = m.group("title").strip()
+        always_active = metadata["always_active"] or (
+            "regole operative sempre attive" in title.casefold()
+        )
         entries.append({
-            "title": m.group("title").strip(),
+            "title": title,
             "filename": filename,
             "description": (m.group("description") or "").strip(),
-            "scope": scope,
+            "scope": metadata["scope"],
+            "aliases": metadata["aliases"],
+            "tags": metadata["tags"],
+            "always_active": always_active,
         })
     return entries
 
@@ -217,6 +303,145 @@ def score_entry_relevance(entry: dict, keywords: list[str]) -> int:
         return 0
     haystack = f"{entry.get('title', '')} {entry.get('description', '')}".lower()
     return sum(1 for kw in keywords if kw and kw in haystack)
+
+
+def _weighted_entry_score(entry: dict, keywords: list[str], idf: dict[str, float]) -> float:
+    fields = (
+        (str(entry.get("title", "")).casefold(), 5.0),
+        (" ".join(entry.get("aliases") or []).casefold(), 4.0),
+        (" ".join(entry.get("tags") or []).casefold(), 3.0),
+        (str(entry.get("description", "")).casefold(), 2.0),
+        (str(entry.get("body", "")).casefold(), 1.0),
+    )
+    score = 0.0
+    for keyword in keywords:
+        term_score = sum(
+            weight
+            for haystack, weight in fields
+            if keyword in set(re.findall(r"[a-zA-ZÀ-ÿà-ÿ0-9_-]+", haystack))
+        )
+        score += term_score * idf.get(keyword, 1.0)
+    return round(score, 3)
+
+
+def select_memories_unlocked(
+    task: str,
+    mem_dir: Path,
+    *,
+    top_k: int | None = None,
+    max_chars: int | None = None,
+    min_score: float | None = None,
+    task_scope: str = "",
+) -> list[dict]:
+    """Retrieval lessicale pesato per il profilo unlocked.
+
+    Titolo, alias, tag e descrizione pesano più del corpo. Le regole operative
+    sempre attive entrano prima del top-K e indipendentemente dalla query.
+    """
+    top_k = unlocked_memory_top_k() if top_k is None else max(int(top_k), 0)
+    max_chars = unlocked_memory_max_chars() if max_chars is None else max(int(max_chars), 0)
+    min_score = unlocked_memory_min_score() if min_score is None else max(float(min_score), 0.0)
+    if max_chars <= 0:
+        return []
+    entries = parse_memory_index(mem_dir)
+    if task_scope:
+        entries = [
+            entry for entry in entries
+            if entry.get("scope", "") in {task_scope, "global", ""}
+            or entry.get("always_active")
+        ]
+    hydrated = []
+    for entry in entries:
+        body = load_memory_body(mem_dir, entry["filename"])
+        if body:
+            hydrated.append({**entry, "body": body})
+    keywords = _extract_keywords(task)
+    doc_count = max(len(hydrated), 1)
+    idf = {}
+    for keyword in keywords:
+        frequency = sum(
+            1 for entry in hydrated
+            if keyword in set(re.findall(
+                r"[a-zA-ZÀ-ÿà-ÿ0-9_-]+",
+                " ".join([
+                    str(entry.get("title", "")),
+                    str(entry.get("description", "")),
+                    " ".join(entry.get("aliases") or []),
+                    " ".join(entry.get("tags") or []),
+                    str(entry.get("body", "")),
+                ]).casefold(),
+            ))
+        )
+        idf[keyword] = 1.0 + math.log((doc_count + 1.0) / (frequency + 1.0))
+
+    always = []
+    scored = []
+    for entry in hydrated:
+        score = _weighted_entry_score(entry, keywords, idf)
+        enriched = {**entry, "score": score}
+        if entry.get("always_active"):
+            always.append(enriched)
+        elif score >= min_score:
+            scored.append(enriched)
+    scored.sort(key=lambda entry: (-entry["score"], entry["title"].casefold()))
+    candidates = always + scored[:top_k]
+
+    selected = []
+    used = 0
+    for entry in candidates:
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        body = entry["body"]
+        if len(body) > remaining:
+            if not entry.get("always_active"):
+                continue
+            suffix = "\n[…nota ridotta al budget caratteri]"
+            body = body[:max(remaining - len(suffix), 0)].rstrip() + suffix[:remaining]
+        selected.append({**entry, "body": body, "body_chars": len(body)})
+        used += len(body)
+
+    logger.info(
+        "prime_memory_retrieval: selected=%s used_chars=%d/%d top_k=%d query_terms=%s",
+        [
+            {"file": entry["filename"], "score": entry["score"], "always": bool(entry.get("always_active"))}
+            for entry in selected
+        ],
+        used,
+        max_chars,
+        top_k,
+        keywords,
+    )
+    return selected
+
+
+def build_unlocked_memory_detail(
+    task: str,
+    mem_dir: Path,
+    *,
+    top_k: int | None = None,
+    max_chars: int | None = None,
+    min_score: float | None = None,
+    task_scope: str = "",
+) -> str:
+    """Solo dettaglio dinamico, già limitato al budget caratteri."""
+    budget = unlocked_memory_max_chars() if max_chars is None else max(int(max_chars), 0)
+    selected = select_memories_unlocked(
+        task,
+        mem_dir,
+        top_k=top_k,
+        max_chars=budget,
+        min_score=min_score,
+        task_scope=task_scope,
+    )
+    if not selected or budget <= 0:
+        return ""
+    parts = ["## Memoria (dettaglio rilevante per il task corrente)"]
+    for entry in selected:
+        marker = " [sempre attiva]" if entry.get("always_active") else ""
+        parts.append(f"### {entry['title']}{marker}\n{entry['body']}")
+    text = "\n\n".join(parts)
+    return text if len(text) <= budget else text[:budget].rstrip()
 
 
 # ── Body loading ──────────────────────────────────────────────────────────────
@@ -372,3 +597,17 @@ def build_prime_memory_context(
         logger.debug("memory_retrieval: nessuna mem_dir trovata, contesto memoria omesso")
         return ""
     return build_memory_context(task, mem_dir, task_scope=task_scope)
+
+
+def build_prime_unlocked_memory_detail(
+    task: str,
+    workspace: Path | None = None,
+    *,
+    task_scope: str = "",
+) -> str:
+    """Entry point per il dettaglio unlocked; l'indice resta nel system prompt."""
+    mem_dir = find_prime_memory_dir()
+    if mem_dir is None:
+        logger.debug("memory_retrieval: nessuna mem_dir trovata, dettaglio unlocked omesso")
+        return ""
+    return build_unlocked_memory_detail(task, mem_dir, task_scope=task_scope)

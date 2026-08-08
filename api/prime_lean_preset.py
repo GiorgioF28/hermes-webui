@@ -11,6 +11,27 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+CONTEXT_PROFILE_LEAN = "lean"
+CONTEXT_PROFILE_UNLOCKED = "unlocked"
+VALID_CONTEXT_PROFILES = frozenset({CONTEXT_PROFILE_LEAN, CONTEXT_PROFILE_UNLOCKED})
+
+
+def prime_context_profile() -> str:
+    """Profilo di contesto Prime; default conservativo: lean."""
+    raw = os.getenv("HERMES_PRIME_CONTEXT_PROFILE", CONTEXT_PROFILE_LEAN).strip().lower()
+    if raw not in VALID_CONTEXT_PROFILES:
+        logger.warning(
+            "prime_context: profilo %r non valido; uso %s",
+            raw,
+            CONTEXT_PROFILE_LEAN,
+        )
+        return CONTEXT_PROFILE_LEAN
+    return raw
+
+
+def unlocked_context_enabled() -> bool:
+    return prime_context_profile() == CONTEXT_PROFILE_UNLOCKED
+
 
 def lean_preset_enabled() -> bool:
     raw = os.getenv("HERMES_PRIME_USE_LEAN_PRESET", "1").strip().lower()
@@ -54,6 +75,24 @@ def build_lean_system_prompt(append_parts: list[str]) -> str | dict:
     before_tokens = estimate_tokens(full_text)
     logger.info("prime_lean_preset: system prompt %d chars ≈ %d token (lean)",
                 len(full_text), before_tokens)
+    return full_text
+
+
+def build_unlocked_system_prompt(persona: str, append_parts: list[str]) -> str:
+    """Prompt statico completo per il profilo unlocked.
+
+    Persona completa, regole append e indice memoria restano nel prefisso
+    stabile. Brief e dettaglio memoria vengono aggiunti dal caller al turno.
+    """
+    all_parts = [str(persona or "").strip()] + [
+        str(part).strip() for part in append_parts if str(part or "").strip()
+    ]
+    full_text = "\n\n".join(part for part in all_parts if part)
+    logger.info(
+        "prime_context: system prompt %d chars ≈ %d token (unlocked, statico)",
+        len(full_text),
+        estimate_tokens(full_text),
+    )
     return full_text
 
 

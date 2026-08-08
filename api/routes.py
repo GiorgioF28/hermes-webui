@@ -11082,11 +11082,32 @@ def _hermes_prime_system_prompt(workspace):
     plain-text lean (<8k token) invece del claude_code preset (~15k token).
     Con HERMES_PRIME_USE_LEAN_PRESET=0 mantiene il vecchio comportamento (compat).
     """
-    from api.prime_lean_preset import build_lean_system_prompt
-    brief = _in_progress_projects_brief(workspace)
+    from api.prime_lean_preset import (
+        build_lean_system_prompt,
+        build_unlocked_system_prompt,
+        prime_context_profile,
+    )
+    profile = prime_context_profile()
     append_parts: list[str] = []
-    if brief:
-        append_parts.append("--- Progetti in corso ---\n" + brief)
+    if profile == "lean":
+        brief = _in_progress_projects_brief(workspace)
+        if brief:
+            append_parts.append("--- Progetti in corso ---\n" + brief)
+    append_rules = [
+        "Per dettagli profondi (codice, memoria, funzionamento delle componenti) "
+        "NON ricostruirli a mente: delega al Librarian (task_type 'memoria'/'ricerca') "
+        "e usa la sua risposta. Rispondi breve (2-4 frasi), in italiano, da capo di "
+        "stato maggiore.",
+        "Quando ci sono piu' approcci validi e la scelta dipende da una preferenza "
+        "tua o dell'utente, o quando qualcosa non e' chiaro e ti serve un "
+        "chiarimento, NON decidere da solo e NON scrivere le alternative in prosa: "
+        "chiama il tool mcp__hermes__ask_user passando la domanda e 2-4 opzioni "
+        "concise, e aspetta la risposta prima di proseguire. Usalo per scelte di "
+        "design/approccio e per disambiguare richieste vaghe, non per chiedere "
+        "permessi banali.",
+    ]
+    if profile == "unlocked":
+        append_parts.extend(append_rules)
     # Indice memoria (Cantiere 2): solo one-liner, statico e cacheable.
     # I corpi rilevanti per il task corrente vengono aggiunti nel testo del
     # turno (vedi _hermes_prime_reply_claude). Così il system prompt resta
@@ -11100,26 +11121,14 @@ def _hermes_prime_system_prompt(workspace):
                 append_parts.append("--- Memoria (indice) ---\n" + idx)
     except Exception:
         logger.debug("prime system prompt: memory index build failed", exc_info=True)
-    append_parts.append(
-        "Per dettagli profondi (codice, memoria, funzionamento delle componenti) "
-        "NON ricostruirli a mente: delega al Librarian (task_type 'memoria'/'ricerca') "
-        "e usa la sua risposta. Rispondi breve (2-4 frasi), in italiano, da capo di "
-        "stato maggiore."
-    )
-    # [fix/prime-ask-user-prompt] Senza questa istruzione il modello scrive le
-    # alternative in prosa ("preferisci A o B?") invece di chiamare il tool, e
-    # il box scelte del Command Bridge non compare mai. Il tool e' gia'
-    # registrato per hermes-prime (vedi _get_claude_registry -> _allowed).
-    append_parts.append(
-        "Quando ci sono piu' approcci validi e la scelta dipende da una preferenza "
-        "tua o dell'utente, o quando qualcosa non e' chiaro e ti serve un "
-        "chiarimento, NON decidere da solo e NON scrivere le alternative in prosa: "
-        "chiama il tool mcp__hermes__ask_user passando la domanda e 2-4 opzioni "
-        "concise, e aspetta la risposta prima di proseguire. Usalo per scelte di "
-        "design/approccio e per disambiguare richieste vaghe, non per chiedere "
-        "permessi banali."
-    )
-    return build_lean_system_prompt(append_parts)
+    if profile == "lean":
+        append_parts.extend(append_rules)
+        return build_lean_system_prompt(append_parts)
+
+    # Unlocked: prefisso esclusivamente statico e cacheable. Il brief completo
+    # e il dettaglio memoria selezionato vengono aggiunti dopo il breakpoint,
+    # nel messaggio del turno.
+    return build_unlocked_system_prompt(_hermes_prime_persona_text(), append_parts)
 
 
 def _hermes_prime_turn_limits():
@@ -11486,11 +11495,31 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     # sistematico sul token iniziale del messaggio corrente.
     try:
         from api import memory_retrieval
-        _mem_ctx = memory_retrieval.build_prime_memory_context(
-            str(message or ""), workspace
-        )
-        if _mem_ctx:
-            prompt_text = prompt_text + "\n\n---\n\n## Memoria rilevante\n" + _mem_ctx
+        from api.prime_lean_preset import prime_context_profile
+
+        if prime_context_profile() == "unlocked":
+            dynamic_parts = []
+            _brief = _in_progress_projects_brief(
+                workspace,
+                max_projects=None,
+                max_chars=None,
+            )
+            if _brief:
+                dynamic_parts.append("## Progetti in corso (stato aggiornato)\n" + _brief)
+            _mem_ctx = memory_retrieval.build_prime_unlocked_memory_detail(
+                str(message or ""), workspace
+            )
+            if _mem_ctx:
+                dynamic_parts.append(_mem_ctx)
+            if dynamic_parts:
+                prompt_text += "\n\n---\n\n" + "\n\n".join(dynamic_parts)
+        else:
+            # Compatibilità byte-for-byte del layout lean introdotto da f94600f1.
+            _mem_ctx = memory_retrieval.build_prime_memory_context(
+                str(message or ""), workspace
+            )
+            if _mem_ctx:
+                prompt_text = prompt_text + "\n\n---\n\n## Memoria rilevante\n" + _mem_ctx
     except Exception:
         logger.debug("prime turn: memory retrieval failed", exc_info=True)
 
@@ -15186,7 +15215,12 @@ def _append_obsidian_interaction_memory(workspace, session_id, user_message, ass
     return target
 
 
-def _in_progress_projects_brief(workspace, *, max_projects: int = 6, max_chars: int = 1600) -> str:
+def _in_progress_projects_brief(
+    workspace,
+    *,
+    max_projects: int | None = 6,
+    max_chars: int | None = 1600,
+) -> str:
     """Brief compatto dei progetti IN CORSO per il contesto a regime di Prime.
 
     Legge projects/project-inventory.csv (righe status=active) e per ognuno rende
@@ -15209,14 +15243,19 @@ def _in_progress_projects_brief(workspace, *, max_projects: int = 6, max_chars: 
                     goal = str(row.get("business_goal") or "").strip()
                     nxt = str(row.get("next_action") or "").strip()
                     rows_out.append(f"- {name}: {goal} | prossima: {nxt}")
-                    if len(rows_out) >= max_projects:
+                    if max_projects is not None and len(rows_out) >= max_projects:
                         break
         except Exception:
             logger.debug("project-inventory read failed", exc_info=True)
     if not rows_out:
         return ""
-    text = "Progetti in corso (basi; per il dettaglio chiedi al Librarian):\n" + "\n".join(rows_out)
-    if len(text) > max_chars:
+    label = (
+        "Progetti in corso (completo):"
+        if max_projects is None and max_chars is None
+        else "Progetti in corso (basi; per il dettaglio chiedi al Librarian):"
+    )
+    text = label + "\n" + "\n".join(rows_out)
+    if max_chars is not None and len(text) > max_chars:
         text = text[:max_chars].rstrip() + "\n…[brief troncato]"
     return text
 
