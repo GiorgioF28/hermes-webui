@@ -69,3 +69,30 @@ def test_system_prompt_lean_is_string(tmp_path, monkeypatch):
     sp = routes._hermes_prime_system_prompt(_mk_ws(tmp_path))
     assert isinstance(sp, str), "lean preset deve ritornare una stringa"
     assert "Librarian" in sp or len(sp) > 0  # almeno il footer istruzione
+
+
+def test_system_prompt_lean_mentions_ask_user_tool(tmp_path, monkeypatch):
+    """Il box scelte del Command Bridge parte solo se Prime chiama il tool.
+
+    Senza l'istruzione esplicita il modello scrive le alternative in prosa e
+    l'evento `clarify` non viene mai emesso (root cause storica del box che
+    "non ha mai funzionato").
+    """
+    monkeypatch.setenv("HERMES_PRIME_USE_LEAN_PRESET", "1")
+    sp = routes._hermes_prime_system_prompt(_mk_ws(tmp_path))
+    assert "mcp__hermes__ask_user" in sp
+
+
+def test_system_prompt_preset_mentions_ask_user_tool(tmp_path, monkeypatch):
+    """Stessa istruzione anche nel ramo di compatibilità (preset claude_code)."""
+    monkeypatch.setenv("HERMES_PRIME_USE_LEAN_PRESET", "0")
+    sp = routes._hermes_prime_system_prompt(_mk_ws(tmp_path))
+    assert "mcp__hermes__ask_user" in sp["append"]
+
+
+def test_ask_user_tool_is_allowed_for_prime():
+    """Il tool deve essere anche nella allow-list, non solo nel prompt."""
+    import inspect
+    src = inspect.getsource(routes._get_claude_registry)
+    assert "mcp__hermes__ask_user" in src
+    assert "build_ask_user_server" in src

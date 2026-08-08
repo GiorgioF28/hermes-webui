@@ -11106,6 +11106,19 @@ def _hermes_prime_system_prompt(workspace):
         "e usa la sua risposta. Rispondi breve (2-4 frasi), in italiano, da capo di "
         "stato maggiore."
     )
+    # [fix/prime-ask-user-prompt] Senza questa istruzione il modello scrive le
+    # alternative in prosa ("preferisci A o B?") invece di chiamare il tool, e
+    # il box scelte del Command Bridge non compare mai. Il tool e' gia'
+    # registrato per hermes-prime (vedi _get_claude_registry -> _allowed).
+    append_parts.append(
+        "Quando ci sono piu' approcci validi e la scelta dipende da una preferenza "
+        "tua o dell'utente, o quando qualcosa non e' chiaro e ti serve un "
+        "chiarimento, NON decidere da solo e NON scrivere le alternative in prosa: "
+        "chiama il tool mcp__hermes__ask_user passando la domanda e 2-4 opzioni "
+        "concise, e aspetta la risposta prima di proseguire. Usalo per scelte di "
+        "design/approccio e per disambiguare richieste vaghe, non per chiedere "
+        "permessi banali."
+    )
     return build_lean_system_prompt(append_parts)
 
 
