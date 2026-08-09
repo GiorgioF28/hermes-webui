@@ -11007,6 +11007,7 @@ def _handle_bridge_tasks(handler, parsed):
                 "task": rec.get("task", ""),
                 "status": status_to_legacy(rec.get("status", "")),
                 "output": result.get("text", ""),
+                "started": rec.get("started_at") or rec.get("created_at"),
                 "finished": rec.get("finished_at"),
                 "anchor_session_id": (rec.get("ui") or {}).get("anchor_session_id") or rec.get("session_id") or "hermes-prime",
                 "anchor_message_index": (rec.get("ui") or {}).get("anchor_message_index"),

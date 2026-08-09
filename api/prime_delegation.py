@@ -406,6 +406,8 @@ def get_background_tasks(max_age: float = 600.0) -> list:
         out.append({
             "id": t["id"], "agent": t["agent"], "task_type": t["task_type"],
             "task": t["task"], "status": t["status"], "output": output,
+            # started: serve alla UI per il timer "in corso da / durata" sulle card.
+            "started": t.get("started") or t.get("started_at") or t.get("created_at"),
             "finished": finished,
             "anchor_session_id": t.get("anchor_session_id") or t.get("session_id") or "hermes-prime",
             "anchor_message_index": t.get("anchor_message_index"),

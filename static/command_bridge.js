@@ -258,6 +258,8 @@
 '.cb-deleg b{color:var(--cb-accent-2);font-weight:600;}',
 '.cb-deleg.cb-deleg-done{border-color:rgba(72,199,116,.38);border-left-color:#48c774;background:rgba(72,199,116,.08);box-shadow:0 12px 30px -24px rgba(72,199,116,.75);}',
 '.cb-deleg.cb-deleg-error{border-color:rgba(255,92,92,.42);border-left-color:#ff6b5c;background:rgba(255,92,92,.08);box-shadow:0 12px 30px -24px rgba(255,92,92,.75);}',
+'.cb-deleg-timer{float:right;margin-right:9px;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.04em;}',
+'.cb-deleg-running .cb-deleg-timer{color:var(--cb-accent-2);}',
 '.cb-deleg-summary{margin-top:6px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
 '.cb-deleg-details{margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px;}',
 '.cb-deleg-details summary{cursor:pointer;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;}',
@@ -951,6 +953,43 @@
     var task = String((t && t.task) || (t && t.task_type) || 'task').replace(/\s+/g, ' ').trim();
     return id + ' - ' + task.slice(0, 72) + ': ' + taskStateLabel(t && t.status);
   }
+  // ── Timer card delega: da quando gira / quanto ci ha messo ──────────────
+  function fmtDuration(secs) {
+    secs = Math.max(0, Math.floor(Number(secs) || 0));
+    var h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+    if (h) return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
+    if (m) return m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+    return s + 's';
+  }
+  function taskTs(t, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var v = Number(t && t[keys[i]]);
+      if (Number.isFinite(v) && v > 0) return v;
+    }
+    return null;
+  }
+  function taskIsRunning(status) {
+    return status === 'in_corso' || status === 'running' || status === 'pending';
+  }
+  function taskTimerHtml(t) {
+    var start = taskTs(t, ['started', 'started_at', 'created_at', 'anchor_created_at']);
+    if (!start) return '';
+    var running = taskIsRunning(t && t.status);
+    var end = taskTs(t, ['finished', 'finished_at']);
+    var secs = (running || !end) ? (Date.now() / 1000 - start) : (end - start);
+    var label = '⏱ ' + fmtDuration(secs);
+    return '<span class="cb-deleg-timer" data-started="' + start + '" data-running="' +
+      (running ? '1' : '0') + '" title="' + (running ? 'in corso da' : 'durata totale') + '">' + esc(label) + '</span>';
+  }
+  function tickTaskTimers() {
+    var nodes = document.querySelectorAll('.cb-deleg-timer[data-running="1"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var start = Number(nodes[i].getAttribute('data-started'));
+      if (!Number.isFinite(start) || start <= 0) continue;
+      nodes[i].textContent = '⏱ ' + fmtDuration(Date.now() / 1000 - start);
+    }
+  }
+  try { setInterval(tickTaskTimers, 1000); } catch (_e) {}
   function placeTaskCard(card, t) {
     var log = $('cbLog'); if (!log || !card) return;
     var anchorIdx = Number(t && t.anchor_message_index);
@@ -971,7 +1010,7 @@
     var full = String(t.output || '').trim();
     var detail = full ? '<details class="cb-deleg-details"><summary>dettaglio</summary><div class="cb-deleg-full">' + esc(full) + '</div></details>' : '';
     var html = '<b>&#9883; ' + esc(t.agent || 'agente') + '</b> &middot; ' + esc(t.task_type || '') +
-      ' <span style="float:right">' + sl + '</span>' +
+      ' <span style="float:right">' + sl + '</span>' + taskTimerHtml(t) +
       '<div class="cb-deleg-summary">' + esc(taskSummary(t)) + '</div>' + detail;
     if (prev && prev.el) { prev.el.innerHTML = html; prev.el.className = 'cb-deleg ' + taskStateClass(t.status); placeTaskCard(prev.el, t); }
     else {
