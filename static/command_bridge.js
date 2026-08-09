@@ -260,7 +260,17 @@
 '.cb-deleg.cb-deleg-error{border-color:rgba(255,92,92,.42);border-left-color:#ff6b5c;background:rgba(255,92,92,.08);box-shadow:0 12px 30px -24px rgba(255,92,92,.75);}',
 '.cb-deleg-timer{float:right;margin-right:9px;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.04em;}',
 '.cb-deleg-running .cb-deleg-timer{color:var(--cb-accent-2);}',
-'.cb-deleg-summary{margin-top:6px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-deleg-summary{margin-top:0;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-deleg-sumrow{display:flex;align-items:flex-start;gap:6px;margin-top:6px;}',
+'.cb-deleg-sumtext{flex:1;min-width:0;}',
+'.cb-deleg-arrow{flex:0 0 auto;background:transparent;border:0;padding:0;cursor:pointer;color:var(--cb-faint);',
+'  font-family:var(--cb-mono);font-size:11px;line-height:1.35;transition:transform .18s,color .15s;}',
+'.cb-deleg-arrow:hover{color:var(--cb-accent);}',
+'.cb-deleg-open .cb-deleg-arrow{transform:rotate(90deg);color:var(--cb-accent);}',
+'.cb-deleg-open .cb-deleg-summary{white-space:pre-wrap;overflow:visible;text-overflow:clip;word-break:break-word;}',
+'.cb-deleg-taskfull{display:none;}',
+'.cb-deleg-open .cb-deleg-taskfull{display:block;margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);',
+'  font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;}',
 '.cb-deleg-details{margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px;}',
 '.cb-deleg-details summary{cursor:pointer;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;}',
 '.cb-deleg-details[open] .cb-deleg-full{margin-top:6px;color:var(--cb-text);font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;}',
@@ -1002,6 +1012,18 @@
       log.appendChild(card);
     }
   }
+  // freccetta: espande/riduce il testo della delega dentro la card
+  function wireDelegArrow(card) {
+    if (!card) return;
+    var btn = card.querySelector ? card.querySelector('.cb-deleg-arrow') : null;
+    if (!btn) return;
+    btn.addEventListener('click', function (ev) {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      var open = card.classList.toggle('cb-deleg-open');
+      var id = card.getAttribute('data-task-id');
+      if (id && _cbTasks[id]) _cbTasks[id].open = open;
+    });
+  }
   function renderTask(t) {
     if (!t || !t.id) return;
     var log = $('cbLog'); if (!log) return;
@@ -1009,13 +1031,24 @@
     var sl = t.status === 'in_corso' ? '&#8230;' : (t.status === 'ok' || t.status === 'parziale' ? '&#10003;' : '&#10007;');
     var full = String(t.output || '').trim();
     var detail = full ? '<details class="cb-deleg-details"><summary>dettaglio</summary><div class="cb-deleg-full">' + esc(full) + '</div></details>' : '';
+    var fullTask = String((t && t.task) || '').trim();
+    var taskFull = fullTask ? '<div class="cb-deleg-taskfull">' + esc(fullTask) + '</div>' : '';
     var html = '<b>&#9883; ' + esc(t.agent || 'agente') + '</b> &middot; ' + esc(t.task_type || '') +
       ' <span style="float:right">' + sl + '</span>' + taskTimerHtml(t) +
-      '<div class="cb-deleg-summary">' + esc(taskSummary(t)) + '</div>' + detail;
-    if (prev && prev.el) { prev.el.innerHTML = html; prev.el.className = 'cb-deleg ' + taskStateClass(t.status); placeTaskCard(prev.el, t); }
+      '<div class="cb-deleg-sumrow">' +
+        '<button type="button" class="cb-deleg-arrow" aria-label="Espandi o riduci il testo della delega" title="Espandi / riduci">&#9656;</button>' +
+        '<div class="cb-deleg-sumtext"><div class="cb-deleg-summary">' + esc(taskSummary(t)) + '</div>' + taskFull + '</div>' +
+      '</div>' + detail;
+    if (prev && prev.el) {
+      prev.el.innerHTML = html;
+      prev.el.className = 'cb-deleg ' + taskStateClass(t.status) + (prev.open ? ' cb-deleg-open' : '');
+      wireDelegArrow(prev.el);
+      placeTaskCard(prev.el, t);
+    }
     else {
       var c = el('div', 'cb-deleg ' + taskStateClass(t.status)); c.innerHTML = html;
       c.setAttribute('data-task-id', t.id);
+      wireDelegArrow(c);
       if (t.anchor_message_index != null) c.setAttribute('data-anchor-index', String(t.anchor_message_index));
       var _sb = nearBottom(log); placeTaskCard(c, t); if (_sb) log.scrollTop = log.scrollHeight;
       _cbTasks[t.id] = { el: c, status: t.status };
