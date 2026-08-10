@@ -458,14 +458,15 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         submit_payloads = []
 
         class FakeEntry:
-            def __init__(self, value):
+            def __init__(self, value, data=None):
                 self.result = value
+                self.data = data
                 self.event = threading.Event()
                 self.event.set()
 
         def fake_submit_pending(_sid, payload):
             submit_payloads.append(payload)
-            return FakeEntry("selected")
+            return FakeEntry("selected", payload)
 
         class CapturingAgent:
             def __init__(self, model=None, provider=None, base_url=None, api_key=None,

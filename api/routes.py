@@ -11621,6 +11621,7 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
             started_at=time.time(),
         )
         started = time.monotonic()
+        last_watchdog_check = started
         try:
             while True:
                 if cancel_event.is_set():
@@ -11638,6 +11639,14 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
                     break
                 except _futures.TimeoutError:
                     now = time.monotonic()
+                    # ask_user is intentionally silent while a human decides.
+                    # Do not classify that interval as an SDK stall, and exclude
+                    # it from the absolute cap as well (the tool owns its timeout).
+                    waiting_for_user = bool(get_clarify_pending_count("hermes-prime"))
+                    if waiting_for_user:
+                        started += max(0.0, now - last_watchdog_check)
+                        last_activity[0] = now
+                    last_watchdog_check = now
                     stalled = (now - last_activity[0]) >= idle_timeout
                     over_cap = (now - started) >= hard_cap
                     if stalled or over_cap:

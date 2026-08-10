@@ -105,6 +105,8 @@ def test_prime_ask_user_question_waits_unblocks_and_persists(monkeypatch, tmp_pa
         assert [m["role"] for m in history["messages"]] == ["assistant", "user"]
         assert history["messages"][0]["_bridge_clarify_event"] == "request"
         assert history["messages"][0]["_bridge_clarify_payload"]["questions"][0]["id"] == "scope"
+        assert history["messages"][0]["_bridge_clarify_resolved"] is True
+        assert history["messages"][0]["_bridge_clarify_response"]["answers"]["Cosa porto nel bridge?"] == "Frontend"
         assert history["messages"][1]["_bridge_clarify_event"] == "response"
         assert "Cosa porto nel bridge?: Frontend" in history["messages"][1]["content"]
     finally:
@@ -145,3 +147,20 @@ def test_command_bridge_frontend_renders_structured_clarify_cards():
     assert "bridgeStructuredEcho" in source
     assert "pending_clarify" in source
     assert "apiPost('/api/clarify/respond'" in source
+    assert "function resolveBridgeClarifyCard" in source
+    assert "cb-resolved" in source
+    assert "data-option-label" in source
+    assert "bridgeValidAskUserPending" in source
+    assert "options.onResolved" in source
+    assert "log.appendChild(ph)" in source
+
+
+def test_invalid_ask_user_payload_does_not_emit_zombie_card():
+    sid = "invalid-ask-user"
+    clarify.clear_pending(sid)
+    try:
+        result = asyncio.run(ask_user_tool._run_ask_user(sid, {}))
+        assert result["is_error"] is True
+        assert clarify.get_pending(sid) is None
+    finally:
+        clarify.clear_pending(sid)

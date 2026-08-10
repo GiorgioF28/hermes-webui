@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from api import routes
+from api import clarify, routes
 
 
 class _Handler:
@@ -353,6 +353,77 @@ def test_prime_reply_finalizes_gracefully_on_stalled_turn(monkeypatch):
     assert reg.closed == ["hermes-prime"]
 
 
+def test_prime_reply_watchdog_pauses_while_ask_user_is_pending(monkeypatch):
+    """Human think-time must not cancel the stream that resumes after Send."""
+    import concurrent.futures as _futures
+
+    monkeypatch.setenv("HERMES_PRIME_IDLE_TIMEOUT", "0.05")
+    monkeypatch.setenv("HERMES_PRIME_HARD_CAP", "0.08")
+    monkeypatch.setenv("HERMES_PRIME_POLL", "0.01")
+    release = threading.Event()
+
+    class _WaitingFuture:
+        cancelled = False
+
+        def result(self, timeout=None):
+            if not release.is_set():
+                time.sleep(min(float(timeout or 0), 0.01))
+                raise _futures.TimeoutError()
+
+        def cancel(self):
+            self.cancelled = True
+            return True
+
+    future = _WaitingFuture()
+
+    class FakeRegistry:
+        closed = []
+
+        def get(self, session_id):
+            return None
+
+        def get_or_create(self, session_id, **kwargs):
+            assert session_id == "hermes-prime"
+
+        def submit_turn(self, session_id, drive):
+            return future
+
+        def close(self, session_id):
+            self.closed.append(session_id)
+
+    monkeypatch.setattr(routes, "_get_claude_registry", lambda: FakeRegistry())
+    monkeypatch.setattr("api.prime_delegation.get_background_tasks", lambda: [])
+    clarify.clear_pending("hermes-prime")
+    entry = clarify.submit_pending(
+        "hermes-prime",
+        {
+            "question": "Quale strada?",
+            "choices_offered": ["A", "B"],
+            "kind": "ask_user_question",
+        },
+    )
+    result = {}
+    thread = threading.Thread(
+        target=lambda: result.update(routes._hermes_prime_reply("brief", Path(".")))
+    )
+    try:
+        thread.start()
+        time.sleep(0.14)  # exceeds both configured deadlines
+        assert thread.is_alive()
+        assert future.cancelled is False
+
+        clarify.resolve_clarify_by_id("hermes-prime", entry.clarify_id, "A")
+        release.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert future.cancelled is False
+        assert result["reply"] == ""
+    finally:
+        release.set()
+        clarify.clear_pending("hermes-prime")
+        thread.join(timeout=2)
+
+
 def test_prime_reply_resets_session_when_turn_disconnects(monkeypatch):
     # Ctrl+F5 a metà stream -> on_token scrive su un socket morto e il turno
     # solleva un errore di disconnessione. La sessione persistente DEVE essere
@@ -527,7 +598,9 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "token: function (d) { showToken(d && d.text); }" in source
     assert "usage: function (d) { showUsage(d && d.usage); }" in source
     assert "approval: function (d) { renderBridgeApprovalCard(d); }" in source
-    assert "clarify: function (d) { renderBridgeClarifyCard(d); }" in source
+    assert "clarify: function (d)" in source
+    assert "renderBridgeClarifyCard(d, {" in source
+    assert "onResolved: function ()" in source
     assert "done: function (d)" in source
     assert "if (d && d.usage) showUsage(d.usage);" in source
     assert "if (!settled && reply) finish('\\u2713 risposta ricevuta');" in source
