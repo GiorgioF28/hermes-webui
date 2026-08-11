@@ -2017,7 +2017,7 @@
               // and the echoed user answer instead of changing text above them.
               var log = $('cbLog');
               if (!reply && bubble) bubble.textContent = 'sto ragionando\u2026';
-              if (!reply && statusLine) statusLine.textContent = 'in corso';
+              if (!reply) turnUi.updateStatus('in corso', true);
               if (log && ph) {
                 log.appendChild(ph);
                 log.scrollTop = log.scrollHeight;
