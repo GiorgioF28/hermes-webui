@@ -1574,6 +1574,22 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<template id="dailyChecklistTemplate">
+  <section class="cb-daily" id="cbDaily" aria-labelledby="cbDailyTitle">
+    <div class="cb-daily-head">
+      <div><h2 class="cb-sec-title" id="cbDailyTitle">Giornaliere</h2><span class="cb-daily-date" id="cbDailyDate"></span></div>
+      <strong class="cb-daily-count" id="cbDailyCount">0/0</strong>
+    </div>
+    <div class="cb-daily-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="cbDailyProgress"></span></div>
+    <div class="cb-daily-projects" id="cbDailyProjects"><div class="cb-loading">caricamento giornaliere...</div></div>
+    <form class="cb-daily-add" id="cbDailyAdd" autocomplete="off">
+      <select id="cbDailyProject" aria-label="Progetto per la task giornaliera"></select>
+      <input id="cbDailyText" maxlength="200" placeholder="Aggiungi task solo per oggi" aria-label="Nuova task giornaliera">
+      <button type="submit">Aggiungi</button>
+    </form>
+    <div class="cb-daily-status" id="cbDailyStatus" role="status" aria-live="polite"></div>
+  </section>
+</template>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
