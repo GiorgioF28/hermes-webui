@@ -11000,6 +11000,7 @@ def _handle_bridge_tasks(handler, parsed):
             rt = rec.get("runtime") or {}
             lib = rec.get("librarian") or {}
             result = rec.get("result") or {}
+            error = rec.get("error") or {}
             tasks.append({
                 "id": tid,
                 "agent": rec.get("agent", ""),
@@ -11019,6 +11020,8 @@ def _handle_bridge_tasks(handler, parsed):
                 "fallback_runtime": rt.get("fallback_runtime", ""),
                 "fallback_model": rt.get("fallback_model", ""),
                 "fallback_reason": rt.get("fallback_reason", ""),
+                "failure_reason": error.get("message", ""),
+                "error_category": error.get("category", ""),
             })
     except Exception:
         logger.debug("bridge tasks: delegation_store augmentation failed", exc_info=True)

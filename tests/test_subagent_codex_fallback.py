@@ -1,3 +1,6 @@
+import subprocess
+import time
+
 import pytest
 
 from api import prime_delegation as pd
@@ -26,14 +29,12 @@ def test_codex_quota_detector_matches_real_plan_limit_messages():
     assert not pd.is_codex_quota_error(RuntimeError("Claude usage limit reached"))
 
 
-def test_codex_quota_detector_matches_timeout_with_quota_partial():
-    # A quota esaurita il CLI stampa il messaggio e resta appeso fino al timeout:
-    # il testo dell'errore timeout include il parziale e deve far scattare il fallback.
+def test_codex_timeout_is_never_reclassified_as_quota():
     quota_timeout = RuntimeError(
         "Codex CLI timeout dopo 1000s.\nParziale prima del timeout:\n"
         "You've hit your usage limit. Upgrade to Pro or try again later."
     )
-    assert pd.is_codex_quota_error(quota_timeout)
+    assert not pd.is_codex_quota_error(quota_timeout)
 
     plain_timeout = RuntimeError("Codex CLI timeout dopo 1000s.")
     assert not pd.is_codex_quota_error(plain_timeout)
@@ -53,19 +54,16 @@ def test_codex_timeout_with_task_output_mentioning_quota_is_not_quota_error():
     )
     assert not pd.is_codex_quota_error(timeout)
 
-    # Ma se nel parziale c'e' la frase inequivocabile del CLI, il fallback
-    # deve comunque scattare (a quota esaurita il CLI stampa e resta appeso).
+    # Anche una frase inequivocabile non cambia la causa terminale: timeout.
     quota_timeout = RuntimeError(
         "Codex CLI timeout dopo 1000s.\nParziale prima del timeout:\n"
         "Lavoro sulla quota pill...\nYou've hit your usage limit."
     )
-    assert pd.is_codex_quota_error(quota_timeout)
+    assert not pd.is_codex_quota_error(quota_timeout)
 
 
 @pytest.mark.asyncio
 async def test_codex_timeout_preserves_stderr_partial(monkeypatch):
-    import subprocess
-
     def fake_exec(task, workspace):
         raise subprocess.TimeoutExpired(
             cmd=["codex", "exec"], timeout=1000,
@@ -74,10 +72,49 @@ async def test_codex_timeout_preserves_stderr_partial(monkeypatch):
 
     monkeypatch.setattr(pd, "_codex_exec_blocking", fake_exec)
 
-    with pytest.raises(RuntimeError) as ei:
+    with pytest.raises(pd.CodexTimeoutError) as ei:
         await pd._run_codex_worker("task", ".")
-    assert "hit your usage limit" in str(ei.value)
-    assert pd.is_codex_quota_error(ei.value)
+    assert "hit your usage limit" in ei.value.partial_output
+    assert ei.value.duration_seconds == 1000
+    assert not pd.is_codex_quota_error(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_codex_timeout_fails_without_sonnet_fallback(monkeypatch, tmp_path):
+    worker_calls = []
+
+    async def fake_codex(*args, **kwargs):
+        raise pd.CodexTimeoutError(1000, "report parziale utile")
+
+    async def fake_worker(*args, **kwargs):
+        worker_calls.append(args)
+        return "non deve partire"
+
+    monkeypatch.setattr(pd, "_run_codex_worker", fake_codex)
+    monkeypatch.setattr(pd, "_run_worker", fake_worker)
+
+    with pytest.raises(pd.CodexTimeoutError):
+        await pd._run_codex_worker_with_fallback("task", str(tmp_path), progress={})
+    assert worker_calls == []
+
+
+@pytest.mark.asyncio
+async def test_codex_start_error_still_falls_back_to_sonnet(monkeypatch, tmp_path):
+    worker_calls = []
+
+    async def fake_codex(*args, **kwargs):
+        raise pd.CodexStartError("Codex CLI non avviabile")
+
+    async def fake_worker(task, model, workspace, **kwargs):
+        worker_calls.append((task, model, workspace))
+        return "fallback riuscito"
+
+    monkeypatch.setattr(pd, "_run_codex_worker", fake_codex)
+    monkeypatch.setattr(pd, "_run_worker", fake_worker)
+
+    result = await pd._run_codex_worker_with_fallback("task", str(tmp_path), progress={})
+    assert result == "fallback riuscito"
+    assert worker_calls == [("task", "claude-sonnet-4-6", str(tmp_path))]
 
 
 def test_codex_fallback_cooldown_is_configurable(monkeypatch):
@@ -124,3 +161,137 @@ async def test_codex_quota_falls_back_to_sonnet_and_reuses_cooldown(monkeypatch,
     assert codex_calls == [("task one", str(tmp_path))]
     assert worker_calls[1][0] == "task two"
     assert progress2["fallback_runtime"] == "sonnet"
+
+
+def _task(task_id):
+    return {
+        "id": task_id,
+        "session_id": "hermes-prime",
+        "agent": "programmatore",
+        "agent_id": "programmatore",
+        "task_type": "codice",
+        "task": "task mirato",
+        "status": "in_corso",
+        "output": "",
+        "started": time.time(),
+        "finished": None,
+        "runtime": "codex",
+        "fallback_runtime": "",
+        "fallback_model": "",
+        "fallback_reason": "",
+    }
+
+
+@pytest.mark.asyncio
+async def test_timeout_persists_failed_with_duration_and_partial(monkeypatch, tmp_path):
+    import api.delegation_store as ds
+
+    ds._STORE = None
+    task_id = "d-timeout-real"
+    pd._BG_TASKS[task_id] = _task(task_id)
+    monkeypatch.setattr(pd, "_enqueue_librarian_pass", lambda *args: None)
+
+    async def fake_codex(*args, **kwargs):
+        raise pd.CodexTimeoutError(1000, "report parziale utile")
+
+    async def forbidden_fallback(*args, **kwargs):
+        raise AssertionError("Sonnet non deve partire su timeout")
+
+    monkeypatch.setattr(pd, "_run_codex_worker", fake_codex)
+    monkeypatch.setattr(pd, "_run_worker", forbidden_fallback)
+    try:
+        await pd._run_and_store(task_id, "codice", "task mirato", pd._CODEX_MODEL, "Codex", str(tmp_path))
+        task = pd._BG_TASKS[task_id]
+        assert task["status"] == "errore"
+        assert task["output"] == "report parziale utile"
+        assert "1000s" in task["failure_reason"]
+        rec = ds.get_delegation_store(tmp_path).get(task_id)
+        assert rec["status"] == "failed"
+        assert rec["error"]["category"] == "timeout"
+        assert rec["result"]["text"] == "report parziale utile"
+    finally:
+        pd._BG_TASKS.pop(task_id, None)
+        ds._STORE = None
+
+
+@pytest.mark.asyncio
+async def test_quota_fallback_attempt_with_limit_output_persists_failed(monkeypatch, tmp_path):
+    import api.delegation_store as ds
+
+    ds._STORE = None
+    task_id = "d-quota-real"
+    pd._BG_TASKS[task_id] = _task(task_id)
+    fallback_calls = []
+    monkeypatch.setattr(pd, "_enqueue_librarian_pass", lambda *args: None)
+
+    async def fake_codex(*args, **kwargs):
+        raise pd.CodexProcessError(1, "HTTP 429 usage_limit_exceeded")
+
+    async def fake_worker(*args, **kwargs):
+        fallback_calls.append(args)
+        return "You've hit your session limit - resets 12:40am"
+
+    monkeypatch.setattr(pd, "_run_codex_worker", fake_codex)
+    monkeypatch.setattr(pd, "_run_worker", fake_worker)
+    try:
+        await pd._run_and_store(task_id, "codice", "task mirato", pd._CODEX_MODEL, "Codex", str(tmp_path))
+        assert len(fallback_calls) == 1
+        assert pd._BG_TASKS[task_id]["status"] == "errore"
+        assert "session limit" in pd._BG_TASKS[task_id]["output"]
+        rec = ds.get_delegation_store(tmp_path).get(task_id)
+        assert rec["status"] == "failed"
+        assert rec["error"]["category"] == "quota_exhausted"
+    finally:
+        pd._BG_TASKS.pop(task_id, None)
+        ds._STORE = None
+
+
+@pytest.mark.asyncio
+async def test_successful_output_persists_done(monkeypatch, tmp_path):
+    import api.delegation_store as ds
+
+    ds._STORE = None
+    task_id = "d-success-real"
+    pd._BG_TASKS[task_id] = _task(task_id)
+    monkeypatch.setattr(pd, "_enqueue_librarian_pass", lambda *args: None)
+
+    async def fake_codex(*args, **kwargs):
+        return "Implementazione completata, commit abc1234 e test verdi."
+
+    monkeypatch.setattr(pd, "_run_codex_worker", fake_codex)
+    try:
+        await pd._run_and_store(task_id, "codice", "task mirato", pd._CODEX_MODEL, "Codex", str(tmp_path))
+        assert pd._BG_TASKS[task_id]["status"] == "ok"
+        rec = ds.get_delegation_store(tmp_path).get(task_id)
+        assert rec["status"] == "done"
+        assert rec["error"]["message"] == ""
+    finally:
+        pd._BG_TASKS.pop(task_id, None)
+        ds._STORE = None
+
+
+def test_empty_and_useless_truncated_outputs_fail_validation():
+    with pytest.raises(pd.DelegationOutputError) as empty:
+        pd._validate_delegation_output("")
+    assert empty.value.category == "empty_output"
+
+    with pytest.raises(pd.DelegationOutputError) as truncated:
+        pd._validate_delegation_output("[truncated]")
+    assert truncated.value.category == "truncated_output"
+
+    assert pd._validate_delegation_output("Analisi utile completata. [truncated]") == "Analisi utile completata. [truncated]"
+
+
+def test_nonzero_codex_exit_is_typed_failure(monkeypatch, tmp_path):
+    class Proc:
+        returncode = 2
+        stdout = "parziale"
+        stderr = "test failure"
+
+    monkeypatch.setattr(pd, "_resolve_codex_executable", lambda: "codex.cmd")
+    monkeypatch.setattr(pd.subprocess, "run", lambda *args, **kwargs: Proc())
+
+    with pytest.raises(pd.CodexProcessError) as failed:
+        pd._codex_exec_blocking("task", str(tmp_path))
+    assert failed.value.exit_code == 2
+    assert failed.value.category == "process_exit"

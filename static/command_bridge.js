@@ -278,6 +278,7 @@
 '.cb-deleg-details{margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px;}',
 '.cb-deleg-details summary{cursor:pointer;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;}',
 '.cb-deleg-details[open] .cb-deleg-full{margin-top:6px;color:var(--cb-text);font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;}',
+'.cb-deleg-failure{margin-top:6px;color:#ff9b91;font-family:var(--cb-sans);font-size:11.5px;line-height:1.4;white-space:pre-wrap;word-break:break-word;}',
 /* input: a single compact row, fixed at the bottom of the chat console */
 '.cb-chat-input{display:flex;padding:12px 14px 14px;border-top:1px solid var(--cb-line2);}',
 '.cb-chat-input textarea{flex:1;min-width:0;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:12px;',
@@ -951,14 +952,15 @@
   var _cbTasks = {};
   var _cbActiveAgents = {};
   function taskStateClass(status) {
-    if (status === 'ok' || status === 'parziale') return 'cb-deleg-done';
-    if (status === 'errore' || status === 'interrotta') return 'cb-deleg-error';
+    if (status === 'ok' || status === 'parziale' || status === 'done') return 'cb-deleg-done';
+    if (status === 'errore' || status === 'interrotta' || status === 'failed') return 'cb-deleg-error';
     return 'cb-deleg-running';
   }
   function taskStateLabel(status) {
-    if (status === 'in_corso') return 'in corso';
-    if (status === 'ok' || status === 'parziale') return 'completato';
+    if (status === 'in_corso' || status === 'running' || status === 'pending') return 'in corso';
+    if (status === 'ok' || status === 'parziale' || status === 'done') return 'completato';
     if (status === 'interrotta') return 'interrotta';
+    if (status === 'errore' || status === 'failed') return 'fallita';
     return 'errore';
   }
   function taskSummary(t) {
@@ -1032,9 +1034,11 @@
     if (!t || !t.id) return;
     var log = $('cbLog'); if (!log) return;
     var prev = _cbTasks[t.id];
-    var sl = t.status === 'in_corso' ? '&#8230;' : (t.status === 'ok' || t.status === 'parziale' ? '&#10003;' : '&#10007;');
+    var sl = taskIsRunning(t.status) ? '&#8230;' : (t.status === 'ok' || t.status === 'parziale' || t.status === 'done' ? '&#10003;' : '&#10007;');
     var full = String(t.output || '').trim();
     var detail = full ? '<details class="cb-deleg-details"><summary>dettaglio</summary><div class="cb-deleg-full">' + esc(full) + '</div></details>' : '';
+    var failure = String((t && t.failure_reason) || '').trim();
+    var failureHtml = failure ? '<div class="cb-deleg-failure"><b>Fallita:</b> ' + esc(failure) + '</div>' : '';
     var fullTask = String((t && t.task) || '').trim();
     var taskFull = fullTask ? '<div class="cb-deleg-taskfull">' + esc(fullTask) + '</div>' : '';
     var html = '<b>&#9883; ' + esc(t.agent || 'agente') + '</b> &middot; ' + esc(t.task_type || '') +
@@ -1042,7 +1046,7 @@
       '<div class="cb-deleg-sumrow">' +
         '<button type="button" class="cb-deleg-arrow" aria-label="Espandi o riduci il testo della delega" title="Espandi / riduci">&#9656;</button>' +
         '<div class="cb-deleg-sumtext"><div class="cb-deleg-summary">' + esc(taskSummary(t)) + '</div>' + taskFull + '</div>' +
-      '</div>' + detail;
+      '</div>' + failureHtml + detail;
     if (prev && prev.el) {
       prev.el.innerHTML = html;
       prev.el.className = 'cb-deleg ' + taskStateClass(t.status) + (prev.open ? ' cb-deleg-open' : '');
@@ -1059,12 +1063,12 @@
       // light up the matching planet in the star system
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
-    if (prev && prev.status === 'in_corso' && t.status !== 'in_corso') {
-      sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + (t.status === 'ok' ? 'finito' : 'fallito') + ' il task.');
+    if (prev && taskIsRunning(prev.status) && !taskIsRunning(t.status)) {
+      sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + ((t.status === 'ok' || t.status === 'done') ? 'finito' : 'fallito') + ' il task.');
     }
     _cbTasks[t.id].status = t.status;
     // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
-    if ((t.status === 'ok' || t.status === 'errore') && !_cbTasks[t.id].briefed) {
+    if ((t.status === 'ok' || t.status === 'errore' || t.status === 'done' || t.status === 'failed') && !_cbTasks[t.id].briefed) {
       _cbTasks[t.id].briefed = true;
       requestBrief(t);
     }
