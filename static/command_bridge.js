@@ -2705,4 +2705,27 @@
     pollTokenQuota();
     return Promise.resolve();
   };
+
+  /* ── auto-boot on first load ───────────────────────────────────────────────
+   * Il Bridge e' il pannello di default (index.html lo marca gia' "active" e
+   * <main> parte con showing-bridge), ma loadCommandBridge() veniva invocata
+   * SOLO da switchPanel(): al primo caricamento nessuno cambiava pannello,
+   * quindi #mainBridge restava vuoto (schermata nera) finche' non si andava
+   * su un'altra sezione e si tornava indietro. Qui agganciamo il boot a
+   * DOMContentLoaded, che scatta DOPO tutti gli script defer (panels.js e
+   * boot.js girano dopo questo file), cosi' _currentPanel esiste gia'.
+   * ──────────────────────────────────────────────────────────────────────── */
+  function _cbAutoBoot() {
+    try {
+      var onBridge = (typeof _currentPanel !== 'undefined')
+        ? _currentPanel === 'bridge'
+        : !!document.querySelector('main.main.showing-bridge');
+      if (onBridge) window.loadCommandBridge();
+    } catch (e) { /* mai bloccare il boot della WebUI */ }
+  }
+  if (document.readyState === 'loading' || document.readyState === 'interactive') {
+    document.addEventListener('DOMContentLoaded', _cbAutoBoot);
+  } else {
+    _cbAutoBoot();
+  }
 })();
