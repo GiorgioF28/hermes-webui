@@ -384,7 +384,7 @@
 '.cb-flex-badges{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;}',
 '.cb-flex-badge{border:1px solid var(--cb-line2);border-radius:999px;padding:4px 7px;font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-muted);background:rgba(0,0,0,.16);white-space:nowrap;}',
 '.cb-flex-badge.hot{color:#fff;border-color:rgba(255,138,61,.45);box-shadow:0 0 18px -12px var(--cb-accent);}',
-'.cb-flex-projects{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:10px;}',
+'.cb-flex-projects{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:10px;}',
 '.cb-flex-proj{border:1px solid var(--cb-line2);border-radius:8px;padding:7px;background:rgba(0,0,0,.16);min-width:0;}',
 '.cb-flex-proj .n{font-family:var(--cb-disp);font-size:15px;color:#fff;line-height:1;}',
 '.cb-flex-proj .l{font-family:var(--cb-mono);font-size:8.5px;text-transform:uppercase;color:var(--cb-faint);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
