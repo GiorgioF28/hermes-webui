@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,6 +91,81 @@ def set_lead(workspace, lead: str, reason: str = "", manual: bool = False) -> di
     except Exception:
         logger.warning("lead-brain state write failed", exc_info=True)
     return state
+
+
+# ── Stato quota Claude (timer del Command Bridge) ─────────────────────────────
+# Quando Claude esaurisce la quota registriamo QUI (tasks/claude-quota.json)
+# il motivo e, se noto, l'epoch del reset: il Bridge lo legge via
+# GET /api/bridge/prime/claude-quota e mostra il countdown in alto al centro.
+# Autopulizia: la finestra passata (o un turno Claude riuscito) cancella lo stato.
+
+# Senza reset noto il badge non deve restare per sempre: le finestre Pro/Max
+# durano 5h, quindi oltre quella soglia lo stato e' sicuramente stantio.
+_QUOTA_UNKNOWN_TTL_SECONDS = 5 * 3600
+_QUOTA_RESET_GRACE_SECONDS = 90
+
+
+def _quota_state_path(workspace) -> Path:
+    return Path(str(workspace)) / "tasks" / "claude-quota.json"
+
+
+def record_claude_quota(workspace, reason: str = "", reset_at: float | None = None) -> dict:
+    """Persiste 'quota Claude esaurita' (con eventuale epoch di reset)."""
+    state = {
+        "exhausted": True,
+        "reason": str(reason or "")[:200],
+        "reset_at": float(reset_at) if reset_at else None,
+        "detected_at": time.time(),
+    }
+    p = _quota_state_path(workspace)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:
+        logger.warning("claude-quota state write failed", exc_info=True)
+    return state
+
+
+def clear_claude_quota(workspace) -> None:
+    """Rimuove lo stato quota (turno Claude riuscito o finestra resettata)."""
+    try:
+        _quota_state_path(workspace).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.debug("claude-quota state clear failed", exc_info=True)
+
+
+def get_claude_quota_state(workspace) -> dict:
+    """Stato quota per la UI. ``{}`` se non esaurita o gia' scaduta (autopulizia)."""
+    try:
+        data = json.loads(_quota_state_path(workspace).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logger.debug("claude-quota state read failed", exc_info=True)
+        return {}
+    if not isinstance(data, dict) or not data.get("exhausted"):
+        return {}
+    now = time.time()
+    try:
+        reset_at = float(data.get("reset_at")) if data.get("reset_at") is not None else None
+    except (TypeError, ValueError):
+        reset_at = None
+    if reset_at is not None and now >= reset_at + _QUOTA_RESET_GRACE_SECONDS:
+        clear_claude_quota(workspace)
+        return {}
+    try:
+        detected_at = float(data.get("detected_at") or 0)
+    except (TypeError, ValueError):
+        detected_at = 0.0
+    if reset_at is None and now >= detected_at + _QUOTA_UNKNOWN_TTL_SECONDS:
+        clear_claude_quota(workspace)
+        return {}
+    data["reset_at"] = reset_at
+    return data
 
 
 def set_auto_failover(workspace) -> dict:

@@ -144,6 +144,71 @@
       .then(function () { _cbQuotaRefreshInFlight = false; });
   }
 
+  /* ── Claude quota countdown (badge in alto al centro) ──────────────────────
+   * Quando Claude esaurisce la quota il backend salva lo stato (con l'epoch
+   * del reset se il CLI lo dichiara) in tasks/claude-quota.json. Qui: badge
+   * top-center con countdown al reset, aggiornato ogni secondo. Fonti: evento
+   * SSE `error` [claude_quota] (immediato) + GET /api/bridge/prime/claude-quota
+   * (persistenza ai reload + clock del server per evitare skew). Quota tornata
+   * (finestra passata o turno Claude riuscito) → il badge sparisce da solo.
+   * ──────────────────────────────────────────────────────────────────────── */
+  var _cbQtTick = null, _cbQtResetAt = 0, _cbQtSkew = 0, _cbQtPoll = null, _cbQtReadyHide = null;
+  function _fmtCountdown(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h > 0) return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
+    if (m > 0) return m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+    return s + 's';
+  }
+  function _qtStopTick() { if (_cbQtTick) { clearInterval(_cbQtTick); _cbQtTick = null; } }
+  function hideQuotaTimer() {
+    _qtStopTick(); _cbQtResetAt = 0;
+    if (_cbQtReadyHide) { clearTimeout(_cbQtReadyHide); _cbQtReadyHide = null; }
+    var box = $('cbQuotaTimer');
+    if (box) { box.hidden = true; box.classList.remove('cb-qt-ready'); }
+  }
+  function showQuotaTimer(resetAt, opts) {
+    var box = $('cbQuotaTimer'), txt = $('cbQuotaTimerText');
+    if (!box || !txt) return;
+    if (_cbQtReadyHide) { clearTimeout(_cbQtReadyHide); _cbQtReadyHide = null; }
+    box.classList.remove('cb-qt-ready');
+    if (opts && Number.isFinite(Number(opts.serverNow))) {
+      _cbQtSkew = Number(opts.serverNow) - Date.now() / 1000;
+    }
+    var ts = Number(resetAt);
+    if (!Number.isFinite(ts) || ts <= 0) {
+      // Reset ignoto: badge fisso, niente countdown (il backend lo fa scadere).
+      _qtStopTick(); _cbQtResetAt = 0;
+      txt.textContent = 'CLAUDE QUOTA ESAURITA · reset non dichiarato';
+      box.hidden = false;
+      return;
+    }
+    _cbQtResetAt = ts;
+    box.hidden = false;
+    _qtStopTick();
+    var render = function () {
+      var left = _cbQtResetAt - (Date.now() / 1000 + _cbQtSkew);
+      if (left <= 0) {
+        _qtStopTick();
+        box.classList.add('cb-qt-ready');
+        txt.textContent = 'CLAUDE · quota di nuovo disponibile';
+        _cbQtReadyHide = setTimeout(hideQuotaTimer, 60000);
+        return;
+      }
+      txt.textContent = 'CLAUDE QUOTA · reset tra ' + _fmtCountdown(left);
+    };
+    render();
+    _cbQtTick = setInterval(render, 1000);
+  }
+  function pollClaudeQuota() {
+    return api('api/bridge/prime/claude-quota').then(function (d) {
+      var q = d && d.quota;
+      if (!q || !q.exhausted) { hideQuotaTimer(); return; }
+      showQuotaTimer(q.reset_at || null, { serverNow: d.now });
+    }).catch(function () { /* endpoint giu' != quota esaurita: non toccare il badge */ });
+  }
+  function startClaudeQuotaPolling() { if (!_cbQtPoll) _cbQtPoll = setInterval(pollClaudeQuota, 60000); }
+
   /* ── fonts + scoped styles ─────────────────────────────────────────────── */
   function injectFonts() {
     if ($('cb-fonts')) return;
@@ -199,6 +264,13 @@
 '.cb-chat-role{font-family:var(--cb-mono);font-size:10px;color:var(--cb-muted);letter-spacing:.08em;margin-top:1px;}',
 '.cb-quota{font-family:var(--cb-mono);font-size:9px;color:var(--cb-accent-2);border:1px solid var(--cb-accent-dim);border-radius:999px;padding:4px 7px;background:rgba(255,106,0,.07);white-space:nowrap;}',
 '.cb-quota[hidden]{display:none;}',
+/* Claude quota countdown (top-center): appare solo a quota esaurita */
+'.cb-quota-timer{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:7px;font-family:var(--cb-mono);font-size:10px;letter-spacing:.08em;color:var(--cb-warning);border:1px solid rgba(224,177,93,.35);border-radius:999px;padding:5px 12px;background:rgba(10,12,18,.88);backdrop-filter:blur(4px);white-space:nowrap;pointer-events:none;max-width:92%;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-quota-timer[hidden]{display:none;}',
+'.cb-quota-timer .cb-qt-dot{width:6px;height:6px;border-radius:50%;background:var(--cb-warning);box-shadow:0 0 6px var(--cb-warning);animation:cbQtPulse 1.6s ease-in-out infinite;flex:none;}',
+'.cb-quota-timer.cb-qt-ready{color:var(--cb-success);border-color:rgba(134,192,139,.4);}',
+'.cb-quota-timer.cb-qt-ready .cb-qt-dot{background:var(--cb-success);box-shadow:0 0 6px var(--cb-success);animation:none;}',
+'@keyframes cbQtPulse{0%,100%{opacity:.35}50%{opacity:1}}',
 '.cb-voicetoggle{background:transparent;border:1px solid var(--cb-line);color:var(--cb-faint);border-radius:8px;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex:0 0 auto;transition:.15s;}',
 '.cb-voicetoggle:hover{color:var(--cb-text);}',
 '.cb-voicetoggle.cb-on{color:var(--cb-accent);border-color:var(--cb-accent-dim);}',
@@ -497,6 +569,10 @@
     var root = el('div', 'cb-root');
     root.innerHTML =
       '<div class="cb-stars" aria-hidden="true"></div>' +
+      '<div class="cb-quota-timer" id="cbQuotaTimer" hidden role="status">' +
+        '<span class="cb-qt-dot" aria-hidden="true"></span>' +
+        '<span id="cbQuotaTimerText"></span>' +
+      '</div>' +
       '<div class="cb-hero" id="cbHero">' +
         '<aside class="cb-chat" id="cbChat">' +
           '<div class="cb-chat-head"><span class="cb-dot"></span><div style="flex:1;min-width:0">' +
@@ -2043,6 +2119,12 @@
           var base = (d && d.error) ? d.error : 'Hermes Prime non ha completato la risposta.';
           var br = (d && d.branch) ? (' [' + d.branch + ']') : '';
           var hint = (d && d.hint) ? ('\n↳ ' + d.hint) : '';
+          if (d && d.branch === 'claude_quota') {
+            // Timer top-center: parte subito dall'evento, poi il poll allinea
+            // il countdown al clock del server (stato persistito nel backend).
+            showQuotaTimer(d.quota_reset_at || null);
+            pollClaudeQuota();
+          }
           fail('Hermes Prime' + br + ': ' + base + hint);
         }
       });
@@ -2703,6 +2785,8 @@
     startWorklogPolling();
     startQuotaPolling();
     pollTokenQuota();
+    startClaudeQuotaPolling();
+    pollClaudeQuota();
     return Promise.resolve();
   };
 

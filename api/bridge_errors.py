@@ -11,6 +11,10 @@ importata. I messaggi non contengono segreti/paths (già ripuliti a monte da
 """
 from __future__ import annotations
 
+import re as _re
+import time as _time
+from datetime import datetime as _dt
+
 # Rami stabili. Il valore stringa è parte del contratto (lo usa anche il frontend
 # per decidere il messaggio) → non rinominare senza aggiornare la UI e i test.
 CLAUDE_QUOTA = "claude_quota"
@@ -160,3 +164,97 @@ def classify(exc) -> dict:
     branch = classify_branch(exc)
     message, hint = _MESSAGES.get(branch, _MESSAGES[UNKNOWN])
     return {"branch": branch, "message": message, "hint": hint}
+
+
+# ── Quota reset parsing (timer Command Bridge) ────────────────────────────────
+# Quando Claude esaurisce la quota, il CLI spesso dice ANCHE quando la finestra
+# si resetta, ma in formati diversi a seconda della versione:
+#   "Claude AI usage limit reached|1723554000"        (epoch dopo una pipe)
+#   "Your limit will reset at 7pm"                    (orario locale am/pm)
+#   "usage limit reached ... resets at 15:00"         (orario locale 24h)
+#   "retry after 3600"                                (secondi)
+#   timestamp ISO ("2026-08-13T18:00:00Z")
+# Best-effort puro: se non troviamo nulla di plausibile torna None e la UI
+# mostra il badge senza countdown. Sanity: il reset deve cadere tra "adesso" e
+# +7 giorni, altrimenti e' rumore (id numerici, epoch passati, ecc.).
+_QUOTA_EPOCH_PIPE = _re.compile(r"\|\s*(\d{10,13})\b")
+_QUOTA_EPOCH_NEAR_RESET = _re.compile(r"reset\w*\D{0,12}(\d{10,13})\b", _re.I)
+_QUOTA_ISO = _re.compile(
+    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)"
+)
+_QUOTA_RETRY_SECONDS = _re.compile(r"retry[- ]after[:\s]+(\d{1,6})\b", _re.I)
+_QUOTA_CLOCK = _re.compile(
+    r"reset\w*(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", _re.I
+)
+
+
+def quota_reset_epoch(text, now: float | None = None) -> float | None:
+    """Estrae dall'errore di quota Claude QUANDO la finestra si resetta.
+
+    Ritorna epoch (secondi, float) oppure None se il testo non contiene un
+    orario di reset riconoscibile. ``now`` e' iniettabile per i test.
+    """
+    if not text:
+        return None
+    s = str(text)
+    now_ts = float(now if now is not None else _time.time())
+
+    def _ok(ts: float) -> float | None:
+        return ts if now_ts < ts <= now_ts + 7 * 86400 else None
+
+    # 1) Epoch esplicito (formato CLI "...|<epoch>" o vicino a "reset").
+    for rx in (_QUOTA_EPOCH_PIPE, _QUOTA_EPOCH_NEAR_RESET):
+        m = rx.search(s)
+        if m:
+            ts = float(m.group(1))
+            if ts > 1e12:  # millisecondi
+                ts /= 1000.0
+            got = _ok(ts)
+            if got is not None:
+                return got
+
+    # 2) Timestamp ISO (naive = ora locale del server).
+    m = _QUOTA_ISO.search(s)
+    if m:
+        try:
+            dt = _dt.fromisoformat(m.group(1).replace(" ", "T").replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.astimezone()
+            got = _ok(dt.timestamp())
+            if got is not None:
+                return got
+        except ValueError:
+            pass
+
+    # 3) "retry after N" (secondi).
+    m = _QUOTA_RETRY_SECONDS.search(s)
+    if m:
+        got = _ok(now_ts + float(m.group(1)))
+        if got is not None:
+            return got
+
+    # 4) Orario a muro ("resets at 7pm" / "reset at 15:00"): oggi, o domani se
+    # l'ora e' gia' passata. Interpretato nella timezone locale del server.
+    m = _QUOTA_CLOCK.search(s)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        ampm = (m.group(3) or "").lower()
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            local = _dt.fromtimestamp(now_ts)
+            try:
+                cand = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                ts = cand.timestamp()
+                if ts <= now_ts:
+                    ts += 86400
+                got = _ok(ts)
+                if got is not None:
+                    return got
+            except (ValueError, OverflowError, OSError):
+                pass
+
+    return None

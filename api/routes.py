@@ -6444,6 +6444,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/prime/todos":
         return _handle_bridge_prime_todos(handler)
 
+    if parsed.path == "/api/bridge/prime/claude-quota":
+        return _handle_bridge_prime_claude_quota(handler)
+
     if parsed.path == "/api/approval/stream":
         return _handle_approval_sse_stream(handler, parsed)
 
@@ -11359,8 +11362,26 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
     if lead_brain.get_lead(workspace) == lead_brain.LEAD_CODEX:
         return _hermes_prime_reply_codex(message, workspace, attachments, on_token=on_token, on_status=on_status)
     try:
-        return _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status, model_state=model_state, stream_id=stream_id)
+        result = _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status, model_state=model_state, stream_id=stream_id)
+        # Turno Claude riuscito → la quota evidentemente c'e': spegni il timer
+        # del Bridge se era rimasto acceso da una finestra precedente.
+        try:
+            lead_brain.clear_claude_quota(workspace)
+        except Exception:
+            logger.debug("claude quota state clear failed", exc_info=True)
+        return result
     except _ClaudeExhausted as ex:
+        # Timer quota nel Command Bridge: registra l'esaurimento e, se il CLI
+        # dice quando la finestra si resetta, l'epoch del reset (persiste ai
+        # reload; la UI lo legge da /api/bridge/prime/claude-quota).
+        try:
+            lead_brain.record_claude_quota(
+                workspace,
+                reason=(ex.reason or "")[:200],
+                reset_at=bridge_errors.quota_reset_epoch(ex.reason or ""),
+            )
+        except Exception:
+            logger.debug("claude quota state record failed", exc_info=True)
         current = lead_brain.get_lead_state(workspace)
         if current.get("manual"):
             raise RuntimeError(
@@ -11886,6 +11907,27 @@ def _handle_bridge_prime_todos(handler):
         return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
 
 
+def _handle_bridge_prime_claude_quota(handler):
+    """GET /api/bridge/prime/claude-quota -- stato quota Claude per il timer del Bridge.
+
+    Ritorna ``quota: null`` quando la quota non e' esaurita (o la finestra e'
+    gia' passata: get_claude_quota_state fa autopulizia). ``now`` e' l'epoch del
+    server: la UI calcola il countdown con questo clock, cosi' un orologio
+    client sballato non sfasa il timer.
+    """
+    try:
+        from api import lead_brain
+        state = lead_brain.get_claude_quota_state(_prime_workspace_from_settings())
+        return j(
+            handler,
+            {"ok": True, "quota": state or None, "now": time.time()},
+            extra_headers={"Cache-Control": "no-store"},
+        ) or True
+    except Exception as exc:
+        logger.exception("bridge prime claude-quota failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
 def _handle_bridge_prime_goal(handler, body):
     """POST /api/bridge/prime/goal -- get/set the Prime session goal (P2-A)."""
     from api.prime_session_store import get_prime_session_store
@@ -12181,13 +12223,28 @@ def _handle_bridge_prime(handler, body):
         store.mark_error(stream_id, _sanitize_error(exc), keep_pending=True)
         logger.exception("hermes prime reply failed")
         info = bridge_errors.classify(exc)
+        err_payload = {
+            "error": info["message"],
+            "branch": info["branch"],
+            "hint": info["hint"],
+            "detail": _sanitize_error(exc),
+        }
+        if info["branch"] == bridge_errors.CLAUDE_QUOTA:
+            # Timer quota nel Command Bridge: estrai (best-effort) QUANDO la
+            # finestra si resetta e persisti lo stato, cosi' il countdown
+            # sopravvive a reload/riaperture. quota_reset_at puo' essere None:
+            # la UI mostra allora il badge senza countdown.
+            try:
+                from api import lead_brain as _lb
+                reset_at = bridge_errors.quota_reset_epoch(err_payload["detail"])
+                err_payload["quota_reset_at"] = reset_at
+                _lb.record_claude_quota(
+                    workspace, reason=err_payload["detail"][:200], reset_at=reset_at,
+                )
+            except Exception:
+                logger.debug("claude quota state record failed", exc_info=True)
         try:
-            emit("error", {
-                "error": info["message"],
-                "branch": info["branch"],
-                "hint": info["hint"],
-                "detail": _sanitize_error(exc),
-            })
+            emit("error", err_payload)
         except _CLIENT_DISCONNECT_ERRORS:
             pass
     finally:
