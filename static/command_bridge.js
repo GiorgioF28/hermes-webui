@@ -2404,7 +2404,11 @@
     var streak = Number(data.streak_days || 0);
     var totals = data.totals_by_project || {};
     var isRecord = record > 0 && today >= record;
-    var projects = ['Hermes', 'VisionBuilts', 'Rap'];
+    var projects = Array.isArray(data.tracked_projects) && data.tracked_projects.length
+      ? data.tracked_projects
+      : Object.keys(totals).filter(function (name) { return name !== 'Altro'; }).map(function (name) {
+        return { name: name, label: name };
+      });
     var recent = (data.recent || []).slice(0, 8);
     var lastDate = '';
     var recentHtml = recent.length ? recent.map(function (r) {
@@ -2431,7 +2435,9 @@
           '</div>' +
           '<div class="cb-flex-projects">' +
             projects.map(function (p) {
-              return '<div class="cb-flex-proj"><div class="n">' + Number(totals[p] || 0) + '</div><div class="l">' + esc(p) + '</div></div>';
+              var name = p && p.name ? p.name : '';
+              var label = p && p.label ? p.label : name;
+              return '<div class="cb-flex-proj"><div class="n">' + Number(totals[name] || 0) + '</div><div class="l" title="' + esc(label) + '">' + esc(label) + '</div></div>';
             }).join('') +
           '</div>' +
         '</div>' +

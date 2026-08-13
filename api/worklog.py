@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from api.command_bridge_projects import (
+    PROJECT_BY_ID,
+    PROJECTS,
+    TRACKING_ATTRIBUTION_ORDER,
+    tracked_projects_payload,
+)
+
 _CACHE_TTL = 30.0
 _MAX_DAYS = 90
 _DEFAULT_DAYS = 14
@@ -22,10 +29,12 @@ _RECENT_LIMIT = 24
 _DONE_TASK_RE = re.compile(r"^\s*[-*]\s+\[[xX]\]\s+(.+?)\s*$")
 _DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 
-_PROJECT_KEYWORDS = (
-    ("Hermes", re.compile(r"\b(command-bridge|librarian|webui|prime|watchdog|hermes)\b", re.I)),
-    ("VisionBuilts", re.compile(r"\b(n8n|visionbuilts|ebook|pdf|recipe|console|instagram)\b", re.I)),
-    ("Rap", re.compile(r"\b(rap|suno|podcast|album|barre)\b", re.I)),
+_PROJECT_KEYWORDS = tuple(
+    (
+        PROJECT_BY_ID[project_id]["name"],
+        re.compile(PROJECT_BY_ID[project_id]["tracking_pattern"], re.I),
+    )
+    for project_id in TRACKING_ATTRIBUTION_ORDER
 )
 
 _cache_lock = threading.Lock()
@@ -258,7 +267,8 @@ def build_worklog(workspace_path, webui_repo_path=None, days: int = _DEFAULT_DAY
     ]
 
     counts = {((start_date + timedelta(days=i)).isoformat()): 0 for i in range(days)}
-    totals_by_project = {"Hermes": 0, "VisionBuilts": 0, "Rap": 0, "Altro": 0}
+    totals_by_project = {project["name"]: 0 for project in PROJECTS}
+    totals_by_project["Altro"] = 0
     for event in filtered:
         counts[event.date] = counts.get(event.date, 0) + 1
         totals_by_project[event.project] = totals_by_project.get(event.project, 0) + 1
@@ -283,6 +293,7 @@ def build_worklog(workspace_path, webui_repo_path=None, days: int = _DEFAULT_DAY
         "record_date": record_date,
         "streak_days": streak_days,
         "totals_by_project": totals_by_project,
+        "tracked_projects": tracked_projects_payload(),
         "daily": [{"date": date, "count": count} for date, count in sorted(counts.items())],
         "recent": [
             {

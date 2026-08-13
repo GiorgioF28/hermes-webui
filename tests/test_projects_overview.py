@@ -39,7 +39,7 @@ def test_no_projects_dir(tmp_path):
     assert data["exists"] is False
 
 
-def test_command_bridge_family_cards_include_concorso_priority_and_clients(tmp_path):
+def test_command_bridge_family_cards_use_exact_tracked_set_and_clients(tmp_path):
     v = tmp_path / "obsidian-vault"
     (v / "01-Projects").mkdir(parents=True)
     (tmp_path / "config").mkdir()
@@ -59,13 +59,34 @@ def test_command_bridge_family_cards_include_concorso_priority_and_clients(tmp_p
         "# VisionBuilts\n\n## Next\n- [ ] Follow up Nine\n",
         encoding="utf-8",
     )
+    (v / "01-Projects" / "Vending Machine.md").write_text(
+        "# Vending Machine\n\n## Next\n- [ ] Validare shaker proteici\n",
+        encoding="utf-8",
+    )
+    (v / "01-Projects" / "Trading.md").write_text(
+        "# Trading\n\n## Next\n- [ ] Studiare smart money trap\n",
+        encoding="utf-8",
+    )
+    (v / "01-Projects" / "Ebook Cucina Amazon.md").write_text(
+        "# Ebook Cucina Amazon\n\n## Next\n- [ ] Preparare scheda Amazon KDP\n",
+        encoding="utf-8",
+    )
 
-    families = {row["id"]: row for row in projects_overview.build_projects_overview(v)["families"]}
+    family_rows = projects_overview.build_projects_overview(v)["families"]
+    assert [row["id"] for row in family_rows] == [
+        "hermes",
+        "visionbuilts",
+        "vending-machine",
+        "trading",
+        "ebook-cucina-amazon",
+    ]
+    families = {row["id"]: row for row in family_rows}
 
-    assert "concorso-inps" in families
-    assert families["concorso-inps"]["name"] == "Concorso INPS"
-    assert families["concorso-inps"]["study"]["course"] == "Concorso INPS"
-    assert families["rap"]["priority"] == 0
+    assert "concorso-inps" not in families
+    assert "rap" not in families
+    assert families["vending-machine"]["tasks"][0]["text"] == "Validare shaker proteici"
+    assert families["trading"]["tasks"][0]["text"] == "Studiare smart money trap"
+    assert families["ebook-cucina-amazon"]["tasks"][0]["text"] == "Preparare scheda Amazon KDP"
     assert families["visionbuilts"]["clients_active"][0]["name"] == "Nine"
     task = families["visionbuilts"]["tasks"][0]
     assert task["subproject_id"] == "01-projects-visionbuilts-ebook-platform"

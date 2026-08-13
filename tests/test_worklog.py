@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 from api import worklog
 
@@ -13,7 +14,11 @@ def test_classify_commit_type_from_conventional_prefix():
 def test_project_for_keyword_mapping():
     assert worklog.project_for("prime watchdog webui") == "Hermes"
     assert worklog.project_for("n8n instagram recipe console") == "VisionBuilts"
-    assert worklog.project_for("Suno album rap") == "Rap"
+    assert worklog.project_for("Hermes VisionBuilts integration") == "Hermes"
+    assert worklog.project_for("vending shaker proteici Up Level Sicilia") == "Vending Machine"
+    assert worklog.project_for("trading smart money trap") == "Trading"
+    assert worklog.project_for("ebook cucina Amazon KDP") == "Ebook Cucina Amazon"
+    assert worklog.project_for("Suno album rap") == "Altro"
     assert worklog.project_for("pay bills") == "Altro"
 
 
@@ -58,7 +63,9 @@ def test_build_worklog_buckets_tasks_and_dedupes(monkeypatch, tmp_path):
     today.write_text(
         "- [x] fix Hermes prime\n"
         "- [x] fix Hermes prime\n"
-        "- [x] Suno rap album\n",
+        "- [x] Suno rap album\n"
+        "- [x] validare vending shaker proteici\n"
+        "- [x] preparare Amazon KDP cookbook\n",
         encoding="utf-8",
     )
     ts = fixed.timestamp()
@@ -68,14 +75,32 @@ def test_build_worklog_buckets_tasks_and_dedupes(monkeypatch, tmp_path):
 
     data = worklog.build_worklog(tmp_path, tmp_path / "webui", days=3)
 
-    assert data["today_count"] == 2
+    assert data["today_count"] == 4
     assert data["yesterday_count"] == 0
-    assert data["record_count"] == 2
+    assert data["record_count"] == 4
     assert data["streak_days"] == 1
     assert data["totals_by_project"]["Hermes"] == 1
-    assert data["totals_by_project"]["Rap"] == 1
-    assert [row["count"] for row in data["daily"]] == [0, 0, 2]
-    assert len(data["recent"]) == 2
+    assert data["totals_by_project"]["Vending Machine"] == 1
+    assert data["totals_by_project"]["Ebook Cucina Amazon"] == 1
+    assert data["totals_by_project"]["Altro"] == 1
+    assert "Rap" not in data["totals_by_project"]
+    assert [row["count"] for row in data["daily"]] == [0, 0, 4]
+    assert len(data["recent"]) == 4
+
+
+def test_tracked_project_payload_matches_widget_contract():
+    data = worklog.build_worklog(Path("missing-workspace"), Path("missing-webui"), days=1)
+
+    assert [(row["name"], row["label"]) for row in data["tracked_projects"]] == [
+        ("Hermes", "Hermes"),
+        ("VisionBuilts", "VisionBuilts"),
+        ("Vending Machine", "Vending"),
+        ("Trading", "Trading"),
+        ("Ebook Cucina Amazon", "Ebook Amazon"),
+    ]
+    js = (Path(__file__).parents[1] / "static" / "command_bridge.js").read_text(encoding="utf-8")
+    assert "data.tracked_projects" in js
+    assert "var projects = ['Hermes', 'VisionBuilts', 'Rap'];" not in js
 
 
 def test_clamp_days_bounds():

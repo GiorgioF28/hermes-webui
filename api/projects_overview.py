@@ -1,8 +1,8 @@
 """Per-project overview for the Command Bridge "Projects Strip".
 
 Reads project notes from ``<vault>/01-Projects/*.md`` (direct fs) and rolls them
-up into family cards (Hermes · VisionBuilts · Concorso INPS · Podcast Rap). Each single
-note in 01-Projects is a *sub-project* of one family; the card aggregates them.
+up into the five configured Command Bridge family cards. Each single note in
+01-Projects is a *sub-project* of one family; the card aggregates them.
 
 For each family the payload returns:
 - ``children``: the member sub-projects (name + vault-relative path) to drill in.
@@ -25,6 +25,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from api.command_bridge_projects import ATTRIBUTION_ORDER, PROJECT_BY_ID, PROJECTS
+
 # ── CONFIG (parsing rules + family mapping — tweak here) ─────────────────────
 PROJECTS_DIR = "01-Projects"
 # Headings whose bullet items count as "things to do". Notes here often write
@@ -41,46 +43,8 @@ MAX_LATEST = 4
 ACTIVITY_DAYS = 14
 _MAX_BYTES = 1_000_000
 
-# The three families, in display order. ``stem_keywords`` map a 01-Projects note
-# to its family by its filename; ``keywords`` (broader) attribute a *free* task
-# (from Ideas/Areas/Inbox/Resources) to a family by note name + task text.
-FAMILIES = (
-    {
-        "id": "hermes",
-        "name": "Hermes",
-        "priority": 2,
-        "stem_keywords": ("hermes",),
-        "keywords": ("hermes", "command bridge", "webui", "web ui", "prime", "voce", "voice", "planet", "pianeta"),
-    },
-    {
-        "id": "visionbuilts",
-        "name": "VisionBuilts",
-        "priority": 2,
-        "stem_keywords": ("visionbuilts", "vision builts", "giorgiof28", "creator earning", "creator-earning"),
-        "keywords": ("visionbuilts", "vision builts", "giorgiof28", "creator earning", "creator-earning",
-                     "ebook", "e-book", "n8n", "console", "instagram", "crm", "webhook", "gotenberg"),
-    },
-    {
-        "id": "concorso-inps",
-        "name": "Concorso INPS",
-        "priority": 2,
-        "stem_keywords": ("concorso inps", "assistente informatico", "inps"),
-        "keywords": ("concorso inps", "assistente informatico", "inps", "studio",
-                     "quiz", "manuale", "cad", "gdpr", "office automation"),
-        "study": {
-            "course": "Concorso INPS",
-            "path": "07-Study/Concorso INPS/Indice.md",
-        },
-    },
-    {
-        "id": "rap",
-        "name": "Podcast Rap",
-        "priority": 0,
-        "stem_keywords": ("rap", "album", "produzione musicale"),
-        "keywords": ("rap", "album", "produzione musicale", "podcast", "beat", "lyrics",
-                     "testo", "strofa", "ritornello", "mix", "master", "musica"),
-    },
-)
+# Canonical display order and mappings are shared with the worklog counters.
+FAMILIES = PROJECTS
 # Vault folders scanned for free-floating tasks (besides the project notes).
 FREE_TASK_DIRS = ("00-Inbox", "02-Ideas", "03-Areas", "04-Resources")
 
@@ -218,12 +182,11 @@ def _family_for_stem(stem: str) -> str | None:
 def _family_for_text(*texts: str) -> str | None:
     """Attribute a free task to a family by note name + task text keywords.
 
-    Checks the specific families (VisionBuilts, Rap) before Hermes so a generic
-    Hermes mention doesn't swallow a clearly-VisionBuilts task.
+    Checks specific business lines before broad VisionBuilts/Hermes vocabulary.
     """
     blob = " ".join(t.lower() for t in texts if t)
-    for fid in ("visionbuilts", "concorso-inps", "rap", "hermes"):
-        fam = next(f for f in FAMILIES if f["id"] == fid)
+    for fid in ATTRIBUTION_ORDER:
+        fam = PROJECT_BY_ID[fid]
         if any(k in blob for k in fam["keywords"]):
             return fid
     return None

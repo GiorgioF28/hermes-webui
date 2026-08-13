@@ -16,6 +16,7 @@
 - Command Bridge Prime now accepts PDF attachments, stores them in `attachments/hermes-prime`, writes an attachment index and `.summary.md`, and sends only label/path/summary text into the persistent SDK session for on-demand Read retrieval.
 
 ### Changed
+- Command Bridge project cards and daily tracking now share one five-project configuration: Hermes, VisionBuilts, Vending Machine, Trading, and Ebook Cucina Amazon. Legacy INPS/Rap events remain included in global daily record and streak calculations without appearing as project counters.
 - WebUI model-facing history now replaces image attachments older than two user turns with a short Read-tool placeholder, without rewriting saved session transcripts.
 - Command Bridge Prime now keeps image attachments as disk paths and emits stale-image Read placeholders after two Prime turns instead of reinjecting old attachments into new prompts.
 - Hermes Prime replies in the Command Bridge now stream token-by-token over SSE instead of appearing only after the full Claude turn completes. The existing Vault Planet state, TTS playback, and asynchronous delegation polling remain unchanged.
