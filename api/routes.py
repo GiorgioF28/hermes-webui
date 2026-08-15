@@ -1464,6 +1464,8 @@ def _csrf_exempt_path(path: str) -> bool:
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
+        # Non-browser machine endpoint; api.intake_email verifies its bearer token.
+        "/api/intake/email",
     }
 
 
@@ -6985,6 +6987,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
+
+    if parsed.path == "/api/intake/email":
+        from api.intake_email import handle_intake_email
+
+        return handle_intake_email(handler)
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)

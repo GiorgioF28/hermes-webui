@@ -50,6 +50,8 @@ PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
     '/api/auth/passkey/options', '/api/auth/passkey/login',
+    # Machine-to-machine intake has its own fail-closed bearer authentication.
+    '/api/intake/email',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
 })

@@ -4,6 +4,7 @@
 ## [Unreleased]
 
 ### Added
+- Added a fail-closed `POST /api/intake/email` machine endpoint for VisionBuilts: strict event-v1 validation, bearer authentication, bounded payload/rate/queue limits, persistent SQLite idempotency, silent two-worker extraction, and deterministic Notion CRM upsert with schema/status guards.
 - Added the Studio Professor flow: study courses/chapters/tag retrieval APIs, a Study-panel Professor launcher with course/subject/chapter selectors, confirmable vault saves, and an Office automation chapter pilot for the Concorso INPS vault.
 - Added a "Nuova sessione / chiudi chat" control that starts a clean session with a compact handoff summary from the previous chat.
 - Added a Claude-only Token Usage context breakdown with initial-context, per-turn, MCP estimate, heavy tool-result, cache-creation-by-tool, and drag-cost views.
