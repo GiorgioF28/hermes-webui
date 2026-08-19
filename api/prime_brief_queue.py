@@ -311,6 +311,11 @@ class PrimeBriefQueue:
                 result = hermes_prime_reply_fn(brief_msg, workspace)
                 reply = (result.get("reply") or "").strip()
                 if reply:
+                    # Capture LLM usage (token counts + cost) so the frontend
+                    # can display the same usage badge as normal chat turns.
+                    # Falls back to {} when the LLM returns no usage — never
+                    # invent values.
+                    usage = result.get("usage") or {}
                     from api.prime_session_store import get_prime_session_store
                     get_prime_session_store().inject_assistant_message(
                         reply,
@@ -319,6 +324,7 @@ class PrimeBriefQueue:
                             "task_id": brief.get("task_id", ""),
                             "brief_type": "llm",
                             "delegation_status": status,
+                            "usage": usage,
                         },
                     )
                     llm_delivered = True

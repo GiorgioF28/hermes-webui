@@ -516,6 +516,82 @@ class TestAttemptDeliveryQuotaFallback(unittest.TestCase):
         self.assertEqual(msg["meta"]["brief_type"], "llm")
         self.assertIn("deploy", msg["content"])
 
+    def test_llm_usage_captured_in_meta(self):
+        """LLM reply with usage → usage dict persisted in meta (not invented)."""
+        self.queue.enqueue(
+            "d22", agent="prog", task_type="codice", task="fix",
+            status="done", output="output",
+        )
+        expected_usage = {
+            "input_tokens": 1200,
+            "output_tokens": 80,
+            "cache_read_input_tokens": 900,
+            "cache_creation_input_tokens": 300,
+            "estimated_cost_usd": 0.0042,
+        }
+
+        def _ok_reply_with_usage(msg, ws):
+            return {"reply": "Brief con usage.", "usage": expected_usage}
+
+        mock_store = self._make_mock_store()
+        with patch("api.prime_session_store.get_prime_session_store", return_value=mock_store):
+            ok = self.queue.attempt_delivery(
+                "brief-d22",
+                try_llm=True,
+                hermes_prime_reply_fn=_ok_reply_with_usage,
+                workspace=self.ws,
+                output="output",
+            )
+        self.assertTrue(ok)
+        meta = mock_store.injected_messages[0]["meta"]
+        self.assertEqual(meta["brief_type"], "llm")
+        self.assertIn("usage", meta, "usage deve essere presente nel meta")
+        self.assertEqual(meta["usage"]["input_tokens"], 1200)
+        self.assertEqual(meta["usage"]["output_tokens"], 80)
+        self.assertAlmostEqual(meta["usage"]["estimated_cost_usd"], 0.0042)
+
+    def test_llm_no_usage_returns_empty_dict(self):
+        """LLM reply without usage key → meta['usage'] is {} (never invented)."""
+        self.queue.enqueue(
+            "d23", agent="prog", task_type="codice", task="fix",
+            status="done", output="output",
+        )
+
+        def _ok_reply_no_usage(msg, ws):
+            return {"reply": "Brief senza usage."}
+
+        mock_store = self._make_mock_store()
+        with patch("api.prime_session_store.get_prime_session_store", return_value=mock_store):
+            ok = self.queue.attempt_delivery(
+                "brief-d23",
+                try_llm=True,
+                hermes_prime_reply_fn=_ok_reply_no_usage,
+                workspace=self.ws,
+                output="output",
+            )
+        self.assertTrue(ok)
+        meta = mock_store.injected_messages[0]["meta"]
+        self.assertIn("usage", meta, "usage presente anche quando assente (come {})")
+        self.assertEqual(meta["usage"], {}, "usage deve essere {} quando LLM non lo restituisce")
+
+    def test_fallback_no_llm_has_no_usage(self):
+        """Fallback no-LLM: usage NON presente nel meta (non inventato)."""
+        mock_store = self._make_mock_store()
+        brief = {
+            "brief_id": "brief-d24",
+            "task_id": "d24",
+            "agent": "programmatore",
+            "delegation_status": "done",
+            "error_category": "",
+            "fallback_text": "Delega d24 completata da programmatore.\nStato: done.",
+        }
+        with patch("api.prime_session_store.get_prime_session_store", return_value=mock_store):
+            ok = self.queue.deliver_fallback_no_llm(brief)
+        self.assertTrue(ok)
+        meta = mock_store.injected_messages[0]["meta"]
+        # Fallback no-LLM must NOT inject a usage field (no invented values)
+        self.assertNotIn("usage", meta, "fallback_no_llm non deve avere usage nel meta")
+
 
 # ---------------------------------------------------------------------------
 # PrimeSessionStore – inject_assistant_message

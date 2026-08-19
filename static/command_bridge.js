@@ -1868,6 +1868,15 @@
         }
         node = primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '');
         if (node) node.setAttribute('data-cb-msg-index', String(idx));
+        // Show usage badge on injected brief messages (e.g. brief delega LLM).
+        // Reuses the same gate and helpers as normal chat turns.
+        if (node && m.role !== 'user' && _hasBridgeUsage(m.usage) && window._showTokenUsage === true) {
+          var _briefBadge = _formatAssistantUsageBadge(m.usage);
+          if (_briefBadge) {
+            var _briefFoot = node.querySelector('.cb-msg-foot');
+            if (_briefFoot) { _briefFoot.textContent = _briefBadge; _briefFoot.hidden = false; }
+          }
+        }
       });
       if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
       pollTasks();
