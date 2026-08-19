@@ -52,6 +52,98 @@ def test_read_repo_status_degrades_on_git_error():
     assert result["head"] is None
 
 
+# ── compute_live_behind (funzione pura) ──────────────────────────────────────
+
+
+def _ok_repo(**kwargs):
+    """Repo base 'ok' con tutti i campi necessari."""
+    base = {
+        "name": "TestRepo", "status": "ok",
+        "branch": "main", "upstream": "origin/main",
+        "ahead": 0, "behind": 0, "dirty": 0,
+        "head": {"hash": "abc1234", "subject": "fix"},
+        "stranded": [], "stranded_error": False,
+    }
+    base.update(kwargs)
+    return base
+
+
+def test_compute_live_behind_false_when_clean():
+    result = repo_status.compute_live_behind(_ok_repo())
+    assert result["live_behind"] is False
+    assert result["live_behind_reasons"] == []
+
+
+def test_compute_live_behind_dirty():
+    result = repo_status.compute_live_behind(_ok_repo(dirty=3))
+    assert result["live_behind"] is True
+    assert "dirty" in result["live_behind_reasons"]
+
+
+def test_compute_live_behind_ahead():
+    result = repo_status.compute_live_behind(_ok_repo(ahead=2))
+    assert result["live_behind"] is True
+    assert "ahead" in result["live_behind_reasons"]
+
+
+def test_compute_live_behind_behind():
+    result = repo_status.compute_live_behind(_ok_repo(behind=1))
+    assert result["live_behind"] is True
+    assert "behind" in result["live_behind_reasons"]
+
+
+def test_compute_live_behind_stranded():
+    result = repo_status.compute_live_behind(
+        _ok_repo(stranded=[{"branch": "feat/x", "commits": 2, "hash": "aaa", "subject": "wip"}])
+    )
+    assert result["live_behind"] is True
+    assert "stranded" in result["live_behind_reasons"]
+
+
+def test_compute_live_behind_multiple_reasons():
+    result = repo_status.compute_live_behind(_ok_repo(dirty=1, ahead=3))
+    assert result["live_behind"] is True
+    assert set(result["live_behind_reasons"]) >= {"dirty", "ahead"}
+
+
+def test_compute_live_behind_false_for_errore_repo():
+    errore = {"name": "BrokenRepo", "status": "errore", "ahead": 5, "dirty": 2, "stranded": [{"branch": "x", "commits": 1}]}
+    result = repo_status.compute_live_behind(errore)
+    assert result["live_behind"] is False
+    assert result["live_behind_reasons"] == []
+
+
+def test_read_repo_status_includes_live_behind_fields(monkeypatch):
+    """read_repo_status deve includere live_behind e live_behind_reasons nel payload."""
+    calls = []
+
+    def fake_runner(repo, args, timeout):
+        calls.append(args)
+        if args[0] == "status":
+            return "## main...origin/main [ahead 1]\n M api/routes.py\n"
+        if args[0] == "log":
+            return "abc1234 fix something"
+        if args[0] == "for-each-ref":
+            return ""
+        return ""
+
+    result = repo_status.read_repo_status("TestRepo", Path("/fake"), runner=fake_runner)
+    assert result["status"] == "ok"
+    assert "live_behind" in result
+    assert result["live_behind"] is True  # ahead=1
+    assert "ahead" in result["live_behind_reasons"]
+
+
+def test_read_repo_status_errore_includes_live_behind_fields():
+    def failing_runner(_r, _a, _t):
+        raise OSError("git unavailable")
+
+    result = repo_status.read_repo_status("BrokenRepo", Path("Z:/missing"), runner=failing_runner)
+    assert result["status"] == "errore"
+    assert result["live_behind"] is False
+    assert result["live_behind_reasons"] == []
+
+
 def test_repo_status_endpoint_returns_json(monkeypatch):
     payload = {
         "ok": True,

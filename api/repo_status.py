@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+LIVE_REPO_PATH = Path(r"C:\Users\giorg\Documents\Hermes setup\hermes-webui")
+
 REPO_STATUS_CONFIG = {
     "repos": (
         ("Console VisionBuilts", Path(r"C:\Users\giorg\Documents\Hermes setup\visionbuilts-console")),
-        ("Hermes WebUI", Path(r"C:\Users\giorg\Documents\Hermes setup\hermes-webui")),
+        ("Hermes WebUI", LIVE_REPO_PATH),
         ("Hermes setup", Path(r"C:\Users\giorg\Documents\Hermes setup")),
         ("Creator Earning Engine", Path(r"C:\Users\giorg\Documents\Hermes setup\tomasvisionbuilts\creator-earning-engine")),
     ),
@@ -21,6 +23,15 @@ REPO_STATUS_CONFIG = {
         "id": "vt67KEU7MY0vd9vJ",
         "label": "aggiornato via API",
     },
+    # Branch upstream/community che non sono "lavoro nostro rimasto indietro".
+    "ignored_branches": {
+        "Hermes WebUI": ("master",),
+    },
+    "max_stranded": 6,
+    # Repo il cui codice e' effettivamente in esecuzione sulla 8788.
+    "live_repo": "Hermes WebUI",
+    # Pattern usati per capire se il codice su disco e' cambiato dopo l'avvio.
+    "live_watch_globs": ("api/*.py", "static/*.js", "static/*.css", "*.py"),
     "cache_ttl_seconds": 30.0,
     "command_timeout_seconds": 4.0,
 }
@@ -54,6 +65,30 @@ def parse_porcelain_status(output: str) -> dict[str, Any]:
     }
 
 
+def compute_live_behind(repo: dict[str, Any]) -> dict[str, Any]:
+    """Calcola live_behind e live_behind_reasons per un repo snapshot (funzione pura).
+
+    Un repo e' 'live_behind' quando c'e' lavoro non ancora riflesso nel build live:
+      - dirty:    modifiche non committate su disco
+      - ahead:    commit locali non pushati sul remote
+      - stranded: branch locali con commit non inclusi in HEAD
+      - behind:   il remote e' avanti del locale (serve pull)
+    Il campo e' addizionale e retrocompatibile: chi non lo legge ignora i nuovi campi.
+    """
+    reasons: list[str] = []
+    if repo.get("status") != "ok":
+        return {"live_behind": False, "live_behind_reasons": reasons}
+    if int(repo.get("dirty", 0)) > 0:
+        reasons.append("dirty")
+    if int(repo.get("ahead", 0)) > 0:
+        reasons.append("ahead")
+    if repo.get("stranded"):
+        reasons.append("stranded")
+    if int(repo.get("behind", 0)) > 0:
+        reasons.append("behind")
+    return {"live_behind": bool(reasons), "live_behind_reasons": reasons}
+
+
 def _run_git(repo: Path, args: list[str], timeout: float) -> str:
     completed = subprocess.run(
         ["git", *args],
@@ -68,11 +103,58 @@ def _run_git(repo: Path, args: list[str], timeout: float) -> str:
     return completed.stdout.strip()
 
 
+def read_stranded_branches(
+    repo: Path,
+    *,
+    runner: Callable[[Path, list[str], float], str] = _run_git,
+    timeout: float = 4.0,
+    ignored: tuple[str, ...] = (),
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    """Branch locali con commit NON contenuti in HEAD (lavoro fatto e mai integrato).
+
+    E' il segnale che mancava: un fix committato su un branch che non e' quello
+    checkout-ato non arrivera' mai in produzione, per quanti riavvii si facciano.
+    """
+    raw = runner(
+        repo,
+        [
+            "for-each-ref",
+            "--no-merged",
+            "HEAD",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\t%(objectname:short)\t%(contents:subject)",
+            "refs/heads/",
+        ],
+        timeout,
+    )
+    out: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        branch, short_hash = parts[0].strip(), parts[1].strip()
+        subject = parts[2].strip() if len(parts) > 2 else ""
+        if not branch or branch in ignored:
+            continue
+        try:
+            commits = int((runner(repo, ["rev-list", "--count", f"HEAD..{branch}"], timeout) or "0").strip())
+        except (OSError, subprocess.SubprocessError, ValueError):
+            continue
+        if commits <= 0:
+            continue
+        out.append({"branch": branch, "commits": commits, "hash": short_hash, "subject": subject})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def read_repo_status(
     name: str,
     repo: Path,
     *,
     runner: Callable[[Path, list[str], float], str] = _run_git,
+    ignored_branches: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     timeout = float(REPO_STATUS_CONFIG["command_timeout_seconds"])
     try:
@@ -83,12 +165,26 @@ def read_repo_status(
         head_hash, _, subject = head_line.partition(" ")
         if not head_hash:
             raise ValueError("HEAD non disponibile")
-        return {
+        try:
+            stranded = read_stranded_branches(
+                repo,
+                runner=runner,
+                timeout=timeout,
+                ignored=ignored_branches,
+                limit=int(REPO_STATUS_CONFIG["max_stranded"]),
+            )
+            stranded_error = False
+        except (OSError, subprocess.SubprocessError, ValueError):
+            stranded, stranded_error = [], True
+        base: dict[str, Any] = {
             "name": name,
             "status": "ok",
             **status,
             "head": {"hash": head_hash, "subject": subject},
+            "stranded": stranded,
+            "stranded_error": stranded_error,
         }
+        return {**base, **compute_live_behind(base)}
     except (OSError, subprocess.SubprocessError, ValueError):
         return {
             "name": name,
@@ -99,6 +195,10 @@ def read_repo_status(
             "behind": 0,
             "dirty": 0,
             "head": None,
+            "stranded": [],
+            "stranded_error": True,
+            "live_behind": False,
+            "live_behind_reasons": [],
         }
 
 

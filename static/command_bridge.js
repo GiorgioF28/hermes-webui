@@ -422,6 +422,9 @@
 '.cb-repo-badge.ok{color:var(--cb-success);border-color:color-mix(in srgb,var(--cb-success) 34%,transparent);}',
 '.cb-repo-badge.warn{color:var(--cb-warning);border-color:color-mix(in srgb,var(--cb-warning) 36%,transparent);}',
 '.cb-repo-badge.error{color:var(--cb-error);border-color:color-mix(in srgb,var(--cb-error) 38%,transparent);}',
+'.cb-repo-badge.live-behind{color:var(--cb-error);border-color:color-mix(in srgb,var(--cb-error) 60%,transparent);background:rgba(255,59,48,.07);cursor:pointer;transition:background .15s,border-color .15s;}',
+'.cb-repo-badge.live-behind:hover{background:rgba(255,59,48,.18);border-color:var(--cb-error);box-shadow:0 0 6px rgba(255,59,48,.25);}',
+'.cb-repo-badge.deploy-sent{color:var(--cb-muted);border-color:var(--cb-line);cursor:default;opacity:.65;pointer-events:none;}',
 '.cb-repo-dirty,.cb-repo-headhash{white-space:nowrap;color:var(--cb-faint);}',
 '.cb-repo-workflow{grid-template-columns:minmax(0,1fr) auto;color:var(--cb-faint);}',
 '.cb-repo-workflow .cb-repo-name{color:var(--cb-muted);}',
@@ -666,6 +669,19 @@
     if (memToggle && hero) memToggle.addEventListener('click', function () { hero.classList.toggle('cb-mem-collapsed'); });
     var repoRefresh = $('cbRepoRefresh');
     if (repoRefresh) repoRefresh.addEventListener('click', refreshRepoStatus);
+    // Delegazione click pillola rossa → segnale deploy a Prime
+    var repoList = $('cbRepoList');
+    if (repoList) repoList.addEventListener('click', function (ev) {
+      var tgt = ev.target;
+      // Walk-up: copre click su span senza figli, ma difende da refactor futuri
+      while (tgt && tgt !== repoList) {
+        if (tgt.classList && tgt.classList.contains('live-behind') && tgt.hasAttribute('data-repo')) {
+          sendDeployRequest(tgt.getAttribute('data-repo'), _repoStatusCache[tgt.getAttribute('data-repo')] || {});
+          return;
+        }
+        tgt = tgt.parentNode;
+      }
+    });
     var form = $('cbForm');
     if (form) form.addEventListener('submit', onPrimeSubmit);
     // Textarea che cresce mentre scrivi e torna piccola all'invio; Invio manda,
@@ -1196,11 +1212,15 @@
     if (!window.cbStar || !window.cbStar.setAgentActive) return;
     var next = {};
     (tasks || []).forEach(function (t) {
-      if (t && t.status === 'in_corso') {
+      if (!t) return;
+      if (t.status === 'in_corso') {
         var key = (t.agent || t.task_type || '').trim();
         var label = ((t.agent || '') + ' ' + (t.task_type || '')).trim();
         if (key) next[key] = label || key;
       }
+      // Librarian automatico post-delega: non ha una card dedicata, ma mentre
+      // aggiorna la memoria il suo pianeta deve accendersi (halo) come gli altri.
+      if (t.librarian_status === 'in_corso') next['librarian'] = 'librarian memoria';
     });
     Object.keys(next).forEach(function (name) {
       if (!_cbActiveAgents[name]) window.cbStar.setAgentActive(next[name], true);
@@ -2527,20 +2547,78 @@
       '<div class="cb-flex-recent">' + recentHtml + '</div>';
   }
 
+  /* ── Repo status: pillola rossa + segnale deploy a Prime ─────────────────── */
+  var _deployDebounce = {};   // repoName -> timestamp ultimo invio (ms)
+  var _repoStatusCache = {};  // repoName -> ultimo dict repo renderizzato
+
+  function sendDeployRequest(repoName, repo) {
+    var now = Date.now();
+    if (_deployDebounce[repoName] && (now - _deployDebounce[repoName]) < 8000) return; // debounce 8s
+    _deployDebounce[repoName] = now;
+
+    var reasons = Array.isArray(repo.live_behind_reasons) ? repo.live_behind_reasons.join(', ') : '?';
+    var strandedNames = (repo.stranded || []).map(function (s) { return s && s.branch ? s.branch : String(s); });
+    var msg =
+      '[deploy-request] Repo "' + repoName + '" — il live è indietro.' +
+      ' branch=' + (repo.branch || '?') +
+      ', ahead=' + Number(repo.ahead || 0) +
+      ', dirty=' + Number(repo.dirty || 0) +
+      ', behind=' + Number(repo.behind || 0) +
+      ', stranded=' + JSON.stringify(strandedNames) +
+      ', reasons=[' + reasons + '].' +
+      ' Procedi: merge di quanto serve, push e deploy live, poi riporta gli artefatti (hash, git status -sb, esito deploy).';
+
+    // Feedback visivo sulla pillola
+    var selector = '.cb-repo-badge[data-repo="' + repoName.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]';
+    var badge = document.querySelector(selector);
+    var origText = badge ? badge.textContent : '';
+    if (badge) {
+      badge.classList.remove('live-behind');
+      badge.classList.add('deploy-sent');
+      badge.textContent = '✓ inviato';
+      setTimeout(function () {
+        badge.classList.remove('deploy-sent');
+        badge.classList.add('live-behind');
+        badge.textContent = origText;
+      }, 4000);
+    }
+
+    // Assicura chat visibile
+    var hero = $('cbHero');
+    if (hero && hero.classList.contains('cb-collapsed')) hero.classList.remove('cb-collapsed');
+
+    var inp = $('cbInput');
+    if (!inp) return;
+    inp.value = msg;
+    if (window.__cbAutoGrow) window.__cbAutoGrow();
+    onPrimeSubmit({ preventDefault: function () {} });
+  }
+
   function renderRepoStatus(data) {
     var list = $('cbRepoList');
     if (!list) return;
     var repos = data && Array.isArray(data.repos) ? data.repos : [];
+    _repoStatusCache = {};
     var rows = repos.map(function (repo) {
       if (!repo || repo.status !== 'ok') {
+        if (repo && repo.name) _repoStatusCache[repo.name] = repo;
         return '<div class="cb-repo-row"><div class="cb-repo-main"><span class="cb-repo-name">' + esc(repo && repo.name || 'Repo') + '</span><span class="cb-repo-branch">n/d</span></div><span class="cb-repo-badge error">n/d</span><span class="cb-repo-dirty">--</span><span class="cb-repo-headhash">--</span></div>';
       }
+      if (repo.name) _repoStatusCache[repo.name] = repo;
       var ahead = Number(repo.ahead || 0), behind = Number(repo.behind || 0), dirty = Number(repo.dirty || 0);
-      var level = behind > 0 ? 'error' : ((ahead > 0 || dirty > 0) ? 'warn' : 'ok');
+      var liveBehind = !!repo.live_behind;
+      // Fallback per cache senza il nuovo campo: replica la logica backend
+      if (!liveBehind && (dirty > 0 || ahead > 0 || behind > 0 || (repo.stranded && repo.stranded.length))) {
+        liveBehind = true;
+      }
+      var badgeClass = liveBehind ? 'live-behind' : (behind > 0 ? 'error' : ((ahead > 0 || dirty > 0) ? 'warn' : 'ok'));
+      var badgeExtra = liveBehind
+        ? ' data-repo="' + esc(repo.name) + '" title="Clicca per far mergiare e deployare a Prime" role="button" tabindex="0"'
+        : '';
       var head = repo.head || {};
       return '<div class="cb-repo-row">' +
         '<div class="cb-repo-main"><span class="cb-repo-name">' + esc(repo.name) + '</span><span class="cb-repo-branch" title="' + esc(repo.branch || '') + '">' + esc(repo.branch || 'n/d') + '</span></div>' +
-        '<span class="cb-repo-badge ' + level + '">↑' + ahead + ' ↓' + behind + '</span>' +
+        '<span class="cb-repo-badge ' + badgeClass + '"' + badgeExtra + '>↑' + ahead + ' ↓' + behind + '</span>' +
         '<span class="cb-repo-dirty" title="File modificati">Δ' + dirty + '</span>' +
         '<span class="cb-repo-headhash" title="' + esc(head.subject || '') + '">' + esc(head.hash || '--') + '</span>' +
       '</div>';
