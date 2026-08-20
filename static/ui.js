@@ -3124,6 +3124,65 @@ function scrollToBottom(){
   if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
+let _cancelSessionEntryBottomSettle=null;
+function settleSessionEntryScrollToBottom(sid){
+  if(_cancelSessionEntryBottomSettle) _cancelSessionEntryBottomSettle();
+  const messages=$('messages');
+  const inner=$('msgInner');
+  if(!messages||!inner) return;
+
+  let stopped=false;
+  let resizeObserver=null;
+  let mutationObserver=null;
+  const timers=[];
+  const watchedImages=new WeakSet();
+  const isCurrent=()=>!stopped&&S.session&&S.session.session_id===sid;
+  const snap=()=>{
+    if(!isCurrent()||_messageUserUnpinned) return;
+    _setMessageScrollToBottom();
+  };
+  const watchImages=(root)=>{
+    if(!root||typeof root.querySelectorAll!=='function') return;
+    root.querySelectorAll('img').forEach(img=>{
+      if(img.complete||watchedImages.has(img)) return;
+      watchedImages.add(img);
+      img.addEventListener('load',snap,{once:true});
+      img.addEventListener('error',snap,{once:true});
+    });
+  };
+  const stop=()=>{
+    if(stopped) return;
+    stopped=true;
+    timers.forEach(clearTimeout);
+    if(resizeObserver) resizeObserver.disconnect();
+    if(mutationObserver) mutationObserver.disconnect();
+    if(_cancelSessionEntryBottomSettle===stop) _cancelSessionEntryBottomSettle=null;
+  };
+  _cancelSessionEntryBottomSettle=stop;
+
+  scrollToBottom();
+  watchImages(inner);
+  requestAnimationFrame(()=>requestAnimationFrame(snap));
+  [80,180,400,800,1400].forEach(delay=>timers.push(setTimeout(snap,delay)));
+  timers.push(setTimeout(stop,1800));
+  if(typeof ResizeObserver!=='undefined'){
+    resizeObserver=new ResizeObserver(snap);
+    resizeObserver.observe(inner);
+  }
+  if(typeof MutationObserver!=='undefined'){
+    mutationObserver=new MutationObserver(records=>{
+      records.forEach(record=>record.addedNodes.forEach(node=>{
+        if(node.nodeType===1){
+          if(node.tagName==='IMG') watchImages({querySelectorAll:()=>[node]});
+          watchImages(node);
+        }
+      }));
+      snap();
+    });
+    mutationObserver.observe(inner,{childList:true,subtree:true});
+  }
+}
+
 function _fmtOllamaLabel(mid){
   const [namePart, ...variantParts] = mid.split(':');
   const variant = variantParts.join(':');

@@ -2121,6 +2121,9 @@ window.addEventListener('pageshow', async (event) => {
       }
     } catch (_) {}
   }
+  if (S.session && S.session.session_id && typeof settleSessionEntryScrollToBottom === 'function') {
+    settleSessionEntryScrollToBottom(S.session.session_id);
+  }
   // Re-synchronise layout chrome that the boot IIFE sets up but bfcache
   // doesn't re-run. Each call is guarded so missing helpers degrade silently.
   if (typeof syncTopbar === 'function') try { syncTopbar(); } catch (_) {}

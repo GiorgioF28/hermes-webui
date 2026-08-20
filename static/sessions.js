@@ -1212,6 +1212,13 @@ async function loadSession(sid){
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
 
+  // A newly opened transcript can keep growing after renderMessages() returns:
+  // markdown post-processing, delegation cards, and lazy images settle later.
+  // Re-pin only this session-entry path; streaming keeps its existing follow logic.
+  if(!sameSessionForceReload&&typeof settleSessionEntryScrollToBottom==='function'){
+    settleSessionEntryScrollToBottom(sid);
+  }
+
   if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
 
   // ── Cross-channel handoff hint ──
@@ -3475,7 +3482,11 @@ function ensureActiveSessionExternalRefreshPoll(){
   }, _activeSessionExternalRefreshMs);
   if(typeof document !== 'undefined' && !document._hermesExternalRefreshVisibilityHook){
     document.addEventListener('visibilitychange', () => {
-      if(!document.hidden) void refreshActiveSessionIfExternallyUpdated('visible');
+      if(!document.hidden) void (async()=>{
+        await refreshActiveSessionIfExternallyUpdated('visible');
+        const sid=S.session&&S.session.session_id;
+        if(sid&&typeof settleSessionEntryScrollToBottom==='function') settleSessionEntryScrollToBottom(sid);
+      })();
     });
     document._hermesExternalRefreshVisibilityHook = true;
   }
