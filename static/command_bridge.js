@@ -41,6 +41,70 @@
   // Scroll to bottom only if the user is already near it, so reading older
   // messages isn't interrupted while Prime keeps writing.
   function nearBottom(log) { return !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 64; }
+  var _cancelPrimeHistoryBottomSettle = null;
+  function settlePrimeHistoryScrollToBottom() {
+    if (_cancelPrimeHistoryBottomSettle) _cancelPrimeHistoryBottomSettle();
+    var log = $('cbLog');
+    if (!log) return;
+
+    var stopped = false;
+    var resizeObserver = null;
+    var mutationObserver = null;
+    var cleanupTimer = null;
+    var watchedImages = new WeakSet();
+    var watchedElements = new WeakSet();
+    var userEvents = ['wheel', 'touchstart', 'pointerdown'];
+    var snap = function () {
+      if (!stopped) log.scrollTop = log.scrollHeight;
+    };
+    var stop = function () {
+      if (stopped) return;
+      stopped = true;
+      if (cleanupTimer) clearTimeout(cleanupTimer);
+      if (resizeObserver) resizeObserver.disconnect();
+      if (mutationObserver) mutationObserver.disconnect();
+      userEvents.forEach(function (name) { log.removeEventListener(name, stop); });
+      if (_cancelPrimeHistoryBottomSettle === stop) _cancelPrimeHistoryBottomSettle = null;
+    };
+    var watchImages = function (root) {
+      if (!root) return;
+      var images = [];
+      if (root.tagName === 'IMG') images.push(root);
+      if (typeof root.querySelectorAll === 'function') {
+        images = images.concat(Array.prototype.slice.call(root.querySelectorAll('img')));
+      }
+      images.forEach(function (img) {
+        if (img.complete || watchedImages.has(img)) return;
+        watchedImages.add(img);
+        img.addEventListener('load', snap, { once: true });
+        img.addEventListener('error', snap, { once: true });
+      });
+    };
+    var watchElement = function (node) {
+      if (!node || node.nodeType !== 1 || watchedElements.has(node)) return;
+      watchedElements.add(node);
+      if (resizeObserver) resizeObserver.observe(node);
+      watchImages(node);
+    };
+
+    _cancelPrimeHistoryBottomSettle = stop;
+    if (typeof ResizeObserver !== 'undefined') resizeObserver = new ResizeObserver(snap);
+    Array.prototype.forEach.call(log.children || [], watchElement);
+    watchImages(log);
+    if (typeof MutationObserver !== 'undefined') {
+      mutationObserver = new MutationObserver(function (records) {
+        records.forEach(function (record) {
+          Array.prototype.forEach.call(record.addedNodes || [], watchElement);
+        });
+        snap();
+      });
+      mutationObserver.observe(log, { childList: true, subtree: true });
+    }
+    userEvents.forEach(function (name) { log.addEventListener(name, stop, { once: true, passive: true }); });
+    snap();
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(snap);
+    cleanupTimer = setTimeout(stop, 5000);
+  }
   // Render Prime text as markdown (reuses the main chat renderer); plain fallback.
   function renderRich(node, text) {
     if (!node) return;
@@ -1889,6 +1953,10 @@
       (data.tool_events || []).forEach(function (ev) {
         if (ev && ev.tool) renderToolCard(ev.tool, ev.summary || '');
       });
+      // Prime uses its own scroll container (#cbLog), separate from the generic
+      // chat's #messages. History cards and markdown images can resize after the
+      // fetch resolves, so follow their real layout until the user interacts.
+      settlePrimeHistoryScrollToBottom();
     }).catch(function () {});
   }
   /* ── Allegati foto per Hermes Prime ─────────────────────────────────────── */
