@@ -12362,6 +12362,7 @@ def _handle_bridge_prime_brief_status(handler, parsed):
             "pending": rec.get("state") == "running",
             "reply": rec.get("reply") or "",
             "brief_id": rec.get("brief_id") or "",
+            "usage": rec.get("usage") if isinstance(rec.get("usage"), dict) else {},
         },
         extra_headers={"Cache-Control": "no-store"},
     )
@@ -12453,9 +12454,12 @@ def _handle_bridge_prime_brief(handler, body):
 def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace):
     """Turno LLM del brief + persistenza. Gira in un thread, mai dentro la POST."""
     reply = ""
+    usage = {}
     try:
         result = _hermes_prime_reply(brief_msg, workspace)
         reply = result.get("reply") or ""
+        if isinstance(result.get("usage"), dict):
+            usage = result["usage"]
     except Exception as exc:
         logger.debug("hermes prime brief LLM failed for %s: %s", task_id, exc)
     # Persist to PrimeSessionStore (LLM reply OR fallback no-LLM)
@@ -12468,7 +12472,12 @@ def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace):
             # LLM succeeded: persist reply, mark brief delivered
             _store.inject_assistant_message(
                 reply,
-                meta={"brief_id": brief_id, "task_id": task_id, "brief_type": "llm"},
+                meta={
+                    "brief_id": brief_id,
+                    "task_id": task_id,
+                    "brief_type": "llm",
+                    "usage": usage,
+                },
             )
             _queue.mark_delivered(brief_id)
         else:
@@ -12503,6 +12512,7 @@ def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace):
         state="done",
         reply=reply,
         brief_id=brief_id,
+        usage=usage,
         finished_at=time.time(),
     )
     return reply

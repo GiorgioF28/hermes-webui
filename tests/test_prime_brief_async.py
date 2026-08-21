@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -124,6 +125,41 @@ class BriefAsyncTests(unittest.TestCase):
         rec = routes._brief_job_get("brief-async-4")
         self.assertEqual(rec.get("state"), "done")
         self.assertEqual(rec.get("reply"), "sintesi finale")
+
+    def test_job_runner_persists_and_exposes_llm_usage(self):
+        """Il vero worker asincrono conserva usage sia in history sia nello status."""
+        expected_usage = {
+            "input_tokens": 1200,
+            "output_tokens": 80,
+            "estimated_cost_usd": 0.0042,
+        }
+        routes._hermes_prime_reply = lambda msg, ws: {
+            "reply": "sintesi con token",
+            "usage": expected_usage,
+        }
+        queue = MagicMock()
+        store = MagicMock()
+        delegation_store = MagicMock()
+
+        with (
+            patch("api.prime_brief_queue.get_brief_queue", return_value=queue),
+            patch("api.prime_session_store.get_prime_session_store", return_value=store),
+            patch("api.delegation_store.get_delegation_store", return_value=delegation_store),
+        ):
+            routes._run_prime_brief_job(
+                "brief-async-usage", "b-usage", "messaggio", routes.Path(".")
+            )
+
+        injected_meta = store.inject_assistant_message.call_args.kwargs["meta"]
+        self.assertEqual(injected_meta["usage"], expected_usage)
+        rec = routes._brief_job_get("brief-async-usage")
+        self.assertEqual(rec["usage"], expected_usage)
+
+        class _Parsed:
+            query = "task_id=brief-async-usage"
+
+        routes._handle_bridge_prime_brief_status(object(), _Parsed())
+        self.assertEqual(self.captured[-1]["usage"], expected_usage)
 
 
 if __name__ == "__main__":

@@ -753,6 +753,16 @@ def test_command_bridge_frontend_renders_usage_quota_and_default_view():
     assert 'data-panel="bridge" onclick="switchPanel(\'bridge\',{fromRailClick:true})" data-tooltip="Command Bridge"' in index
 
 
+def test_command_bridge_frontend_renders_automatic_brief_usage_live_and_from_history():
+    bridge = Path("static/command_bridge.js").read_text(encoding="utf-8")
+
+    assert "var finish = function (reply, usage)" in bridge
+    assert "finish((s && s.reply) || '', s && s.usage)" in bridge
+    assert "_hasBridgeUsage(usage) && window._showTokenUsage === true" in bridge
+    assert "_hasBridgeUsage(m.usage) && window._showTokenUsage === true" in bridge
+    assert "_formatAssistantUsageBadge(m.usage)" in bridge
+
+
 def test_bridge_prime_cancel_promotes_partial_and_journals(monkeypatch, tmp_path):
     from api import prime_session_store
 

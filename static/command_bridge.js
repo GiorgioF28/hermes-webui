@@ -1230,7 +1230,7 @@
     var ph = pendingBubble(); // riusa la bolla "sto ragionando…" di Hermes Prime
     var turnUi = createPrimeTurnUi(ph);
     var cfg = window.__HERMES_CONFIG__ || {};
-    var finish = function (reply) {
+    var finish = function (reply, usage) {
       if (turnUi.isClosed()) return;
       reply = String(reply || '').trim();
       try {
@@ -1238,6 +1238,11 @@
           if (reply) {
             var bub = ph.querySelector('.cb-bubble');
             if (bub) { bub.removeAttribute('style'); renderRich(bub, reply); }
+            if (_hasBridgeUsage(usage) && window._showTokenUsage === true) {
+              var badge = _formatAssistantUsageBadge(usage);
+              var foot = ph.querySelector('.cb-msg-foot');
+              if (badge && foot) { foot.textContent = badge; foot.hidden = false; }
+            }
             if (userEngaged) speak(reply);
           } else { ph.parentNode.removeChild(ph); }
         }
@@ -1256,7 +1261,7 @@
       api('api/bridge/prime/brief/status?task_id=' + encodeURIComponent(t.id))
         .then(function (s) {
           if (s && s.pending) { setTimeout(pollStatus, BRIEF_POLL_MS); return; }
-          finish((s && s.reply) || '');
+          finish((s && s.reply) || '', s && s.usage);
         })
         .catch(function () { setTimeout(pollStatus, BRIEF_POLL_MS); });
     };
