@@ -164,3 +164,37 @@ class BriefAsyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BriefOutputCapTest(unittest.TestCase):
+    """Regressione 2026-08-25: "Prompt is too long" al ritorno di una delega.
+
+    Il brief automatico incorporava l'output del sotto-agente PER INTERO nel
+    prompt di Prime. Una delega lunga (d383: 16m50s di lavoro del programmatore)
+    produce un report enorme che, iniettato tutto, sfonda la finestra di
+    contesto: Prime muore proprio nel momento in cui deve riferire l'esito.
+    """
+
+    def test_short_output_is_left_untouched(self):
+        from api import routes
+
+        text = "tutto ok, commit abc1234"
+        self.assertEqual(routes._brief_output_excerpt(text), text)
+
+    def test_huge_output_is_capped(self):
+        from api import routes
+
+        huge = "x" * 500_000
+        got = routes._brief_output_excerpt(huge)
+        self.assertLess(len(got), 10_000)
+        self.assertIn("troncato", got)
+
+    def test_cap_keeps_head_and_tail(self):
+        from api import routes
+
+        # La conclusione di un report sta spesso in fondo (esito, errore finale):
+        # troncare solo la coda perderebbe proprio la parte che serve al brief.
+        huge = "INIZIO-REPORT" + ("m" * 400_000) + "ESITO-FINALE"
+        got = routes._brief_output_excerpt(huge)
+        self.assertIn("INIZIO-REPORT", got)
+        self.assertIn("ESITO-FINALE", got)

@@ -12368,6 +12368,32 @@ def _handle_bridge_prime_brief_status(handler, parsed):
     )
 
 
+# Tetto ai caratteri di output di una delega che finiscono nel prompt del brief.
+# Generoso quanto basta per riassumere in 1-2 frasi, ma limitato: il report di un
+# sotto-agente puo' arrivare a centinaia di migliaia di caratteri.
+_BRIEF_OUTPUT_MAX_CHARS = 6000
+_BRIEF_TASK_MAX_CHARS = 2000
+
+
+def _brief_output_excerpt(output, limit: int = _BRIEF_OUTPUT_MAX_CHARS) -> str:
+    """Estratto limitato dell'output di un sotto-agente per il brief di Prime.
+
+    REGRESSIONE 2026-08-25: l'output veniva incorporato PER INTERO nel prompt del
+    brief. Una delega lunga produce un report enorme che sfonda la finestra di
+    contesto -> "Prompt is too long", e Prime muore proprio quando deve riferire
+    l'esito. Teniamo TESTA E CODA: l'esito finale (o l'errore) sta quasi sempre
+    in fondo, quindi troncare solo la coda perderebbe la parte piu' utile.
+    """
+    text = str(output or "")
+    if len(text) <= limit:
+        return text
+    head = (limit * 2) // 3
+    tail = limit - head
+    omitted = len(text) - head - tail
+    marker = "\n\n[... output troncato: " + str(omitted) + " caratteri omessi ...]\n\n"
+    return text[:head] + marker + text[-tail:]
+
+
 def _handle_bridge_prime_brief(handler, body):
     """POST /api/bridge/prime/brief — idempotent brief delivery via queue (Fase 1).
 
@@ -12423,8 +12449,9 @@ def _handle_bridge_prime_brief(handler, body):
     brief_msg = (
         "[BRIEF AUTOMATICO] Il sotto-agente " + str(t.get("agent") or "operativo") +
         " ha " + esito + " un task che gli avevi delegato.\n"
-        "Task: " + str(t.get("task") or "") + "\n"
-        "Esito (" + str(t.get("status") or "") + "): " + str(t.get("output") or "") + "\n\n"
+        "Task: " + str(t.get("task") or "")[:_BRIEF_TASK_MAX_CHARS] + "\n"
+        "Esito (" + str(t.get("status") or "") + "): "
+        + _brief_output_excerpt(t.get("output")) + "\n\n"
         "Fai un brief all'utente in 1-2 frasi: cosa e' stato prodotto e l'eventuale "
         "prossimo passo. NON delegare di nuovo, NON usare il tool delega: rispondi solo "
         "all'utente a parole."
