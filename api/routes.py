@@ -6449,6 +6449,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/prime/claude-quota":
         return _handle_bridge_prime_claude_quota(handler)
 
+    if parsed.path == "/api/bridge/prime/daily-brief":
+        return _handle_bridge_prime_daily_brief(handler)
+
     if parsed.path == "/api/approval/stream":
         return _handle_approval_sse_stream(handler, parsed)
 
@@ -11932,6 +11935,18 @@ def _handle_bridge_prime_claude_quota(handler):
         ) or True
     except Exception as exc:
         logger.exception("bridge prime claude-quota failed")
+        return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
+def _handle_bridge_prime_daily_brief(handler):
+    """GET /api/bridge/prime/daily-brief -- deleghe recenti e risposte IG persistite."""
+    try:
+        from api.daily_brief import build_daily_brief_payload
+
+        payload = build_daily_brief_payload(_prime_workspace_from_settings())
+        return j(handler, payload, extra_headers={"Cache-Control": "no-store"}) or True
+    except Exception as exc:
+        logger.exception("bridge prime daily-brief failed")
         return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
 
 
