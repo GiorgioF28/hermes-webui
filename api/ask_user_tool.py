@@ -83,11 +83,11 @@ async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]
             "is_error": True,
         }
     entry = clarify.submit_pending(session_id, payload)
-    if session_id == "hermes-prime":
+    if session_id in {"hermes-prime", "hermes-prime-tom"}:
         try:
             from api.prime_session_store import get_prime_session_store
 
-            get_prime_session_store().append_clarify_request(entry.clarify_id, entry.data)
+            get_prime_session_store(session_id).append_clarify_request(entry.clarify_id, entry.data)
         except Exception:
             logger.debug("Prime ask_user request persistence failed", exc_info=True)
     # entry.event is a threading.Event resolved from the HTTP thread; wait off
@@ -102,11 +102,11 @@ async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]
                 }
             ]
         }
-    if session_id == "hermes-prime":
+    if session_id in {"hermes-prime", "hermes-prime-tom"}:
         try:
             from api.prime_session_store import get_prime_session_store
 
-            get_prime_session_store().append_clarify_response(entry.clarify_id, entry.result)
+            get_prime_session_store(session_id).append_clarify_response(entry.clarify_id, entry.result)
         except Exception:
             logger.debug("Prime ask_user response persistence failed", exc_info=True)
     return {"content": [{"type": "text", "text": clarify.format_response_for_agent(entry.data, entry.result)}]}

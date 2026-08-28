@@ -350,7 +350,9 @@ def handle_prime_upload(handler):
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
         if not mime.startswith('image/'):
             return j(handler, {'error': 'Solo immagini sono supportate qui'}, status=400)
-        dest = _upload_destination('hermes-prime', safe_name)
+        from api.identity import resolve_request_identity
+        session_id = resolve_request_identity(handler).prime_session_id
+        dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
         return j(handler, {
             'filename': dest.name,

@@ -23,6 +23,8 @@ IMAGE_RETAIN_TURNS = 2
 
 _PRIME_TURN = 0
 _PRIME_IMAGE_ATTACHMENTS: list[dict[str, Any]] = []
+_PRIME_TOM_TURN = 0
+_PRIME_TOM_IMAGE_ATTACHMENTS: list[dict[str, Any]] = []
 
 
 def attachment_label(filename: str) -> str:
@@ -141,8 +143,11 @@ def ingest_pdf_attachment(path: str | Path, *, bridge: str = "hermes-prime", fil
     return entry
 
 
-def prime_turn_started() -> int:
-    global _PRIME_TURN
+def prime_turn_started(*, bridge: str = "hermes-prime") -> int:
+    global _PRIME_TURN, _PRIME_TOM_TURN
+    if bridge == "hermes-prime-tom":
+        _PRIME_TOM_TURN += 1
+        return _PRIME_TOM_TURN
     _PRIME_TURN += 1
     return _PRIME_TURN
 
@@ -176,26 +181,28 @@ def normalize_prime_attachments(attachments, *, bridge: str = "hermes-prime") ->
     return normalized
 
 
-def record_prime_images(attachments, *, turn: int) -> None:
+def record_prime_images(attachments, *, turn: int, bridge: str = "hermes-prime") -> None:
+    ledger = _PRIME_TOM_IMAGE_ATTACHMENTS if bridge == "hermes-prime-tom" else _PRIME_IMAGE_ATTACHMENTS
     for att in attachments or []:
         if not isinstance(att, dict) or att.get("kind") != "image":
             continue
         path = str(att.get("path") or "").strip()
         if not path:
             continue
-        _PRIME_IMAGE_ATTACHMENTS.append({
+        ledger.append({
             "turn": turn,
             "name": str(att.get("name") or Path(path).name),
             "path": path,
         })
     # Keep only a small operational ledger; files remain on disk.
-    del _PRIME_IMAGE_ATTACHMENTS[:-50]
+    del ledger[:-50]
 
 
-def prime_stale_image_placeholders(*, current_turn: int, retain_turns: int = IMAGE_RETAIN_TURNS) -> list[str]:
+def prime_stale_image_placeholders(*, current_turn: int, retain_turns: int = IMAGE_RETAIN_TURNS, bridge: str = "hermes-prime") -> list[str]:
     rows: list[str] = []
     seen: set[str] = set()
-    for att in _PRIME_IMAGE_ATTACHMENTS:
+    ledger = _PRIME_TOM_IMAGE_ATTACHMENTS if bridge == "hermes-prime-tom" else _PRIME_IMAGE_ATTACHMENTS
+    for att in ledger:
         path = str(att.get("path") or "")
         if not path or path in seen:
             continue
@@ -208,9 +215,9 @@ def prime_stale_image_placeholders(*, current_turn: int, retain_turns: int = IMA
     return rows[-8:]
 
 
-def build_prime_attachment_note(attachments, *, current_turn: int, retain_turns: int = IMAGE_RETAIN_TURNS) -> str:
+def build_prime_attachment_note(attachments, *, current_turn: int, retain_turns: int = IMAGE_RETAIN_TURNS, bridge: str = "hermes-prime") -> str:
     if not attachments:
-        stale = prime_stale_image_placeholders(current_turn=current_turn, retain_turns=retain_turns)
+        stale = prime_stale_image_placeholders(current_turn=current_turn, retain_turns=retain_turns, bridge=bridge)
         if stale:
             return "\n\nPromemoria allegati storici non reiniettati:\n" + "\n".join(f"- {x}" for x in stale)
         return ""
@@ -247,7 +254,7 @@ def build_prime_attachment_note(attachments, *, current_turn: int, retain_turns:
         blocks.append("Immagini allegate in questo turno:\n" + "\n".join(image_lines))
     if file_lines:
         blocks.append("File allegati in questo turno, leggili con Read se rilevanti:\n" + "\n".join(file_lines))
-    stale = prime_stale_image_placeholders(current_turn=current_turn, retain_turns=retain_turns)
+    stale = prime_stale_image_placeholders(current_turn=current_turn, retain_turns=retain_turns, bridge=bridge)
     if stale:
         blocks.append("Promemoria allegati storici non reiniettati:\n" + "\n".join(f"- {x}" for x in stale))
     return "\n\n" + "\n\n".join(blocks) if blocks else ""

@@ -19,7 +19,8 @@ PRIME_SESSION_ID = "hermes-prime"
 class PrimeSessionStore:
     """Small append-only JSON store for the Command Bridge Prime transcript."""
 
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, session_id: str = PRIME_SESSION_ID):
+        self.session_id = str(session_id or PRIME_SESSION_ID)
         self.path = path or (Path(SESSION_DIR) / "_bridge_prime_session.json")
         self._lock = threading.RLock()
         self.recover_stale_pending_turn("interrupted by WebUI restart")
@@ -27,7 +28,7 @@ class PrimeSessionStore:
     def _empty(self) -> dict[str, Any]:
         now = time.time()
         return {
-            "session_id": PRIME_SESSION_ID,
+            "session_id": self.session_id,
             "created_at": now,
             "updated_at": now,
             "messages": [],
@@ -45,7 +46,7 @@ class PrimeSessionStore:
             return self._empty()
         if not isinstance(data, dict):
             return self._empty()
-        data.setdefault("session_id", PRIME_SESSION_ID)
+        data.setdefault("session_id", self.session_id)
         data.setdefault("created_at", time.time())
         data.setdefault("updated_at", data.get("created_at") or time.time())
         data.setdefault("messages", [])
@@ -343,7 +344,7 @@ class PrimeSessionStore:
                 pending = dict(pending)
                 pending["recovered"] = True
             return {
-                "session_id": PRIME_SESSION_ID,
+                "session_id": self.session_id,
                 "messages": list(data.get("messages") or []),
                 "pending_turn": pending,
                 "settings": dict(data.get("settings") or {}),
@@ -486,7 +487,7 @@ class PrimeSessionStore:
         else:
             tool_events = tool_events[-20:]  # last 20 if no stream_id
         return {
-            "session_id": "hermes-prime",
+            "session_id": self.session_id,
             "messages": list(data.get("messages") or []),
             "pending_turn": pending,
             "settings": dict(data.get("settings") or {}),
@@ -496,7 +497,27 @@ class PrimeSessionStore:
 
 
 _STORE = PrimeSessionStore()
+_STORES: dict[str, PrimeSessionStore] = {PRIME_SESSION_ID: _STORE}
+_STORES_LOCK = threading.Lock()
 
 
-def get_prime_session_store() -> PrimeSessionStore:
-    return _STORE
+def get_prime_session_store(session_id: str = PRIME_SESSION_ID) -> PrimeSessionStore:
+    """Return the isolated store for a Prime bridge session.
+
+    The no-argument path intentionally returns the original singleton and file,
+    preserving Giorgio's persisted session byte-for-byte.
+    """
+    sid = str(session_id or PRIME_SESSION_ID)
+    if sid == PRIME_SESSION_ID:
+        return _STORE
+    with _STORES_LOCK:
+        store = _STORES.get(sid)
+        if store is None:
+            if sid != "hermes-prime-tom":
+                raise ValueError("Unsupported Prime session")
+            store = PrimeSessionStore(
+                Path(SESSION_DIR) / "_bridge_prime_session_tom.json",
+                session_id=sid,
+            )
+            _STORES[sid] = store
+        return store

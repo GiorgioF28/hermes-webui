@@ -43,6 +43,7 @@ _BG_TASKS: dict[str, dict] = {}
 _BG_REFS: set = set()
 _TASK_SEQ = itertools.count(1)
 _DELEGATION_ANCHORS: dict[str, dict[str, Any]] = {}
+_DELEGATION_EXECUTION_LOCK = asyncio.Lock()
 _MEMORY_MCP_SERVER_NAMES = ("hermes-memory", "notion")
 _LIBRARIAN_AGENT_ID = "memory-librarian"
 _LIBRARIAN_MODEL = "claude-sonnet-4-6"
@@ -106,9 +107,25 @@ _LIBRARIAN_TASK = (
     "e aggiorna SOLO la memoria: Vault canonico -> Graphify -> Notion. Non scrivere "
     "codice di sistema. Ordine: classifica, deduplica, scrivi canonico nel Vault, "
     "reindicizza Graphify se il corpus cambia, pubblica su Notion nel DB giusto, "
-    "logga su Sync Log. Non salvare segreti. Riporta cosa hai cambiato nel formato "
+    "logga su Sync Log. Scrivi ogni artefatto di memoria esclusivamente in italiano, "
+    "anche quando la richiesta o la chat di origine sono in un'altra lingua. Non "
+    "copiare trascrizioni chat nella memoria. Non salvare segreti. Riporta cosa hai "
+    "cambiato nel formato "
     "Memory Update."
 )
+
+_TOM_MEMORY_RULES = (
+    "ORIGINE SESSIONE TOM (vincolante): l'eventuale Agent Result e ogni scrittura "
+    "in Vault, Graphify, MEMORY.md, run o issue devono essere redatti esclusivamente "
+    "in italiano. Non copiare nella memoria la chat o la history ceca di Tom. La "
+    "traduzione in ceco avviene solo nella chat Prime-Tom."
+)
+
+
+def _task_with_session_rules(task: str, session_id: str) -> str:
+    if str(session_id or "hermes-prime") != "hermes-prime-tom":
+        return task
+    return f"{_TOM_MEMORY_RULES}\n\n{task}"
 
 
 def get_and_clear_delegations(session_id: str) -> list:
@@ -121,7 +138,7 @@ def get_and_clear_delegations(session_id: str) -> list:
 # di stato viene appeso a tasks/delegations.jsonl e ricaricato all'avvio.
 _DELEGATIONS_LOADED = False
 _PERSIST_FIELDS = (
-    "id", "agent", "agent_id", "task_type", "task", "status", "output",
+    "id", "session_id", "agent", "agent_id", "task_type", "task", "status", "output",
     "started", "finished", "librarian_status", "librarian_output",
     "runtime", "fallback_runtime", "fallback_model", "fallback_reason",
     "anchor_session_id", "anchor_message_index", "anchor_created_at", "summary",
@@ -323,17 +340,25 @@ def _load_bg_tasks(workspace: str) -> None:
 
 
 async def _run_and_store(task_id, task_type, task, model, label, workspace):
+    """Execute Giorgio and Tom delegations through one fair shared queue."""
+    async with _DELEGATION_EXECUTION_LOCK:
+        await _run_and_store_serial(task_id, task_type, task, model, label, workspace)
+
+
+async def _run_and_store_serial(task_id, task_type, task, model, label, workspace):
     """Esegue il sotto-agente in background e salva il risultato nel registro."""
     t = _BG_TASKS.get(task_id)
     if t is None:
         return
+    session_id = str(t.get("session_id") or t.get("anchor_session_id") or "hermes-prime")
+    worker_task = _task_with_session_rules(task, session_id)
     try:
         if model == _CODEX_MODEL:
             output = await _run_codex_worker_with_fallback(
-                task, workspace, agent_id=t.get("agent_id"), progress=t
+                worker_task, workspace, agent_id=t.get("agent_id"), progress=t
             )
         else:
-            output = await _run_worker(task, model, workspace, agent_id=t.get("agent_id"), progress=t)
+            output = await _run_worker(worker_task, model, workspace, agent_id=t.get("agent_id"), progress=t)
         t.update(status="ok", output=output, finished=time.time())
         _persist_bg_task(task_id, workspace)
         # Fase 1: enqueue brief for delivery (idempotent)
@@ -346,11 +371,23 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
                 task=task,
                 status="done",
                 output=output,
+                session_id=str(t.get("session_id") or t.get("anchor_session_id") or "hermes-prime"),
             )
         except Exception:
             logger.debug("brief queue enqueue failed for %s", task_id, exc_info=True)
         try:
-            _enqueue_librarian_pass(task_id, task_type, task, output, workspace)
+            import inspect
+
+            enqueue_kwargs = {}
+            try:
+                params = inspect.signature(_enqueue_librarian_pass).parameters
+                if "session_id" in params:
+                    enqueue_kwargs["session_id"] = session_id
+            except (TypeError, ValueError):
+                pass
+            _enqueue_librarian_pass(
+                task_id, task_type, task, output, workspace, **enqueue_kwargs
+            )
         except Exception:
             logger.debug("librarian hook enqueue failed", exc_info=True)
     except Exception as e:
@@ -375,12 +412,13 @@ async def _run_and_store(task_id, task_type, task, model, label, workspace):
                 output=combined,
                 error_category=_err_cat,
                 priority="high",
+                session_id=str(t.get("session_id") or t.get("anchor_session_id") or "hermes-prime"),
             )
         except Exception:
             logger.debug("brief queue enqueue (error) failed for %s", task_id, exc_info=True)
 
 
-def get_background_tasks(max_age: float = 600.0) -> list:
+def get_background_tasks(max_age: float = 600.0, *, session_id: str | None = None) -> list:
     """Snapshot JSON-safe delle deleghe in background (in corso + completate recenti).
 
     Punto 2 fix d153: usa finished_at come fallback di finished e result.text
@@ -393,6 +431,9 @@ def get_background_tasks(max_age: float = 600.0) -> list:
     _RUNNING_STATUSES = frozenset({"in_corso", "running", "pending"})
     out = []
     for t in list(_BG_TASKS.values()):
+        task_session_id = str(t.get("anchor_session_id") or t.get("session_id") or "hermes-prime")
+        if session_id is not None and task_session_id != session_id:
+            continue
         # Fallback: finished_at usato se finished e' assente (record canonico).
         finished = t.get("finished") or t.get("finished_at")
         is_running = t.get("status") in _RUNNING_STATUSES
@@ -603,22 +644,59 @@ def _load_memory_mcp_servers(workspace: str) -> dict[str, dict[str, Any]]:
     return selected
 
 
-def _enqueue_librarian_pass(task_id: str, task_type: str, task: str, output: str, workspace: str) -> None:
+def _enqueue_librarian_pass(
+    task_id: str,
+    task_type: str,
+    task: str,
+    output: str,
+    workspace: str,
+    *,
+    session_id: str = "hermes-prime",
+) -> None:
     """Fire-and-forget: route an Agent Result through the Memory Librarian."""
     t = _BG_TASKS.get(task_id)
     if t is not None:
         t["librarian_status"] = "in_corso"
         t["librarian_output"] = ""
-    fut = asyncio.ensure_future(_run_librarian(task_id, task_type, task, output, workspace))
+    fut = asyncio.ensure_future(
+        _run_librarian(
+            task_id, task_type, task, output, workspace, session_id=session_id
+        )
+    )
     _BG_REFS.add(fut)
     fut.add_done_callback(lambda f: _BG_REFS.discard(f))
 
 
-async def _run_librarian(task_id: str, task_type: str, task: str, output: str, workspace: str) -> None:
+async def _run_librarian(
+    task_id: str,
+    task_type: str,
+    task: str,
+    output: str,
+    workspace: str,
+    *,
+    session_id: str = "hermes-prime",
+) -> None:
     """Best-effort memory sync pass. It must never change the delegation outcome."""
+    async with _DELEGATION_EXECUTION_LOCK:
+        await _run_librarian_serial(
+            task_id, task_type, task, output, workspace, session_id=session_id
+        )
+
+
+async def _run_librarian_serial(
+    task_id: str,
+    task_type: str,
+    task: str,
+    output: str,
+    workspace: str,
+    *,
+    session_id: str = "hermes-prime",
+) -> None:
+    """Run one memory pass inside the shared delegation execution queue."""
     t = _BG_TASKS.get(task_id)
+    origin_rules = f"\n\n{_TOM_MEMORY_RULES}" if session_id == "hermes-prime-tom" else ""
     prompt = (
-        f"{_LIBRARIAN_TASK}\n\n"
+        f"{_LIBRARIAN_TASK}{origin_rules}\n\n"
         f"## Delega\n- id: {task_id}\n- tipo: {task_type}\n- task: {task}\n\n"
         f"## Agent Result\n{output}"
     )
@@ -1058,7 +1136,14 @@ def build_prime_delegation_server(session_id: str, workspace: str):
         _persist_bg_task(task_id, workspace)
         # Salvataggio in memoria (Vault -> Graphify -> Notion) via Librarian, async.
         try:
-            _enqueue_librarian_pass(task_id, "memoria", "Task concluso: " + nome, riassunto, workspace)
+            _enqueue_librarian_pass(
+                task_id,
+                "memoria",
+                "Task concluso: " + nome,
+                riassunto,
+                workspace,
+                session_id=session_id,
+            )
         except Exception:
             logger.debug("task_done librarian enqueue failed", exc_info=True)
         # Cantiere 1 — cut a fine task: segnala che la sessione va compattata

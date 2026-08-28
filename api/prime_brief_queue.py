@@ -138,6 +138,7 @@ class PrimeBriefQueue:
         output: str,
         error_category: str = "",
         priority: str = "normal",
+        session_id: str = "hermes-prime",
     ) -> str:
         """Enqueue a brief for delivery. Idempotent: no-op if already queued/delivered.
 
@@ -160,6 +161,7 @@ class PrimeBriefQueue:
                 "brief_id": bid,
                 "task_id": task_id,
                 "target": "command_bridge_prime",
+                "session_id": str(session_id or "hermes-prime"),
                 "priority": "high" if status == "failed" else priority,
                 "raw_result_ref": task_id,
                 "agent": agent,
@@ -179,22 +181,27 @@ class PrimeBriefQueue:
             logger.debug("prime_brief_queue: enqueued %s (status=%s)", bid, status)
             return bid
 
-    def get_pending(self, limit: int = 50) -> list[dict]:
+    def get_pending(self, limit: int = 50, *, session_id: str | None = None) -> list[dict]:
         """Return pending (undelivered) briefs, highest priority first."""
         with self._lock:
             self._load_cache()
             all_briefs = self._read_all()
             pending = [
                 b for b in all_briefs.values()
-                if b.get("status") not in ("delivered",) and b.get("brief_id") not in self._delivered
+                if b.get("status") not in ("delivered",)
+                and b.get("brief_id") not in self._delivered
+                and (
+                    session_id is None
+                    or str(b.get("session_id") or "hermes-prime") == session_id
+                )
             ]
         # Sort: high priority first, then by queued_at
         pending.sort(key=lambda b: (0 if b.get("priority") == "high" else 1, b.get("queued_at") or 0))
         return pending[:limit]
 
-    def get_pending_count(self) -> int:
+    def get_pending_count(self, *, session_id: str | None = None) -> int:
         """Count undelivered briefs."""
-        return len(self.get_pending())
+        return len(self.get_pending(session_id=session_id))
 
     def mark_delivered(self, brief_id: str) -> None:
         """Mark a brief as delivered (idempotent)."""
@@ -243,7 +250,8 @@ class PrimeBriefQueue:
             )
         try:
             from api.prime_session_store import get_prime_session_store
-            get_prime_session_store().inject_assistant_message(
+            session_id = str(brief.get("session_id") or "hermes-prime")
+            get_prime_session_store(session_id).inject_assistant_message(
                 fb_text,
                 meta={
                     "brief_id": brief.get("brief_id", ""),
@@ -317,7 +325,8 @@ class PrimeBriefQueue:
                     # invent values.
                     usage = result.get("usage") or {}
                     from api.prime_session_store import get_prime_session_store
-                    get_prime_session_store().inject_assistant_message(
+                    session_id = str(brief.get("session_id") or "hermes-prime")
+                    get_prime_session_store(session_id).inject_assistant_message(
                         reply,
                         meta={
                             "brief_id": brief_id,
@@ -352,13 +361,14 @@ class PrimeBriefQueue:
         hermes_prime_reply_fn: Callable | None = None,
         workspace: Path | str | None = None,
         max_briefs: int = 5,
+        session_id: str | None = None,
     ) -> int:
         """Attempt delivery of up to max_briefs pending briefs.
 
         Returns the count of briefs successfully delivered.
         Best-effort: exceptions per brief are swallowed to not abort the drain.
         """
-        pending = self.get_pending()[:max_briefs]
+        pending = self.get_pending(session_id=session_id)[:max_briefs]
         delivered = 0
         for brief in pending:
             bid = str(brief.get("brief_id") or "")
