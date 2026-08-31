@@ -13,6 +13,7 @@ leggibile da GET /api/bridge/prime/brief/status.
 
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -20,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import api.prime_brief_queue as pbq  # noqa: E402
 import api.routes as routes  # noqa: E402
 
 
@@ -32,12 +34,20 @@ class BriefAsyncTests(unittest.TestCase):
         routes.j = lambda handler, payload, **kw: self.captured.append(payload) or True
         with routes._BRIEF_JOBS_LOCK:
             routes._BRIEF_JOBS.clear()
+        # Coda brief isolata su tempdir: i test NON devono scrivere nel file
+        # di produzione tasks/prime-brief-queue.jsonl del workspace reale.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.queue = pbq.PrimeBriefQueue(self._tmp.name)
+        self._orig_gbq = pbq.get_brief_queue
+        pbq.get_brief_queue = lambda ws: self.queue
 
     def tearDown(self):
         routes.j = self._orig_j
         routes._hermes_prime_reply = self._orig_reply
         with routes._BRIEF_JOBS_LOCK:
             routes._BRIEF_JOBS.clear()
+        pbq.get_brief_queue = self._orig_gbq
+        self._tmp.cleanup()
 
     def _install_task(self, task_id, status="ok"):
         import api.prime_delegation as pd
@@ -117,6 +127,54 @@ class BriefAsyncTests(unittest.TestCase):
         time.sleep(0.3)
         released.set()
         self.assertEqual(len(calls), 1, "il turno LLM e' partito due volte")
+
+    def test_replayed_post_after_restart_does_not_relaunch_llm(self):
+        """Fix tempesta replay 2026-08-31: brief gia' delivered -> nessun turno LLM.
+
+        Dopo un riavvio il registro job in-memory e' vuoto e il frontend
+        ri-POSTa le card storiche: la POST deve rispondere already_delivered
+        senza lanciare il worker, anche se _BRIEF_JOBS e' vuoto.
+        """
+        self._install_task("replay-1")
+        self.queue.enqueue(
+            "replay-1", agent="programmatore", task_type="codice",
+            task="task storico", status="done", output="fatto",
+        )
+        self.queue.mark_delivered("brief-replay-1")
+        calls = []
+        routes._hermes_prime_reply = lambda msg, ws: calls.append(1) or {"reply": "x"}
+
+        routes._handle_bridge_prime_brief(object(), {"task_id": "replay-1"})
+        time.sleep(0.3)
+
+        payload = self.captured[-1]
+        self.assertTrue(payload.get("already_delivered"), "manca already_delivered")
+        self.assertFalse(payload.get("pending"), "non deve essere pending")
+        self.assertEqual(calls, [], "il turno LLM e' stato rigiocato")
+        self.assertIsNone(routes._brief_job_get("replay-1"), "worker lanciato inutilmente")
+
+    def test_fresh_brief_still_starts_llm_turn(self):
+        """La guardia non deve bloccare i brief nuovi (mai consegnati)."""
+        self._install_task("fresh-1")
+        routes._hermes_prime_reply = lambda msg, ws: {"reply": "brief nuovo"}
+        store = MagicMock()
+        delegation_store = MagicMock()
+        with (
+            patch("api.prime_session_store.get_prime_session_store", return_value=store),
+            patch("api.delegation_store.get_delegation_store", return_value=delegation_store),
+        ):
+            routes._handle_bridge_prime_brief(object(), {"task_id": "fresh-1"})
+            self.assertTrue(self.captured[-1].get("pending"), "brief nuovo deve essere pending")
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                rec = routes._brief_job_get("fresh-1")
+                if rec and rec.get("state") == "done":
+                    break
+                time.sleep(0.05)
+        rec = routes._brief_job_get("fresh-1")
+        self.assertEqual((rec or {}).get("state"), "done", "worker non completato")
+        self.assertEqual(rec.get("reply"), "brief nuovo")
+        self.assertTrue(self.queue.is_delivered("brief-fresh-1"))
 
     def test_job_runner_records_reply(self):
         """Il worker registra l'esito nel job store (senza toccare la POST)."""

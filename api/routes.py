@@ -12624,6 +12624,7 @@ def _handle_bridge_prime_brief(handler, body):
     workspace = Path(str(DEFAULT_WORKSPACE))
     # Enqueue brief (idempotent via brief_id=brief-<task_id>)
     brief_id = f"brief-{task_id}"
+    already_delivered = False
     try:
         from api.prime_brief_queue import get_brief_queue
         from api.delegation_store import classify_error as _clf_err
@@ -12642,8 +12643,21 @@ def _handle_bridge_prime_brief(handler, body):
             error_category=error_cat,
             session_id=session_id,
         )
+        already_delivered = queue.is_delivered(brief_id)
     except Exception:
         logger.debug("bridge prime brief: queue enqueue failed for %s", task_id, exc_info=True)
+    if already_delivered:
+        # Fix 2026-08-31 (tempesta replay brief): il brief e' gia' stato
+        # consegnato in una sessione precedente. Dopo un riavvio il registro
+        # job in-memory e' vuoto e il frontend ri-POSTa tutte le card storiche
+        # in stato ok/errore: senza questa guardia il turno LLM veniva
+        # rigiocato per ogni brief gia' consegnato. L'idempotenza della coda
+        # (enqueue no-op) non basta: bisogna anche NON lanciare il worker.
+        return j(
+            handler,
+            {"reply": "", "already_delivered": True, "brief_id": brief_id},
+            extra_headers={"Cache-Control": "no-store"},
+        )
     esito = "completato" if t.get("status") == "ok" else "fallito"
     brief_msg = (
         "[BRIEF AUTOMATICO] Il sotto-agente " + str(t.get("agent") or "operativo") +

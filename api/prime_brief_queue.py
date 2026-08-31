@@ -181,6 +181,26 @@ class PrimeBriefQueue:
             logger.debug("prime_brief_queue: enqueued %s (status=%s)", bid, status)
             return bid
 
+    def is_delivered(self, brief_id: str) -> bool:
+        """True se il brief risulta gia' consegnato (cache in-process o stato su disco).
+
+        Serve come guardia anti-replay: dopo un riavvio il registro job
+        in-memory e' vuoto e il frontend ri-POSTa le card storiche; senza
+        questo check il turno LLM del brief veniva rigiocato ogni volta.
+        """
+        bid = str(brief_id or "")
+        if not bid:
+            return False
+        with self._lock:
+            self._load_cache()
+            if bid in self._delivered:
+                return True
+            rec = self._read_all().get(bid)
+            if rec and rec.get("status") == "delivered":
+                self._delivered.add(bid)
+                return True
+            return False
+
     def get_pending(self, limit: int = 50, *, session_id: str | None = None) -> list[dict]:
         """Return pending (undelivered) briefs, highest priority first."""
         with self._lock:
