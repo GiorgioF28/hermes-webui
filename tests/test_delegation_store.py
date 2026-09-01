@@ -255,6 +255,10 @@ class TestClassifyError(unittest.TestCase):
         self.assertEqual(r["category"], "quota_exhausted")
         self.assertTrue(r["retryable"])
 
+    def test_session_limit_text_is_quota_exhausted(self):
+        r = self._clf("You've hit your session limit - resets 12:40am")
+        self.assertEqual(r["category"], "quota_exhausted")
+
     def test_timeout_not_quota(self):
         # Timeout message may contain quota-like words in output text
         e = RuntimeError("Codex CLI timeout dopo 1000s.\nParziale:\nsome usage text here")
@@ -298,9 +302,17 @@ class TestBgTaskToCanonical(unittest.TestCase):
 
     def test_errore_to_failed(self):
         from api.delegation_store import bg_task_to_canonical
-        t = {"id": "d2", "status": "errore", "agent": "a", "output": "err", "started": 0.0}
+        t = {
+            "id": "d2", "status": "errore", "agent": "a", "output": "parziale", "started": 0.0,
+            "failure_reason": "Codex CLI timeout dopo 1000s", "error_category": "timeout",
+            "error_code": "CodexTimeoutError", "result_partial": True,
+        }
         rec = bg_task_to_canonical(t)
         self.assertEqual(rec["status"], "failed")
+        self.assertEqual(rec["result"]["text"], "parziale")
+        self.assertTrue(rec["result"]["partial"])
+        self.assertEqual(rec["error"]["category"], "timeout")
+        self.assertIn("1000s", rec["error"]["message"])
 
     def test_parziale_sets_partial(self):
         from api.delegation_store import bg_task_to_canonical
@@ -862,6 +874,12 @@ class TestBridgeTasksLegacyFormat(unittest.TestCase):
     def test_unknown_passthrough(self):
         from api.delegation_store import status_to_legacy
         self.assertEqual(status_to_legacy("unknown"), "unknown")
+
+    def test_command_bridge_renders_failed_as_red_failure(self):
+        source = (REPO_ROOT / "static" / "command_bridge.js").read_text(encoding="utf-8")
+        self.assertIn("status === 'failed'", source)
+        self.assertIn("return 'fallita'", source)
+        self.assertIn("cb-deleg-failure", source)
 
 
 if __name__ == "__main__":

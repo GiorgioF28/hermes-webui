@@ -57,6 +57,59 @@ _CODEX_FALLBACK_STATE = {
     "last_failure": 0.0,
 }
 
+
+class DelegationRuntimeError(RuntimeError):
+    """Runtime failure with machine-readable outcome metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "runtime_error",
+        provider: str = "unknown",
+        partial_output: str = "",
+        exit_code: int | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+        self.provider = provider
+        self.partial_output = str(partial_output or "").strip()
+        self.exit_code = exit_code
+        self.duration_seconds = duration_seconds
+
+
+class CodexTimeoutError(DelegationRuntimeError):
+    def __init__(self, duration_seconds: float, partial_output: str = "") -> None:
+        duration = max(float(duration_seconds or 0), 0.0)
+        super().__init__(
+            f"Codex CLI timeout dopo {duration:g}s (durata runtime: {duration:g}s)",
+            category="timeout",
+            provider="codex",
+            partial_output=partial_output,
+            duration_seconds=duration,
+        )
+
+
+class CodexStartError(DelegationRuntimeError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, category="provider_unavailable", provider="codex")
+
+
+class CodexProcessError(DelegationRuntimeError):
+    def __init__(self, exit_code: int, detail: str) -> None:
+        super().__init__(
+            f"Codex CLI exit {exit_code}: {detail}",
+            category="process_exit",
+            provider="codex",
+            partial_output=detail,
+            exit_code=exit_code,
+        )
+
+
+class DelegationOutputError(DelegationRuntimeError):
+    pass
+
 _WORKER_PERSONA = (
     "Sei un sotto-agente operativo di Hermes. Esegui il task assegnato in modo "
     "concreto e conciso. Rispondi SOLO con il risultato/esito, niente preamboli. "
@@ -141,6 +194,7 @@ _PERSIST_FIELDS = (
     "id", "session_id", "agent", "agent_id", "task_type", "task", "status", "output",
     "started", "finished", "librarian_status", "librarian_output",
     "runtime", "fallback_runtime", "fallback_model", "fallback_reason",
+    "failure_reason", "error_category", "error_code", "result_partial",
     "anchor_session_id", "anchor_message_index", "anchor_created_at", "summary",
 )
 
@@ -183,12 +237,12 @@ def _brief_summary(t: dict) -> str:
     status = str(t.get("status") or "")
     if status == "in_corso":
         state = "in corso"
-    elif status in ("ok", "parziale"):
+    elif status in ("ok", "parziale", "done"):
         state = "completato"
     elif status == "interrotta":
         state = "interrotta"
     else:
-        state = "errore"
+        state = "fallita"
     subject = task or str(t.get("task_type") or t.get("agent") or "delega")
     commit = ""
     match = re.search(r"\b(?:commit\s+)?([0-9a-f]{7,12})\b", output, flags=re.I)
@@ -225,9 +279,18 @@ def _canonical_to_legacy(rec: dict) -> dict:
     if raw_status in _CANONICAL_STATUS_TO_LEGACY:
         rec["status"] = _CANONICAL_STATUS_TO_LEGACY[raw_status]
     # output: il campo canonico e' result.text
+    result = rec.get("result") or {}
     if not rec.get("output"):
-        result = rec.get("result") or {}
         rec["output"] = str(result.get("text") or "")
+    error = rec.get("error") or {}
+    if not rec.get("failure_reason"):
+        rec["failure_reason"] = str(error.get("message") or "")
+    if not rec.get("error_category"):
+        rec["error_category"] = str(error.get("category") or "")
+    if not rec.get("error_code"):
+        rec["error_code"] = str(error.get("code") or "")
+    if "result_partial" not in rec:
+        rec["result_partial"] = bool(result.get("partial", False))
     # timestamps: il campo canonico usa il suffisso _at
     if not rec.get("started") and rec.get("started_at"):
         rec["started"] = rec["started_at"]
@@ -359,7 +422,16 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
             )
         else:
             output = await _run_worker(worker_task, model, workspace, agent_id=t.get("agent_id"), progress=t)
-        t.update(status="ok", output=output, finished=time.time())
+        output = _validate_delegation_output(output)
+        t.update(
+            status="ok",
+            output=output,
+            finished=time.time(),
+            failure_reason="",
+            error_category="",
+            error_code="",
+            result_partial=False,
+        )
         _persist_bg_task(task_id, workspace)
         # Fase 1: enqueue brief for delivery (idempotent)
         try:
@@ -393,24 +465,44 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
     except Exception as e:
         # Conserva l'eventuale output PARZIALE accumulato prima del blocco
         # (es. token finiti a meta' risposta): non deve andare perso.
-        partial = str(t.get("output") or "").strip()
-        msg = str(e)
-        combined = (partial + "\n\n[interrotta: " + msg + "]").strip() if partial else msg
-        t.update(status="errore", output=combined, finished=time.time())
+        from api.delegation_store import classify_error as _clf_err
+
+        err = _clf_err(e)
+        msg = str(e).strip() or "runtime failure"
+        partials = []
+        current = str(t.get("output") or "").strip()
+        if current and not current.startswith("Codex esaurito -> fallback Sonnet"):
+            partials.append(current)
+        exc_partial = str(getattr(e, "partial_output", "") or "").strip()
+        if exc_partial and exc_partial not in partials:
+            partials.append(exc_partial)
+        partial = "\n\n".join(partials).strip()
+        error_code = str(getattr(e, "exit_code", "") or type(e).__name__)
+        category = str(err.get("category") or "unknown")
+        t.update(
+            status="errore",
+            output=partial,
+            finished=time.time(),
+            failure_reason=msg,
+            error_category=category,
+            error_code=error_code,
+            result_partial=bool(partial) and category in {"timeout", "process_exit", "truncated_output"},
+        )
         _persist_bg_task(task_id, workspace)
         # Fase 1: enqueue brief for failed delegation (high priority)
         try:
             from api.prime_brief_queue import get_brief_queue
-            from api.delegation_store import classify_error as _clf_err
-            _err_cat = _clf_err(e).get("category", "unknown")
+            brief_output = partial
+            if msg and msg not in brief_output:
+                brief_output = (brief_output + "\n\n[errore: " + msg + "]").strip()
             get_brief_queue(workspace).enqueue(
                 task_id,
                 agent=str(t.get("agent") or ""),
                 task_type=task_type,
                 task=task,
                 status="failed",
-                output=combined,
-                error_category=_err_cat,
+                output=brief_output,
+                error_category=category,
                 priority="high",
                 session_id=str(t.get("session_id") or t.get("anchor_session_id") or "hermes-prime"),
             )
@@ -460,6 +552,8 @@ def get_background_tasks(max_age: float = 600.0, *, session_id: str | None = Non
             "fallback_runtime": t.get("fallback_runtime"),
             "fallback_model": t.get("fallback_model"),
             "fallback_reason": t.get("fallback_reason"),
+            "failure_reason": t.get("failure_reason") or (t.get("error") or {}).get("message", ""),
+            "error_category": t.get("error_category") or (t.get("error") or {}).get("category", ""),
         })
     out.sort(key=lambda x: x["id"])
     return out
@@ -484,6 +578,8 @@ def get_background_task(task_id: str) -> dict | None:
         "fallback_runtime": t.get("fallback_runtime"),
         "fallback_model": t.get("fallback_model"),
         "fallback_reason": t.get("fallback_reason"),
+        "failure_reason": t.get("failure_reason") or (t.get("error") or {}).get("message", ""),
+        "error_category": t.get("error_category") or (t.get("error") or {}).get("category", ""),
     }
 
 
@@ -786,6 +882,8 @@ _CODEX_QUOTA_STRICT_MARKERS = (
     "credit balance",
     "credit_balance",
     "insufficient_quota",
+    "session limit",
+    "hit your session limit",
 )
 
 # Marker generici: sicuri solo su errori "corti" (exit code + stderr), NON su
@@ -800,21 +898,73 @@ _CODEX_QUOTA_BROAD_MARKERS = _CODEX_QUOTA_STRICT_MARKERS + (
 
 def is_codex_quota_error(exc: Any) -> bool:
     """True when Codex CLI failed because account credits/usage are exhausted."""
+    if isinstance(exc, CodexTimeoutError):
+        return False
     text = f"{type(exc).__name__}: {exc}".lower()
     if "codex" not in text:
         return False
     if "codex cli timeout dopo" in text:
-        # Errore timeout: il testo incorpora l'output parziale del task, che
-        # puo' contenere parole generiche come "quota"/"usage"/"rate limit"
-        # come CONTENUTO del lavoro (es. feature usage/quota nel Bridge).
-        # Senza questo filtro un semplice timeout viene scambiato per crediti
-        # esauriti e il cooldown sticky di 1h manda tutte le deleghe
-        # successive su Sonnet anche con crediti Codex disponibili
-        # (regressione osservata 2026-07-17 con crediti al 48%).
-        return any(marker in text for marker in _CODEX_QUOTA_STRICT_MARKERS)
+        # Timeout e quota sono cause diverse: anche se il parziale contiene
+        # marker di quota, un hard-timeout non deve mai consumare Sonnet.
+        return False
     if any(marker in text for marker in _CODEX_QUOTA_BROAD_MARKERS):
         return True
     return "http 429" in text and any(marker in text for marker in ("limit", "usage", "quota", "credit"))
+
+
+def is_codex_start_error(exc: Any) -> bool:
+    return isinstance(exc, CodexStartError)
+
+
+_RUNTIME_QUOTA_MARKERS = _CODEX_QUOTA_BROAD_MARKERS + (
+    "session limit",
+    "hit your session limit",
+    "credit",
+)
+_TRUNCATED_OUTPUT_MARKERS = (
+    "[truncated]",
+    "output truncated",
+    "response truncated",
+    "truncated output",
+    "max output length",
+    "maximum output length",
+)
+
+
+def _looks_like_runtime_quota_output(output: str) -> bool:
+    text = str(output or "").strip().lower()
+    if not text or len(text) > 2000:
+        return False
+    return any(marker in text for marker in _RUNTIME_QUOTA_MARKERS)
+
+
+def _validate_delegation_output(output: Any) -> str:
+    """Reject terminal runtime/error placeholders that are not real results."""
+    text = str(output or "").strip()
+    if not text:
+        raise DelegationOutputError(
+            "Runtime terminato senza output finale utile",
+            category="empty_output",
+            partial_output="",
+        )
+    if _looks_like_runtime_quota_output(text):
+        raise DelegationOutputError(
+            "Runtime ha restituito un errore di quota/limite: " + re.sub(r"\s+", " ", text)[:500],
+            category="quota_exhausted",
+            partial_output=text,
+        )
+    lowered = text.lower()
+    if any(marker in lowered for marker in _TRUNCATED_OUTPUT_MARKERS):
+        residue = lowered
+        for marker in _TRUNCATED_OUTPUT_MARKERS:
+            residue = residue.replace(marker, " ")
+        if len(re.sub(r"[\W_]+", "", residue)) < 16:
+            raise DelegationOutputError(
+                "Runtime terminato con output troncato senza contenuto utile",
+                category="truncated_output",
+                partial_output=text,
+            )
+    return text
 
 
 def _codex_fallback_active(now: float | None = None) -> bool:
@@ -890,6 +1040,15 @@ async def _run_codex_worker_with_fallback(
         _clear_codex_fallback()
         return output
     except Exception as exc:
+        if isinstance(exc, CodexTimeoutError):
+            raise
+        if is_codex_start_error(exc):
+            reason = str(exc)
+            _set_progress_fallback(progress, reason)
+            logger.warning("Codex subagent start failed -> fallback %s", codex_fallback_model())
+            return await _run_worker(
+                task, codex_fallback_model(), workspace, agent_id=agent_id, progress=progress
+            )
         if not is_codex_quota_error(exc):
             raise
         status = _mark_codex_exhausted(str(exc))
@@ -939,7 +1098,7 @@ def _codex_exec_blocking(task: str, workspace: str) -> str:
     err = (proc.stderr or "").strip()
     if proc.returncode != 0:
         detail = err or out or f"exit code {proc.returncode}"
-        raise RuntimeError(f"Codex CLI exit {proc.returncode}: {detail}")
+        raise CodexProcessError(proc.returncode, detail)
     return out or err
 
 
@@ -969,8 +1128,6 @@ async def _run_codex_worker(task: str, workspace: str, *, agent_id: str | None =
     prompt = _codex_worker_prompt(task, agent_id, workspace)
     try:
         return await asyncio.to_thread(_codex_exec_blocking, prompt, workspace)
-    except FileNotFoundError as e:
-        raise RuntimeError("Codex CLI non trovato (codex.cmd non nel PATH)") from e
     except subprocess.TimeoutExpired as e:
         # Conserva l'output parziale prodotto da Codex prima del timeout.
         # Include anche stderr: a quota esaurita il CLI stampa il messaggio di
@@ -984,8 +1141,9 @@ async def _run_codex_worker(task: str, workspace: str, *, agent_id: str | None =
             if raw:
                 chunks.append(raw)
         partial = "\n".join(chunks)
-        suffix = f"\nParziale prima del timeout:\n{partial}" if partial else ""
-        raise RuntimeError(f"Codex CLI timeout dopo {_CODEX_TIMEOUT}s.{suffix}") from e
+        raise CodexTimeoutError(float(getattr(e, "timeout", None) or _CODEX_TIMEOUT), partial) from e
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        raise CodexStartError(f"Codex CLI non avviabile: {e}") from e
 
 
 async def _run_worker(
@@ -1035,6 +1193,15 @@ async def _run_worker(
                 r = getattr(m, "result", None)
                 if r:
                     final = str(r)
+                if bool(getattr(m, "is_error", False)):
+                    partial = ("".join(parts).strip() or final.strip())
+                    category = "quota_exhausted" if _looks_like_runtime_quota_output(partial) else "runtime_error"
+                    raise DelegationRuntimeError(
+                        partial or "Claude runtime terminato senza risultato utile",
+                        category=category,
+                        provider="claude",
+                        partial_output=partial,
+                    )
     finally:
         try:
             await client.disconnect()

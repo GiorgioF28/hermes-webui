@@ -43,6 +43,8 @@ _QUOTA_MARKERS = (
     "hit your usage limit", "plan limit reached", "limit of messages per 5 hours",
     "used up your usage", "out of credit", "credit balance", "credit_balance",
     "insufficient_quota",
+    "session limit", "hit your session limit", "quota", "rate limit",
+    "usage limit", "credit",
 )
 _TIMEOUT_MARKERS = ("codex cli timeout", "timed out", "watchdog", "subprocess timeout")
 _AUTH_MARKERS = (
@@ -60,15 +62,20 @@ _PROVIDER_UNAVAILABLE_MARKERS = (
 def classify_error(exc_or_text: Any) -> dict[str, Any]:
     """Return structured error dict: code, message, category, provider, retryable.
 
-    Categories (spec §Policy errori):
-    quota_exhausted | timeout | crash | transport | auth | provider_unavailable | unknown
+    Categories (spec §Policy errori): quota_exhausted | timeout | crash |
+    transport | auth | provider_unavailable | process_exit | empty_output |
+    truncated_output | runtime_error | unknown.
     """
     raw = str(exc_or_text)
     text = raw.lower()
-    provider = _guess_provider(text)
+    explicit_category = str(getattr(exc_or_text, "category", "") or "")
+    provider = str(getattr(exc_or_text, "provider", "") or "") or _guess_provider(text)
     is_timeout = any(m in text for m in _TIMEOUT_MARKERS)
 
-    if not is_timeout and any(m in text for m in _QUOTA_MARKERS):
+    if explicit_category:
+        category = explicit_category
+        retryable = category in {"quota_exhausted", "timeout", "transport", "provider_unavailable"}
+    elif not is_timeout and any(m in text for m in _QUOTA_MARKERS):
         category, retryable = "quota_exhausted", True
     elif is_timeout:
         category, retryable = "timeout", True
@@ -78,10 +85,13 @@ def classify_error(exc_or_text: Any) -> dict[str, Any]:
         category, retryable = "transport", True
     elif any(m in text for m in _PROVIDER_UNAVAILABLE_MARKERS):
         category, retryable = "provider_unavailable", False
+    elif re.search(r"\bcodex cli exit [1-9]\d*\b", text):
+        category, retryable = "process_exit", False
     else:
         category, retryable = "unknown", False
 
-    exc_type = type(exc_or_text).__name__ if not isinstance(exc_or_text, str) else ""
+    explicit_code = getattr(exc_or_text, "exit_code", None)
+    exc_type = str(explicit_code) if explicit_code is not None else (type(exc_or_text).__name__ if not isinstance(exc_or_text, str) else "")
     return {
         "code": exc_type,
         "message": raw[:500],
@@ -96,7 +106,7 @@ def _guess_provider(text_lower: str) -> str:
         return "codex"
     if "gemini" in text_lower or "google" in text_lower:
         return "gemini"
-    if "claude" in text_lower or "anthropic" in text_lower:
+    if "claude" in text_lower or "anthropic" in text_lower or "sonnet" in text_lower:
         return "claude"
     return "unknown"
 
@@ -240,6 +250,11 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
     rt_primary = "codex" if "codex" in rt_raw or "sonnet-fallback" in rt_raw else "claude"
 
     lib_status = normalise_librarian_status(str(t.get("librarian_status") or ""))
+    failure_reason = str(t.get("failure_reason") or "")
+    error_category = str(t.get("error_category") or "unknown")
+    error_provider = _guess_provider(
+        " ".join((str(t.get("runtime") or ""), failure_reason)).lower()
+    )
 
     return make_canonical_record(
         tid,
@@ -258,7 +273,14 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
             "artifact_paths": [],
             "stdout_tail": "",
             "stderr_tail": "",
-            "partial": partial,
+            "partial": bool(t.get("result_partial", partial)),
+        },
+        error={
+            "code": str(t.get("error_code") or ""),
+            "message": failure_reason,
+            "category": error_category,
+            "provider": error_provider,
+            "retryable": error_category in {"quota_exhausted", "timeout", "transport", "provider_unavailable"},
         },
         runtime={
             "primary": rt_primary,
