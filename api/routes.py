@@ -6254,6 +6254,12 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/worklog":
         return _handle_bridge_worklog(handler, parsed)
 
+    if parsed.path == "/api/daily-checklist":
+        return _handle_daily_checklist_get(handler, parsed)
+
+    if parsed.path == "/api/daily-checklist/streaks":
+        return _handle_daily_checklist_streaks(handler)
+
     if parsed.path == "/api/projects/overview":
         return _handle_projects_overview(handler, parsed)
 
@@ -7091,6 +7097,12 @@ def handle_post(handler, parsed) -> bool:
         return _handle_control_center_task_status(handler, body)
     if parsed.path == "/api/projects/task":
         return _handle_projects_task(handler, body)
+    if parsed.path == "/api/daily-checklist/toggle":
+        return _handle_daily_checklist_toggle(handler, body)
+    if parsed.path == "/api/daily-checklist/adhoc":
+        return _handle_daily_checklist_adhoc(handler, body)
+    if parsed.path == "/api/daily-checklist/config":
+        return _handle_daily_checklist_config(handler, body)
     if parsed.path == "/api/work/start":
         return _handle_work_start(handler, body)
     if parsed.path == "/api/work/finish":
@@ -9097,6 +9109,13 @@ def handle_delete(handler, parsed) -> bool:
         prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True})
+
+    if parsed.path.startswith("/api/daily-checklist/adhoc/"):
+        item_id = parsed.path[len("/api/daily-checklist/adhoc/"):].strip()
+        try:
+            return j(handler, _daily_checklist_store().delete_adhoc(item_id)) or True
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400) or True
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
@@ -11113,6 +11132,60 @@ def _handle_bridge_worklog(handler, parsed):
         logger.exception("bridge worklog failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
     return j(handler, data) or True
+
+
+def _daily_checklist_store():
+    from api.daily_checklist import get_store
+
+    return get_store()
+
+
+def _handle_daily_checklist_get(handler, parsed):
+    """GET /api/daily-checklist?date=YYYY-MM-DD."""
+    try:
+        requested_date = parse_qs(parsed.query).get("date", [None])[0]
+        return j(handler, _daily_checklist_store().get_state(requested_date)) or True
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400) or True
+    except Exception as exc:
+        logger.exception("daily checklist get failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+
+
+def _handle_daily_checklist_streaks(handler):
+    """GET /api/daily-checklist/streaks."""
+    try:
+        return j(handler, {"ok": True, "streaks": _daily_checklist_store().streaks()}) or True
+    except Exception as exc:
+        logger.exception("daily checklist streaks failed")
+        return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+
+
+def _handle_daily_checklist_toggle(handler, body):
+    try:
+        result = _daily_checklist_store().toggle(
+            body.get("id"), body.get("date"), body.get("done")
+        )
+        return j(handler, result) or True
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400) or True
+
+
+def _handle_daily_checklist_adhoc(handler, body):
+    try:
+        result = _daily_checklist_store().add_adhoc(
+            body.get("project_id"), body.get("text"), body.get("date")
+        )
+        return j(handler, result, status=201) or True
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400) or True
+
+
+def _handle_daily_checklist_config(handler, body):
+    try:
+        return j(handler, _daily_checklist_store().configure(body)) or True
+    except ValueError as exc:
+        return bad(handler, str(exc), status=400) or True
 
 
 def _handle_projects_overview(handler, parsed):

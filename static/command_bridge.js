@@ -33,6 +33,11 @@
       body: JSON.stringify(payload || {})
     }).then(function (r) { if (!r.ok) throw new Error(path + ' -> ' + r.status); return r.json(); });
   }
+  function apiDelete(path) {
+    return fetch(new URL(path, document.baseURI || location.href).href, {
+      method: 'DELETE', credentials: 'same-origin'
+    }).then(function (r) { if (!r.ok) throw new Error(path + ' -> ' + r.status); return r.json(); });
+  }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c];
@@ -828,6 +833,8 @@
         '<div class="cb-grid" id="cbGrid"><div class="cb-loading">caricamento vault…</div></div>' +
       '</section>';
     host.appendChild(root);
+    var dailyTemplate = $('dailyChecklistTemplate');
+    if (dailyTemplate && dailyTemplate.content) root.appendChild(dailyTemplate.content.cloneNode(true));
     mountPrimeCore($('cbPetals')); // central Hermes Prime: living-star system (voice orb)
 
     // interactions
@@ -854,6 +861,8 @@
         tgt = tgt.parentNode;
       }
     });
+    var dailyAdd = $('cbDailyAdd');
+    if (dailyAdd) dailyAdd.addEventListener('submit', addDailyAdhoc);
     var form = $('cbForm');
     if (form) form.addEventListener('submit', onPrimeSubmit);
     // Textarea che cresce mentre scrivi e torna piccola all'invio; Invio manda,
@@ -1426,6 +1435,7 @@
   var _cbWorklogTimer = null;
   function pollWorklog() {
     api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {});
+    pollDailyChecklist();
   }
   function startWorklogPolling() { if (!_cbWorklogTimer) _cbWorklogTimer = setInterval(pollWorklog, 60000); }
   var _cbQuotaTimer = null;
@@ -2686,11 +2696,47 @@
     }).join('');
   }
 
+  var _worklogData = null;
+  var _dailyChecklistData = null;
+  var _worklogTab = 'work';
+
   function renderWorklog(data) {
+    _worklogData = data;
+    renderWorklogPanel();
+  }
+
+  function renderWorklogPanel() {
     var box = $('cbFlex');
     if (!box) return;
+    var data = _worklogData;
+    var tabs = '<div class="cb-flex-tabs">' +
+      '<button type="button" class="cb-flex-tab ' + (_worklogTab === 'work' ? 'active' : '') + '" data-tab="work">Work log</button>' +
+      '<button type="button" class="cb-flex-tab ' + (_worklogTab === 'daily' ? 'active' : '') + '" data-tab="daily">Giornaliere</button>' +
+      '</div>';
+    if (_worklogTab === 'daily') {
+      var daily = _dailyChecklistData;
+      if (!daily) {
+        box.innerHTML = tabs + '<div class="cb-empty">caricamento giornaliere</div>';
+      } else {
+        var globalStreak = (daily.streaks && daily.streaks.global) || {};
+        var history = daily.history || [];
+        var historyHtml = history.length ? history.map(function (row) {
+          return '<div class="cb-flex-day">' + esc(row.date || '') + '</div>' + (row.items || []).map(function (item) {
+            return '<div class="cb-flex-daily-row"><span class="cb-flex-tag">' + esc(item.project_name || 'Altro') + '</span><span>' + esc(item.text || '') + '</span></div>';
+          }).join('');
+        }).join('') : '<div class="cb-empty">nessuna giornaliera completata</div>';
+        box.innerHTML = tabs +
+          '<div class="cb-flex-daily-summary">' +
+            '<span class="cb-flex-badge hot">&#128293; streak ' + Number(globalStreak.current || 0) + 'g</span>' +
+            '<span class="cb-flex-badge">record ' + Number(globalStreak.record || 0) + 'g</span>' +
+          '</div><div class="cb-flex-recent">' + historyHtml + '</div>';
+      }
+      wireWorklogTabs(box);
+      return;
+    }
     if (!data || data.ok === false) {
-      box.innerHTML = '<div class="cb-empty">work log non disponibile</div>';
+      box.innerHTML = tabs + '<div class="cb-empty">work log non disponibile</div>';
+      wireWorklogTabs(box);
       return;
     }
     var today = Number(data.today_count || 0);
@@ -2716,7 +2762,7 @@
           '<span class="cb-flex-summary">' + esc(r.summary || r.type || '') + '</span>' +
         '</div>';
     }).join('') : '<div class="cb-empty">nessun evento recente</div>';
-    box.innerHTML =
+    box.innerHTML = tabs +
       '<div class="cb-flex-top">' +
         '<div>' +
           '<div class="cb-flex-num">' + today + '</div>' +
@@ -2738,6 +2784,125 @@
         '</div>' +
       '</div>' +
       '<div class="cb-flex-recent">' + recentHtml + '</div>';
+    wireWorklogTabs(box);
+  }
+
+  function wireWorklogTabs(box) {
+    Array.prototype.forEach.call(box.querySelectorAll('.cb-flex-tab'), function (button) {
+      button.addEventListener('click', function () {
+        _worklogTab = button.getAttribute('data-tab') || 'work';
+        renderWorklogPanel();
+      });
+    });
+  }
+
+  function localIsoDate() {
+    var now = new Date();
+    var pad = function (value) { return String(value).padStart(2, '0'); };
+    return now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+  }
+
+  function setDailyStatus(message) {
+    var status = $('cbDailyStatus');
+    if (status) status.textContent = message || '';
+  }
+
+  function recalculateDailyCounts(data) {
+    var total = 0, done = 0;
+    (data.projects || []).forEach(function (project) {
+      project.total = (project.items || []).length;
+      project.done = (project.items || []).filter(function (item) { return !!item.done; }).length;
+      total += project.total; done += project.done;
+    });
+    data.total = total; data.done = done;
+  }
+
+  function renderDailyChecklist(data) {
+    _dailyChecklistData = data;
+    var projectsBox = $('cbDailyProjects');
+    if (!projectsBox || !data) return;
+    recalculateDailyCounts(data);
+    var count = $('cbDailyCount'), dateLabel = $('cbDailyDate'), progress = $('cbDailyProgress');
+    if (count) count.textContent = data.done + '/' + data.total;
+    if (dateLabel) dateLabel.textContent = data.date || '';
+    var pct = data.total ? Math.round((data.done / data.total) * 100) : 0;
+    if (progress) {
+      progress.style.width = pct + '%';
+      if (progress.parentNode) progress.parentNode.setAttribute('aria-valuenow', String(pct));
+    }
+    projectsBox.innerHTML = (data.projects || []).map(function (project) {
+      var streak = project.streak || {};
+      var rows = (project.items || []).map(function (item) {
+        return '<label class="cb-daily-row ' + (item.done ? 'done' : '') + '">' +
+          '<input type="checkbox" data-daily-id="' + esc(item.id) + '" ' + (item.done ? 'checked' : '') + '>' +
+          '<span>' + esc(item.text) + '</span>' +
+          (item.adhoc ? '<button type="button" class="cb-daily-remove" data-adhoc-id="' + esc(item.id) + '" title="Rimuovi task ad-hoc" aria-label="Rimuovi task ad-hoc">&times;</button>' : '') +
+        '</label>';
+      }).join('') || '<div class="cb-empty">nessuna daily attiva</div>';
+      return '<article class="cb-daily-project"><div class="cb-daily-project-head"><span>' + esc(project.name) + '</span>' +
+        '<span class="cb-daily-project-meta">' + Number(project.done || 0) + '/' + Number(project.total || 0) + ' &middot; &#128293; ' + Number(streak.current || 0) + '</span></div>' + rows + '</article>';
+    }).join('');
+
+    var select = $('cbDailyProject');
+    if (select) {
+      var selected = select.value;
+      select.innerHTML = (data.projects || []).map(function (project) { return '<option value="' + esc(project.id) + '">' + esc(project.name) + '</option>'; }).join('');
+      if (selected) select.value = selected;
+    }
+    Array.prototype.forEach.call(projectsBox.querySelectorAll('input[data-daily-id]'), function (checkbox) {
+      checkbox.addEventListener('change', function () { toggleDaily(checkbox.getAttribute('data-daily-id'), checkbox.checked); });
+    });
+    Array.prototype.forEach.call(projectsBox.querySelectorAll('button[data-adhoc-id]'), function (button) {
+      button.addEventListener('click', function (event) {
+        event.preventDefault();
+        removeDailyAdhoc(button.getAttribute('data-adhoc-id'));
+      });
+    });
+    renderWorklogPanel();
+  }
+
+  function toggleDaily(itemId, done) {
+    if (!_dailyChecklistData) return;
+    var item = null;
+    (_dailyChecklistData.projects || []).some(function (project) {
+      item = (project.items || []).find(function (candidate) { return candidate.id === itemId; });
+      return !!item;
+    });
+    if (!item) return;
+    var previous = !!item.done;
+    item.done = !!done;
+    renderDailyChecklist(_dailyChecklistData);
+    apiPost('/api/daily-checklist/toggle', { id: itemId, date: _dailyChecklistData.date, done: !!done })
+      .then(function (data) { setDailyStatus(''); renderDailyChecklist(data); })
+      .catch(function () { item.done = previous; setDailyStatus('Salvataggio fallito: modifica annullata.'); renderDailyChecklist(_dailyChecklistData); });
+  }
+
+  function addDailyAdhoc(event) {
+    event.preventDefault();
+    var select = $('cbDailyProject'), input = $('cbDailyText');
+    var text = input ? input.value.trim() : '';
+    if (!select || !text || !_dailyChecklistData) return;
+    input.disabled = true;
+    apiPost('/api/daily-checklist/adhoc', { project_id: select.value, text: text, date: _dailyChecklistData.date })
+      .then(function (data) { input.value = ''; input.disabled = false; setDailyStatus('Task aggiunta per oggi.'); renderDailyChecklist(data); })
+      .catch(function () { input.disabled = false; setDailyStatus('Impossibile aggiungere la task.'); });
+  }
+
+  function removeDailyAdhoc(itemId) {
+    apiDelete('/api/daily-checklist/adhoc/' + encodeURIComponent(itemId))
+      .then(function (data) { setDailyStatus('Task ad-hoc rimossa.'); renderDailyChecklist(data); })
+      .catch(function () { setDailyStatus('Impossibile rimuovere la task.'); });
+  }
+
+  function pollDailyChecklist() {
+    var day = localIsoDate();
+    return api('/api/daily-checklist?date=' + encodeURIComponent(day)).then(function (data) {
+      setDailyStatus('');
+      renderDailyChecklist(data);
+    }).catch(function () {
+      var projectsBox = $('cbDailyProjects');
+      if (projectsBox && !_dailyChecklistData) projectsBox.innerHTML = '<div class="cb-empty">giornaliere non disponibili</div>';
+    });
   }
 
   /* ── Repo status: pillola rossa + segnale deploy a Prime ─────────────────── */
@@ -2871,6 +3036,7 @@
     api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {
       var box = $('cbFlex'); if (box) box.innerHTML = '<div class="cb-empty">work log non disponibile</div>';
     });
+    pollDailyChecklist();
   }
 
   /* ── Hermes Prime petal-core (canvas 2D) ───────────────────────────────────
