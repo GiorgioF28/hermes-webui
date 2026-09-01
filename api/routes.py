@@ -6480,8 +6480,8 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/prime/claude-quota":
         return _handle_bridge_prime_claude_quota(handler)
 
-    if parsed.path == "/api/bridge/prime/daily-brief":
-        return _handle_bridge_prime_daily_brief(handler)
+    if parsed.path == "/api/bridge/daily-brief":
+        return _handle_bridge_daily_brief(handler)
 
     if parsed.path == "/api/approval/stream":
         return _handle_approval_sse_stream(handler, parsed)
@@ -6967,6 +6967,12 @@ def handle_get(handler, parsed) -> bool:
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    if parsed.path.startswith("/api/cron/daily-brief/"):
+        # Machine-to-machine endpoints use their own fail-closed shared-token
+        # authentication and deliberately bypass browser identity/CSRF.
+        from api.daily_brief import handle_cron_daily_brief
+
+        return handle_cron_daily_brief(handler, parsed.path)
     if not _authorize_request(handler):
         return True
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
@@ -12092,15 +12098,15 @@ def _handle_bridge_prime_claude_quota(handler):
         return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
 
 
-def _handle_bridge_prime_daily_brief(handler):
-    """GET /api/bridge/prime/daily-brief -- deleghe recenti e risposte IG persistite."""
+def _handle_bridge_daily_brief(handler):
+    """GET /api/bridge/daily-brief -- compact email and Instagram digest."""
     try:
         from api.daily_brief import build_daily_brief_payload
 
-        payload = build_daily_brief_payload(_prime_workspace_from_settings())
+        payload = build_daily_brief_payload()
         return j(handler, payload, extra_headers={"Cache-Control": "no-store"}) or True
     except Exception as exc:
-        logger.exception("bridge prime daily-brief failed")
+        logger.exception("bridge daily-brief failed")
         return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
 
 

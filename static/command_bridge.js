@@ -621,39 +621,28 @@
 '.cb-tool-card{align-self:flex-start;max-width:96%;border:1px solid rgba(100,180,255,.22);border-left:2px solid rgba(100,180,255,.5);border-radius:6px;padding:6px 10px;background:rgba(40,60,80,.28);font-family:var(--cb-mono);font-size:10.5px;line-height:1.35;}',
 '.cb-tool-name{color:rgba(140,210,255,.9);font-weight:600;letter-spacing:.08em;}',
 '.cb-tool-summary{color:var(--cb-muted);margin-top:2px;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px;}',
-'/* Daily Brief: additive overlay; the existing star/chat/delegation DOM stays mounted. */',
-'.cb-daily-open{border:1px solid var(--cb-line);background:rgba(255,106,0,.08);color:var(--cb-accent-2);border-radius:8px;padding:6px 9px;font-family:var(--cb-mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;}',
-'.cb-daily-open:hover{border-color:var(--cb-accent);color:#fff;}',
-'.cb-daily{position:absolute;inset:18px;z-index:20;display:flex;flex-direction:column;overflow:hidden;border:1px solid rgba(255,138,61,.38);border-radius:18px;background:linear-gradient(150deg,rgba(10,11,17,.98),rgba(5,6,10,.985));box-shadow:0 30px 100px rgba(0,0,0,.72);}',
-'.cb-daily[hidden]{display:none;}',
-'.cb-daily-head{display:flex;align-items:center;gap:12px;padding:17px 20px;border-bottom:1px solid var(--cb-line2);}',
-'.cb-daily-title{font-family:var(--cb-disp);font-size:18px;font-weight:700;color:#fff;letter-spacing:.04em;}',
-'.cb-daily-sub{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);letter-spacing:.1em;text-transform:uppercase;}',
-'.cb-daily-actions{margin-left:auto;display:flex;gap:8px;}',
-'.cb-daily-btn{border:1px solid var(--cb-line);background:rgba(255,255,255,.03);color:var(--cb-muted);border-radius:8px;padding:7px 10px;cursor:pointer;font-family:var(--cb-mono);font-size:10px;}',
-'.cb-daily-btn:hover{border-color:var(--cb-accent);color:#fff;}',
-'.cb-daily-body{min-height:0;overflow:auto;padding:20px;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:20px;}',
-'.cb-daily-section{min-width:0;}',
-'.cb-daily-section h2{margin:0 0 12px;font-family:var(--cb-disp);font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:var(--cb-accent-2);}',
-'.cb-daily-day{margin-bottom:16px;}',
-'.cb-daily-day-label{font-family:var(--cb-mono);font-size:10px;color:var(--cb-muted);margin-bottom:7px;text-transform:uppercase;letter-spacing:.1em;}',
-'.cb-brief-row,.cb-ig-reply{border:1px solid var(--cb-line2);border-radius:11px;background:rgba(255,255,255,.025);margin-bottom:8px;}',
-'.cb-brief-row summary{cursor:pointer;list-style:none;padding:12px 13px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:9px;align-items:center;}',
-'.cb-brief-row summary::-webkit-details-marker{display:none;}',
-'.cb-brief-state{width:7px;height:7px;border-radius:50%;background:var(--cb-success);box-shadow:0 0 9px rgba(72,199,116,.55);}',
-'.cb-brief-state.failed{background:var(--cb-error);box-shadow:0 0 9px rgba(255,82,82,.5);}',
-'.cb-brief-main{min-width:0;}',
-'.cb-brief-task{color:#fff;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-'.cb-brief-meta,.cb-ig-meta{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);margin-top:3px;}',
-'.cb-brief-time{font-family:var(--cb-mono);font-size:9px;color:var(--cb-muted);}',
-'.cb-brief-detail{border-top:1px solid var(--cb-line2);padding:11px 13px;color:var(--cb-text);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;}',
-'.cb-ig-reply{padding:12px 13px;}',
-'.cb-ig-handle{font-family:var(--cb-disp);font-weight:650;color:#fff;}',
-'.cb-ig-text{margin-top:7px;color:var(--cb-text);font-size:12px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;}',
-'.cb-ig-link{display:inline-block;margin-top:8px;color:var(--cb-accent-2);font-family:var(--cb-mono);font-size:9px;text-decoration:none;}',
-'.cb-ig-link:hover{text-decoration:underline;}',
-'.cb-daily-empty{border:1px dashed var(--cb-line);border-radius:11px;padding:20px;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;line-height:1.5;}',
-'@media(max-width:780px){.cb-daily{inset:8px}.cb-daily-head{padding:13px}.cb-daily-sub{display:none}.cb-daily-body{grid-template-columns:1fr;padding:14px}.cb-daily-title{font-size:15px}.cb-daily-btn{padding:7px 8px}.cb-daily-open{padding:6px;font-size:0}.cb-daily-open::after{content:"Brief";font-size:9px;}}',
+'/* Daily Brief: compact card at the bottom of the right panel. */',
+'.cb-flex--brief{flex:0 0 auto;border:1px solid var(--cb-line);border-radius:12px;padding:0;overflow:hidden;background:rgba(255,255,255,.018);}',
+'.cb-brief-head{width:100%;border:0;background:transparent;color:inherit;padding:11px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;text-align:left;}',
+'.cb-brief-title{font-family:var(--cb-disp);font-size:12px;font-weight:650;letter-spacing:.12em;color:#fff;}',
+'.cb-brief-check{margin-left:auto;font-family:var(--cb-mono);font-size:8.5px;color:var(--cb-faint);}',
+'.cb-brief-check.stale{color:var(--cb-error);}',
+'.cb-brief-arrow{font-size:12px;color:var(--cb-muted);transition:transform .18s;}',
+'.cb-flex--brief.cb-expanded .cb-brief-arrow{transform:rotate(90deg);}',
+'.cb-brief-summary{padding:0 12px 11px;display:flex;flex-direction:column;gap:6px;}',
+'.cb-brief-summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;font-size:11px;color:var(--cb-text);}',
+'.cb-brief-summary-row strong{font-weight:500;color:#fff;}',
+'.cb-brief-details{border-top:1px solid var(--cb-line2);padding:10px 12px;max-height:285px;overflow:auto;}',
+'.cb-brief-section+.cb-brief-section{margin-top:12px;}',
+'.cb-brief-section-title{font-family:var(--cb-mono);font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--cb-muted);margin-bottom:6px;}',
+'.cb-brief-account{margin:7px 0 4px;}',
+'.cb-brief-item{display:grid;grid-template-columns:7px minmax(0,1fr) auto;gap:6px;align-items:center;padding:4px 0;font-size:10px;color:var(--cb-text);}',
+'.cb-brief-importance{width:6px;height:6px;border-radius:50%;background:var(--cb-faint);}',
+'.cb-brief-importance.alta{background:var(--cb-error);}.cb-brief-importance.media{background:var(--cb-accent);}.cb-brief-importance.bassa{background:var(--cb-faint);}',
+'.cb-brief-copy{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+'.cb-brief-copy strong{color:#fff;font-weight:550;}.cb-brief-copy span{color:var(--cb-muted);}',
+'.cb-brief-when{font-family:var(--cb-mono);font-size:8px;color:var(--cb-faint);white-space:nowrap;}',
+'.cb-brief-empty,.cb-brief-more{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);padding:3px 0;}',
 ''
     ].join('\n');
     var s = el('style'); s.id = 'cb-styles'; s.textContent = css;
@@ -661,68 +650,78 @@
   }
 
   /* ── DOM scaffold ──────────────────────────────────────────────────────── */
-  function dailyTime(value) {
-    var date = new Date(value || '');
-    if (Number.isNaN(date.getTime())) return String(value || '');
-    return date.toLocaleString('it-IT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  function briefTime(value) {
+    var parsed = new Date(value || '');
+    if (Number.isNaN(parsed.getTime())) return '--:--';
+    return parsed.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function briefTrim(value, limit) {
+    var text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > limit ? text.slice(0, limit - 1) + '…' : text;
   }
 
   function renderDailyBrief(data) {
-    var body = $('cbDailyBody');
-    if (!body) return;
-    var groups = (data && data.briefs) || [];
-    var replies = (data && data.ig_replies) || [];
-    var briefsHtml = groups.length ? groups.map(function (group, groupIndex) {
-      var items = (group && group.items) || [];
-      return '<div class="cb-daily-day"><div class="cb-daily-day-label">' + esc(group.date || '') + '</div>' +
-        items.map(function (item, itemIndex) {
-          var failed = item.status === 'failed';
-          return '<details class="cb-brief-row"' + (groupIndex === 0 && itemIndex === 0 ? ' open' : '') + '>' +
-            '<summary><span class="cb-brief-state' + (failed ? ' failed' : '') + '"></span>' +
-              '<span class="cb-brief-main"><span class="cb-brief-task">' + esc(item.task || 'Delega') + '</span>' +
-              '<span class="cb-brief-meta">' + esc(item.agent || 'agente') + ' · ' + esc(failed ? 'fallita' : 'completata') + '</span></span>' +
-              '<span class="cb-brief-time">' + esc(dailyTime(item.timestamp)) + '</span></summary>' +
-            '<div class="cb-brief-detail">' + esc(item.outcome || 'Nessun dettaglio disponibile.') + '</div></details>';
-        }).join('') + '</div>';
-    }).join('') : '<div class="cb-daily-empty">Nessuna delega completata negli ultimi 7 giorni.</div>';
-    var repliesHtml;
-    if (replies.length) {
-      repliesHtml = replies.map(function (reply) {
-        var notionId = String(reply.notionPageId || '').replace(/-/g, '');
-        var notion = notionId ? '<a class="cb-ig-link" href="https://www.notion.so/' + encodeURIComponent(notionId) + '" target="_blank" rel="noopener noreferrer">Apri riga CRM Notion ↗</a>' : '';
-        return '<article class="cb-ig-reply"><div class="cb-ig-handle">@' + esc(reply.handle || '') + '</div>' +
-          '<div class="cb-ig-meta">' + esc(dailyTime(reply.timestamp)) + '</div>' +
-          '<div class="cb-ig-text">' + esc(reply.text || '') + '</div>' + notion + '</article>';
+    var card = $('cbBrief');
+    var check = $('cbBriefCheck');
+    var summary = $('cbBriefSummary');
+    var details = $('cbBriefDetails');
+    if (!card || !check || !summary || !details) return;
+    var email = (data && data.email) || { count: 0, noiseSkipped: 0, accounts: [], items: [] };
+    var ig = (data && data.ig) || { count: 0, items: [] };
+    var stale = !data || data.stale !== false;
+    check.classList.toggle('stale', stale);
+    check.textContent = data && data.lastRun
+      ? 'ultimo check: ' + briefTime(data.lastRun) + (stale ? ' · stale' : '')
+      : 'mai eseguito';
+    summary.innerHTML =
+      '<div class="cb-brief-summary-row"><span>Email oggi</span><strong>' + Number(email.count || 0) + ' nuove · ' + Number(email.noiseSkipped || 0) + ' filtrate</strong></div>' +
+      '<div class="cb-brief-summary-row"><span>DM Instagram</span><strong>' + Number(ig.count || 0) + ' risposte</strong></div>';
+
+    var visibleEmails = (email.items || []).slice(0, 15);
+    var grouped = {};
+    visibleEmails.forEach(function (item) {
+      var account = String(item.account || 'account');
+      if (!grouped[account]) grouped[account] = [];
+      grouped[account].push(item);
+    });
+    var emailHtml = visibleEmails.length ? Object.keys(grouped).map(function (account) {
+      return '<div class="cb-brief-account"><span class="cb-flex-tag">' + esc(account) + '</span></div>' + grouped[account].map(function (item) {
+        var sender = briefTrim(item.fromName || item.from, 48);
+        return '<div class="cb-brief-item"><span class="cb-brief-importance ' + esc(item.importance || 'media') + '"></span>' +
+          '<span class="cb-brief-copy"><strong>' + esc(sender) + '</strong> <span>· ' + esc(briefTrim(item.subject, 90)) + '</span></span>' +
+          '<span class="cb-brief-when">' + esc(briefTime(item.receivedAt)) + '</span></div>';
       }).join('');
-    } else if (data && data.checkDmNotInitialized) {
-      repliesHtml = '<div class="cb-daily-empty">Check DM non ancora inizializzato. Esegui il primo check-dm per creare l’artefatto locale.</div>';
-    } else if (data && data.checkDmMalformed) {
-      repliesHtml = '<div class="cb-daily-empty">Artefatto check-dm non leggibile. Nessuna risposta mostrata.</div>';
-    } else {
-      repliesHtml = '<div class="cb-daily-empty">Nessuna nuova risposta Instagram rilevata.</div>';
-    }
-    body.innerHTML = '<section class="cb-daily-section"><h2>Brief del giorno</h2>' + briefsHtml + '</section>' +
-      '<section class="cb-daily-section"><h2>Risposte IG</h2>' + repliesHtml + '</section>';
+    }).join('') : '<div class="cb-brief-empty">nessuna email rilevante oggi</div>';
+    var extraEmails = Math.max(0, Number(email.count || 0) - visibleEmails.length);
+    if (extraEmails) emailHtml += '<div class="cb-brief-more">+' + extraEmails + ' altre</div>';
+
+    var replies = (ig.items || []).slice(0, 10);
+    var igHtml = replies.length ? replies.map(function (reply) {
+      return '<div class="cb-brief-item"><span class="cb-brief-importance media"></span>' +
+        '<span class="cb-brief-copy"><strong>@' + esc(briefTrim(reply.handle, 40)) + '</strong> <span>· ' + esc(briefTrim(reply.text, 120)) + '</span></span>' +
+        '<span class="cb-brief-when">' + esc(briefTime(reply.timestamp)) + '</span></div>';
+    }).join('') : '<div class="cb-brief-empty">nessuna risposta nuova</div>';
+    var extraReplies = Math.max(0, Number(ig.count || 0) - replies.length);
+    if (extraReplies) igHtml += '<div class="cb-brief-more">+' + extraReplies + ' altre</div>';
+    details.innerHTML =
+      '<section class="cb-brief-section"><div class="cb-brief-section-title">Email</div>' + emailHtml + '</section>' +
+      '<section class="cb-brief-section"><div class="cb-brief-section-title">DM Instagram</div>' + igHtml + '</section>';
   }
 
   function refreshDailyBrief() {
-    var body = $('cbDailyBody');
-    if (body) body.innerHTML = '<div class="cb-loading">caricamento brief…</div>';
-    return api('/api/bridge/prime/daily-brief').then(renderDailyBrief).catch(function () {
-      if (body) body.innerHTML = '<div class="cb-daily-empty">Daily Brief non disponibile.</div>';
+    return api('api/bridge/daily-brief').then(renderDailyBrief).catch(function () {
+      renderDailyBrief(null);
     });
   }
 
-  function openDailyBrief() {
-    var panel = $('cbDaily');
-    if (!panel) return Promise.resolve();
-    panel.hidden = false;
-    return refreshDailyBrief();
-  }
-
-  function closeDailyBrief() {
-    var panel = $('cbDaily');
-    if (panel) panel.hidden = true;
+  function toggleDailyBrief() {
+    var card = $('cbBrief'), details = $('cbBriefDetails'), head = $('cbBriefHead');
+    if (!card || !details || !head) return;
+    var expanded = !card.classList.contains('cb-expanded');
+    card.classList.toggle('cb-expanded', expanded);
+    details.hidden = !expanded;
+    head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   }
 
   function build() {
@@ -737,11 +736,6 @@
         '<span class="cb-qt-dot" aria-hidden="true"></span>' +
         '<span id="cbQuotaTimerText"></span>' +
       '</div>' +
-      '<section class="cb-daily" id="cbDaily" hidden aria-label="Daily Brief">' +
-        '<div class="cb-daily-head"><div><div class="cb-daily-title">Daily Brief</div><div class="cb-daily-sub">deleghe completate · risposte Instagram</div></div>' +
-          '<div class="cb-daily-actions"><button type="button" class="cb-daily-btn" id="cbDailyRefresh">Aggiorna</button><button type="button" class="cb-daily-btn" id="cbDailyClose">Chiudi</button></div></div>' +
-        '<div class="cb-daily-body" id="cbDailyBody"><div class="cb-loading">caricamento brief…</div></div>' +
-      '</section>' +
       '<div class="cb-hero" id="cbHero">' +
         '<aside class="cb-chat" id="cbChat">' +
           '<div class="cb-chat-head"><span class="cb-dot"></span><div style="flex:1;min-width:0">' +
@@ -749,7 +743,6 @@
             '<div class="cb-chat-role"></div>' +
           '</div>' +
             '<span class="cb-quota" id="cbQuotaPill" hidden></span>' +
-            '<button type="button" class="cb-daily-open" id="cbDailyOpen" title="Apri Daily Brief">Daily Brief</button>' +
             '<div class="cb-brainctl" id="cbBrainCtl">' +
               '<select class="cb-brainsel" id="cbBrainSel" aria-label="Modello o brain di Hermes Prime" title="Scegli il modello di Hermes Prime">' +
                 '<optgroup label="Claude (inclusi nel piano)">' +
@@ -819,6 +812,17 @@
             '<div class="cb-planet" id="cbPlanet"></div>' +
               '<div class="cb-stats" id="cbStats"></div>' +
             '</div>' +
+            '<section class="cb-flex cb-flex--brief" id="cbBrief" aria-label="Daily Brief">' +
+              '<button type="button" class="cb-brief-head" id="cbBriefHead" aria-expanded="false" aria-controls="cbBriefDetails">' +
+                '<span class="cb-brief-arrow" aria-hidden="true">&#9656;</span><span class="cb-brief-title">DAILY BRIEF</span>' +
+                '<span class="cb-brief-check stale" id="cbBriefCheck">mai eseguito</span>' +
+              '</button>' +
+              '<div class="cb-brief-summary" id="cbBriefSummary">' +
+                '<div class="cb-brief-summary-row"><span>Email oggi</span><strong>0 nuove · 0 filtrate</strong></div>' +
+                '<div class="cb-brief-summary-row"><span>DM Instagram</span><strong>0 risposte</strong></div>' +
+              '</div>' +
+              '<div class="cb-brief-details" id="cbBriefDetails" hidden></div>' +
+            '</section>' +
           '</div>' +
         '</section>' +
       '</div>' +
@@ -836,10 +840,8 @@
     if (memToggle && hero) memToggle.addEventListener('click', function () { hero.classList.toggle('cb-mem-collapsed'); });
     var repoRefresh = $('cbRepoRefresh');
     if (repoRefresh) repoRefresh.addEventListener('click', refreshRepoStatus);
-    var dailyOpen = $('cbDailyOpen'), dailyRefresh = $('cbDailyRefresh'), dailyClose = $('cbDailyClose');
-    if (dailyOpen) dailyOpen.addEventListener('click', openDailyBrief);
-    if (dailyRefresh) dailyRefresh.addEventListener('click', refreshDailyBrief);
-    if (dailyClose) dailyClose.addEventListener('click', closeDailyBrief);
+    var briefHead = $('cbBriefHead');
+    if (briefHead) briefHead.addEventListener('click', toggleDailyBrief);
     // Delegazione click pillola rossa → segnale deploy a Prime
     var repoList = $('cbRepoList');
     if (repoList) repoList.addEventListener('click', function (ev) {
@@ -1420,8 +1422,14 @@
   }
   function startAgentsPolling() { if (!_cbAgentsTimer) _cbAgentsTimer = setInterval(pollAgents, 30000); }
   var _cbWorklogTimer = null;
+  var _cbBriefPollTicks = 0;
   function pollWorklog() {
     api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {});
+    _cbBriefPollTicks += 1;
+    if (_cbBriefPollTicks >= 10) {
+      _cbBriefPollTicks = 0;
+      refreshDailyBrief();
+    }
   }
   function startWorklogPolling() { if (!_cbWorklogTimer) _cbWorklogTimer = setInterval(pollWorklog, 60000); }
   var _cbQuotaTimer = null;
@@ -2867,6 +2875,7 @@
     api('api/bridge/worklog?days=14').then(renderWorklog).catch(function () {
       var box = $('cbFlex'); if (box) box.innerHTML = '<div class="cb-empty">work log non disponibile</div>';
     });
+    refreshDailyBrief();
   }
 
   /* ── Hermes Prime petal-core (canvas 2D) ───────────────────────────────────
@@ -3042,13 +3051,6 @@
   }
 
   /* ── entry point (called by switchPanel) ───────────────────────────────── */
-  window.openCommandBridgeDailyBrief = function () {
-    var switched = (typeof window.switchPanel === 'function') ? window.switchPanel('bridge') : Promise.resolve();
-    return Promise.resolve(switched).then(function () {
-      return Promise.resolve(window.loadCommandBridge()).then(openDailyBrief);
-    });
-  };
-
   window.loadCommandBridge = function () {
     if (!BUILT) { if (!build()) return Promise.resolve(); }
     loadPrimeHistory();
