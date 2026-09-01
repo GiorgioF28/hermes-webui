@@ -27,8 +27,8 @@ def _write_gateway(profiles_root, profile, now, *, running=True, active=0, disco
 def test_agent_registry_excludes_system_notes_and_parses_role_model(tmp_path):
     _write_agent(
         tmp_path,
-        "QA Reviewer",
-        "# Agent: QA Reviewer\n\n## Ruolo\nControlla regressioni e qualita.\n\nModello: claude-sonnet-4-6\n",
+        "Programmatore Project Engineer",
+        "# Agent: Programmatore Project Engineer\n\n## Ruolo\nControlla regressioni e qualita.\n\nModello: claude-sonnet-4-6\n",
     )
     _write_agent(tmp_path, "README", "# Hermes Agents\n")
     _write_agent(tmp_path, "Agent Handoff Protocol", "# Agent Handoff Protocol\n")
@@ -40,19 +40,61 @@ def test_agent_registry_excludes_system_notes_and_parses_role_model(tmp_path):
     assert data["exists"] is True
     assert data["count"] == 1
     agent = data["agents"][0]
-    assert agent["id"] == "qa-reviewer"
-    assert agent["name"] == "QA Reviewer"
+    assert agent["id"] == "programmatore-project-engineer"
+    assert agent["name"] == "Programmatore Project Engineer"
     assert agent["role"] == "Controlla regressioni e qualita."
     assert agent["model"] == "claude-sonnet-4-6"
     assert agent["state"] == "dormiente"
     assert agent["last_used"] is None
 
 
+def test_agent_registry_keeps_only_operational_agents(tmp_path):
+    """The payload exposed to the UI contains exactly the six delegable agents."""
+    _write_agent(tmp_path, "Hermes Prime - Chief of Staff", "# Agent: Hermes Prime - Chief of Staff\n")
+    _write_agent(tmp_path, "Research Analyst", "# Agent: Research Analyst\n\n## Ruolo\nResearch.\n")
+    _write_agent(tmp_path, "Memory Librarian", "# Agent: Memory Librarian\n\n## Ruolo\nMemoria.\n")
+    _write_agent(tmp_path, "Programmatore Project Engineer", "# Agent: Programmatore Project Engineer\n")
+    _write_agent(tmp_path, "Social Client Contact", "# Agent: Social Client Contact\n")
+    _write_agent(tmp_path, "Orchestratore", "# Agent: Orchestratore\n")
+    _write_agent(tmp_path, "QA Reviewer", "# Agent: QA Reviewer\n\n## Ruolo\nQA.\n")
+    _write_agent(tmp_path, "Business Strategist", "# Agent: Business Strategist\n\n## Ruolo\nBusiness.\n")
+    _write_agent(tmp_path, "PDF Ebook Designer", "# Agent: PDF Ebook Designer\n\n## Ruolo\nPDF.\n")
+    _write_agent(tmp_path, "Social Outreach Playbook VisionBuilts", "# Playbook\n")
+
+    data = agent_registry.get_operational_agent_registry(tmp_path)
+
+    exposed_slugs = {agent["id"] for agent in data["agents"]}
+    assert data["count"] == 6
+    assert exposed_slugs == agent_registry.OPERATIONAL_AGENT_SLUGS
+    assert "qa-reviewer" not in exposed_slugs
+    assert "business-strategist" not in exposed_slugs
+
+
+def test_agent_registry_folds_alias_usage_into_canonical_agent(monkeypatch, tmp_path):
+    """La nota alias `ricercatore` non e' una riga a se': il suo uso e' del Research Analyst."""
+    now = 1_700_000_000.0
+    monkeypatch.setattr(agent_registry.time, "time", lambda: now)
+    _write_agent(tmp_path, "Research Analyst", "# Agent: Research Analyst\n\n## Ruolo\nResearch.\n")
+    _write_agent(tmp_path, "ricercatore", "# Agent: Ricercatore\n\nAlias di Research Analyst.\n")
+    usage = tmp_path / "tasks" / "agent-usage.jsonl"
+    usage.parent.mkdir()
+    usage.write_text(
+        json.dumps({"ts": now - 60, "agent_id": "ricercatore", "task_type": "ricerca", "task_id": "d1"}),
+        encoding="utf-8",
+    )
+
+    agents = agent_registry.get_operational_agent_registry(tmp_path)["agents"]
+
+    assert [a["id"] for a in agents] == ["research-analyst"]
+    assert agents[0]["state"] == "vivo"
+    assert agents[0]["last_used"]["rel"] == "1m fa"
+
+
 def test_agent_registry_marks_live_and_sorts_live_first(monkeypatch, tmp_path):
     now = 1_700_000_000.0
     monkeypatch.setattr(agent_registry.time, "time", lambda: now)
-    _write_agent(tmp_path, "QA Reviewer", "# Agent: QA Reviewer\n\n## Ruolo\nQA.\n")
-    _write_agent(tmp_path, "Business Strategist", "# Agent: Business Strategist\n\n## Ruolo\nBusiness.\n")
+    _write_agent(tmp_path, "Memory Librarian", "# Agent: Memory Librarian\n\n## Ruolo\nMemoria.\n")
+    _write_agent(tmp_path, "Orchestratore", "# Agent: Orchestratore\n\n## Ruolo\nCoordina.\n")
     _write_agent(tmp_path, "Research Analyst", "# Agent: Research Analyst\n\n## Ruolo\nResearch.\n")
     usage = tmp_path / "tasks" / "agent-usage.jsonl"
     usage.parent.mkdir()
@@ -60,7 +102,7 @@ def test_agent_registry_marks_live_and_sorts_live_first(monkeypatch, tmp_path):
         "\n".join(
             [
                 json.dumps({"ts": now - 60, "agent_id": "research-analyst", "task_type": "ricerca", "task_id": "d1"}),
-                json.dumps({"ts": now - 15 * 86400, "agent_id": "qa-reviewer", "task_type": "qa", "task_id": "d2"}),
+                json.dumps({"ts": now - 15 * 86400, "agent_id": "memory-librarian", "task_type": "memoria", "task_id": "d2"}),
             ]
         ),
         encoding="utf-8",
@@ -68,7 +110,7 @@ def test_agent_registry_marks_live_and_sorts_live_first(monkeypatch, tmp_path):
 
     agents = agent_registry.build_agent_registry(tmp_path)["agents"]
 
-    assert [a["name"] for a in agents] == ["Research Analyst", "QA Reviewer", "Business Strategist"]
+    assert [a["name"] for a in agents] == ["Research Analyst", "Memory Librarian", "Orchestratore"]
     assert agents[0]["state"] == "vivo"
     assert agents[0]["last_used"]["rel"] == "1m fa"
     assert agents[1]["state"] == "dormiente"

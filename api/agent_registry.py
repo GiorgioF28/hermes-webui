@@ -36,6 +36,19 @@ _EXCLUDED_STEMS = {
     "regole operative agenti",
     "censimento agenti operativi",
 }
+
+# Agenti realmente delegabili (quelli con un pianeta nel Command Bridge).
+# Tutto il resto in 06-Agents e' documentazione, playbook o persona: NON va
+# contato come agente vivo, altrimenti il badge dice "6/17" invece di "6/6".
+PRIME_AGENT_SLUG = "hermes-prime-chief-of-staff"
+OPERATIONAL_AGENT_SLUGS = frozenset(PROFILE_TO_AGENT_SLUG.values()) | {PRIME_AGENT_SLUG}
+
+# Note di compatibilita' (tag ``type/agent-alias``): non sono agenti a se',
+# ma il log d'uso puo' registrarli con lo slug dell'alias. Il loro ultimo uso
+# viene fuso nell'agente canonico invece di creare una riga doppia.
+AGENT_SLUG_ALIASES = {
+    "ricercatore": "research-analyst",
+}
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.M)
 _SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
 _FIELD_RE = re.compile(r"^(?:[-*]\s*)?\**([^:\n]+?)\**\s*:\s*(.+?)\s*$", re.M)
@@ -252,8 +265,15 @@ def build_agent_registry(workspace_path) -> dict:
         if path.stem.strip().lower() in _EXCLUDED_STEMS:
             continue
         agent = parse_agent_note(path)
-        used = usage.get(agent["id"]) or usage.get(_slug(path.stem))
-        ts = float(used.get("ts") or 0) if used else 0.0
+        # Fondi l'uso registrato sotto gli alias (es. "ricercatore" -> "research-analyst").
+        usage_keys = [agent["id"], _slug(path.stem)]
+        usage_keys.extend(
+            alias for alias, canonical in AGENT_SLUG_ALIASES.items() if canonical == agent["id"]
+        )
+        ts = max(
+            (float((usage.get(key) or {}).get("ts") or 0) for key in usage_keys),
+            default=0.0,
+        )
         usage_live = bool(ts and (now - ts) <= LIVE_WINDOW_SECONDS)
         usage_active = bool(ts and (now - ts) <= ACTIVE_USAGE_WINDOW_SECONDS)
         gateway = gateways.get(agent["id"])
@@ -280,16 +300,19 @@ def build_agent_registry(workspace_path) -> dict:
             "discord": None,
         }
         agent["last_used"] = {"ts": _iso(ts), "rel": _rel_time(ts, now)} if ts else None
+        agent["_usage_ts"] = ts
         agents.append(agent)
 
     state_priority = {"attivo": 0, "in_attesa": 1, "vivo": 2, "dormiente": 3}
     agents.sort(
         key=lambda a: (
             state_priority.get(a["state"], 3),
-            -float((usage.get(a["id"]) or {}).get("ts") or 0),
+            -float(a.get("_usage_ts") or 0),
             a["name"].lower(),
         )
     )
+    for agent in agents:
+        agent.pop("_usage_ts", None)
     return {"ok": True, "agents": agents, "count": len(agents), "exists": True}
 
 
@@ -309,6 +332,17 @@ def get_agent_registry(workspace_path) -> dict:
     with _cache_lock:
         _cache[key] = (now, sig, data)
     return data
+
+
+def get_operational_agent_registry(workspace_path) -> dict:
+    """Return the UI payload restricted to the six delegable agents."""
+    data = get_agent_registry(workspace_path)
+    agents = [
+        agent
+        for agent in data.get("agents", [])
+        if agent.get("id") in OPERATIONAL_AGENT_SLUGS
+    ]
+    return {**data, "agents": agents, "count": len(agents)}
 
 
 def record_agent_usage(workspace_path, agent_id: str, task_type: str, task_id: str) -> None:

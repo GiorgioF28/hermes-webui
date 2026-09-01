@@ -11118,7 +11118,7 @@ def _handle_bridge_agents(handler, parsed):
     """GET /api/bridge/agents — registro vivo/dormiente degli agenti Hermes."""
     try:
         from api import agent_registry
-        data = agent_registry.get_agent_registry(Path(str(DEFAULT_WORKSPACE)))
+        data = agent_registry.get_operational_agent_registry(Path(str(DEFAULT_WORKSPACE)))
     except Exception as exc:
         logger.exception("bridge agents failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
