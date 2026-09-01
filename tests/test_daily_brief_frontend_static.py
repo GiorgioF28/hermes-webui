@@ -30,6 +30,15 @@ def test_daily_brief_enforces_visible_row_and_text_limits():
     assert "briefTrim(reply.text, 120)" in BRIDGE
 
 
+def test_daily_brief_sorts_importance_and_renders_v2_analysis_additively():
+    assert "importanceRank = { alta: 0, media: 1, bassa: 2 }" in BRIDGE
+    assert "cb-brief-mailbox" in BRIDGE
+    assert "item.summary ?" in BRIDGE
+    assert "item.why ?" in BRIDGE
+    assert "briefTrim(item.summary, 400)" in BRIDGE
+    assert "briefTrim(item.why, 200)" in BRIDGE
+
+
 def test_daily_brief_reuses_worklog_polling_timer_at_ten_minutes():
     assert "_cbBriefPollTicks += 1" in BRIDGE
     assert "_cbBriefPollTicks >= 10" in BRIDGE

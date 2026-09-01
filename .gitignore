@@ -68,6 +68,7 @@ graphify-out/
 
 # Daily Brief runtime state (directory retained via data/.gitkeep).
 data/daily-email-digest.json
+data/email-inbox-accumulator.json
 data/email-noise-list.json
 data/daily-brief-run.json
 data/email-vip.json

@@ -641,12 +641,14 @@
 '.cb-brief-details{border-top:1px solid var(--cb-line2);padding:10px 12px;max-height:285px;overflow:auto;}',
 '.cb-brief-section+.cb-brief-section{margin-top:12px;}',
 '.cb-brief-section-title{font-family:var(--cb-mono);font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--cb-muted);margin-bottom:6px;}',
-'.cb-brief-account{margin:7px 0 4px;}',
 '.cb-brief-item{display:grid;grid-template-columns:7px minmax(0,1fr) auto;gap:6px;align-items:center;padding:4px 0;font-size:10px;color:var(--cb-text);}',
 '.cb-brief-importance{width:6px;height:6px;border-radius:50%;background:var(--cb-faint);}',
 '.cb-brief-importance.alta{background:var(--cb-error);}.cb-brief-importance.media{background:var(--cb-accent);}.cb-brief-importance.bassa{background:var(--cb-faint);}',
-'.cb-brief-copy{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-'.cb-brief-copy strong{color:#fff;font-weight:550;}.cb-brief-copy span{color:var(--cb-muted);}',
+'.cb-brief-copy{min-width:0;line-height:1.35;}',
+'.cb-brief-copy strong{color:#fff;font-weight:550;}.cb-brief-subject{color:var(--cb-muted);}',
+'.cb-brief-mailbox{display:inline-block;margin-right:5px;vertical-align:1px;}',
+'.cb-brief-analysis{display:block;margin-top:2px;color:var(--cb-text);}',
+'.cb-brief-why{display:block;margin-top:1px;color:var(--cb-muted);font-style:italic;}',
 '.cb-brief-when{font-family:var(--cb-mono);font-size:8px;color:var(--cb-faint);white-space:nowrap;}',
 '.cb-brief-empty,.cb-brief-more{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);padding:3px 0;}',
 ''
@@ -684,20 +686,21 @@
       '<div class="cb-brief-summary-row"><span>Email oggi</span><strong>' + Number(email.count || 0) + ' nuove · ' + Number(email.noiseSkipped || 0) + ' filtrate</strong></div>' +
       '<div class="cb-brief-summary-row"><span>DM Instagram</span><strong>' + Number(ig.count || 0) + ' risposte</strong></div>';
 
-    var visibleEmails = (email.items || []).slice(0, 15);
-    var grouped = {};
-    visibleEmails.forEach(function (item) {
-      var account = String(item.account || 'account');
-      if (!grouped[account]) grouped[account] = [];
-      grouped[account].push(item);
-    });
-    var emailHtml = visibleEmails.length ? Object.keys(grouped).map(function (account) {
-      return '<div class="cb-brief-account"><span class="cb-flex-tag">' + esc(account) + '</span></div>' + grouped[account].map(function (item) {
-        var sender = briefTrim(item.fromName || item.from, 48);
-        return '<div class="cb-brief-item"><span class="cb-brief-importance ' + esc(item.importance || 'media') + '"></span>' +
-          '<span class="cb-brief-copy"><strong>' + esc(sender) + '</strong> <span>· ' + esc(briefTrim(item.subject, 90)) + '</span></span>' +
-          '<span class="cb-brief-when">' + esc(briefTime(item.receivedAt)) + '</span></div>';
-      }).join('');
+    var importanceRank = { alta: 0, media: 1, bassa: 2 };
+    var visibleEmails = (email.items || []).slice().sort(function (left, right) {
+      var rankDiff = (importanceRank[left.importance] ?? 1) - (importanceRank[right.importance] ?? 1);
+      if (rankDiff) return rankDiff;
+      return String(right.receivedAt || '').localeCompare(String(left.receivedAt || ''));
+    }).slice(0, 15);
+    var emailHtml = visibleEmails.length ? visibleEmails.map(function (item) {
+      var sender = briefTrim(item.fromName || item.from, 48);
+      var summaryLine = item.summary ? '<span class="cb-brief-analysis">' + esc(briefTrim(item.summary, 400)) + '</span>' : '';
+      var whyLine = item.why ? '<span class="cb-brief-why">Perché conta: ' + esc(briefTrim(item.why, 200)) + '</span>' : '';
+      return '<div class="cb-brief-item"><span class="cb-brief-importance ' + esc(item.importance || 'media') + '"></span>' +
+        '<span class="cb-brief-copy"><span class="cb-flex-tag cb-brief-mailbox">' + esc(item.account || 'account') + '</span>' +
+        '<strong>' + esc(sender) + '</strong> <span class="cb-brief-subject">· ' + esc(briefTrim(item.subject, 90)) + '</span>' +
+        summaryLine + whyLine + '</span>' +
+        '<span class="cb-brief-when">' + esc(briefTime(item.receivedAt)) + '</span></div>';
     }).join('') : '<div class="cb-brief-empty">nessuna email rilevante oggi</div>';
     var extraEmails = Math.max(0, Number(email.count || 0) - visibleEmails.length);
     if (extraEmails) emailHtml += '<div class="cb-brief-more">+' + extraEmails + ' altre</div>';

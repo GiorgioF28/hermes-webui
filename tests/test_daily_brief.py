@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 from api import routes
 from api.daily_brief import (
+    ACCUMULATOR_FILENAME,
+    accumulate_email_inbox,
     build_daily_brief_payload,
     handle_cron_daily_brief,
     ingest_email_digest,
@@ -62,8 +64,8 @@ def test_ingest_filters_out_email_outside_current_rome_day(tmp_path: Path):
     }, now=NOW)
 
     stored = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
-    assert result == {"ok": True, "stored": 1, "skipped": 1}
-    assert [row["from"] for row in stored["emails"]] == ["person@example.test"]
+    assert result == {"ok": True, "stored": 2, "skipped": 0, "analysed": 2}
+    assert [row["from"] for row in stored["emails"]] == ["person@example.test", "old@example.test"]
 
 
 def test_noise_list_filters_sender_after_three_hits(tmp_path: Path):
@@ -75,7 +77,91 @@ def test_noise_list_filters_sender_after_three_hits(tmp_path: Path):
     assert noise["senders"][0]["hits"] == 3
     assert matches_noise(_email(), noise) is True
     result = ingest_email_digest(tmp_path, {"accounts": [], "emails": [_email()]}, now=NOW + timedelta(days=2))
-    assert result == {"ok": True, "stored": 0, "skipped": 1}
+    assert result == {"ok": True, "stored": 0, "skipped": 1, "analysed": 0}
+
+
+def test_accumulator_dedupes_prunes_caps_and_cleans_body(tmp_path: Path):
+    rows = []
+    for index in range(405):
+        rows.append(_email(
+            messageId=f"message-{index}",
+            receivedAt=(NOW - timedelta(seconds=index)).isoformat(),
+            bodyExcerpt="A\x00  body\n\t" + ("x" * 2200),
+        ))
+    rows.append(_email(messageId="expired", receivedAt=(NOW - timedelta(hours=49)).isoformat()))
+
+    result = accumulate_email_inbox(tmp_path, {"emails": rows}, now=NOW)
+    duplicate = accumulate_email_inbox(tmp_path, {"emails": [rows[0]]}, now=NOW)
+    stored = json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
+
+    assert result == {"ok": True, "added": 400, "total": 400, "skipped": 6}
+    assert duplicate == {"ok": True, "added": 0, "total": 400, "skipped": 1}
+    assert len(stored["items"]) == 400
+    assert stored["items"][0]["messageId"] == "message-0"
+    assert "\x00" not in stored["items"][0]["bodyExcerpt"]
+    assert "\n" not in stored["items"][0]["bodyExcerpt"]
+    assert len(stored["items"][0]["bodyExcerpt"]) <= 2000
+    assert stored["items"][0]["bodyExcerpt"].startswith("A body")
+
+
+def test_digest_merges_accumulator_and_flushes_only_consumed_items(tmp_path: Path):
+    consumed = _email(
+        account="yahoo-personale",
+        messageId="consumed",
+        receivedAt="2026-09-01T07:00:00Z",
+        bodyExcerpt="Dettaglio riservato alla sola analisi",
+    )
+    accumulate_email_inbox(tmp_path, {"emails": [consumed]}, now=NOW)
+
+    def analyse_with_concurrent_arrival(emails, **_kwargs):
+        future = _email(
+            account="gmail-secondario",
+            messageId="future",
+            receivedAt="2026-09-01T09:00:00Z",
+            bodyExcerpt="Arrivata dopo il cutoff",
+        )
+        accumulate_email_inbox(tmp_path, {"emails": [future]}, now=NOW + timedelta(hours=1))
+        return ([{"importance": "alta", "summary": "Serve una decisione.", "why": "richiede risposta"}], "prime", None)
+
+    with patch("api.email_analysis.analyse_emails", side_effect=analyse_with_concurrent_arrival):
+        result = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+
+    digest = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
+    accumulator = json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
+    assert result == {"ok": True, "stored": 1, "skipped": 0, "analysed": 1}
+    assert digest["version"] == 2
+    assert digest["analysisEngine"] == "prime"
+    assert digest["emails"][0]["summary"] == "Serve una decisione."
+    assert digest["emails"][0]["why"] == "richiede risposta"
+    assert "bodyExcerpt" not in json.dumps(digest)
+    assert [row["messageId"] for row in accumulator["items"]] == ["future"]
+
+
+def test_analysis_failure_uses_rules_writes_digest_and_flushes(tmp_path: Path):
+    from api.email_analysis import analyse_emails
+
+    row = _email(messageId="fallback", subject="Pagamento urgente", bodyExcerpt="testo")
+    accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
+
+    def failed_analysis(emails, **kwargs):
+        return analyse_emails(
+            emails,
+            vip_senders=kwargs.get("vip_senders"),
+            client_factory=lambda: (_ for _ in ()).throw(TimeoutError()),
+        )
+
+    with patch("api.email_analysis.analyse_emails", side_effect=failed_analysis):
+        result = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+
+    digest = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
+    accumulator = json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
+    assert result["analysed"] == 1
+    assert digest["analysisEngine"] == "rules"
+    assert "TimeoutError" in digest["analysisError"]
+    assert digest["emails"][0]["importance"] == "alta"
+    assert digest["emails"][0]["summary"] == ""
+    assert digest["emails"][0]["why"] == ""
+    assert accumulator["items"] == []
 
 
 def test_noise_merge_is_incremental_atomic_and_prunes_old_entries(tmp_path: Path):
@@ -148,7 +234,7 @@ class FakeHandler:
 
 
 def test_all_cron_endpoints_are_403_when_server_token_is_not_configured(tmp_path: Path):
-    for endpoint in ("email", "noise", "check-dm"):
+    for endpoint in ("email", "email-accumulate", "noise", "check-dm"):
         handler = FakeHandler({"emails": []})
         with patch.dict(os.environ, {}, clear=True):
             assert handle_cron_daily_brief(handler, f"/api/cron/daily-brief/{endpoint}", data_dir=tmp_path) is True
@@ -173,6 +259,15 @@ def test_cron_email_endpoint_accepts_matching_runtime_token_and_writes_atomicall
     assert (tmp_path / "daily-email-digest.json").is_file()
     assert (tmp_path / "daily-brief-run.json").is_file()
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_cron_accumulator_endpoint_requires_token_and_returns_422_for_bad_date(tmp_path: Path):
+    runtime_secret = secrets.token_urlsafe(32)
+    handler = FakeHandler({"emails": [_email(receivedAt="not-a-date")]}, runtime_secret)
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": runtime_secret}, clear=True):
+        handle_cron_daily_brief(handler, "/api/cron/daily-brief/email-accumulate", data_dir=tmp_path)
+    assert handler.status == 422
+    assert not (tmp_path / ACCUMULATOR_FILENAME).exists()
 
 
 def test_cron_noise_endpoint_accepts_matching_runtime_token_and_merges(tmp_path: Path):

@@ -39,7 +39,12 @@ _HIGH_SUBJECT_WORDS = (
 )
 _LOW_SENDER_RE = re.compile(r"(?:noreply|no-reply|newsletter|notifications?@)", re.I)
 _CHECK_DM_COUNT_RE = re.compile(r"Risposte nuove:\s*(\d+)", re.I)
-_WRITE_LOCK = threading.Lock()
+_WRITE_LOCK = threading.RLock()
+ACCUMULATOR_FILENAME = "email-inbox-accumulator.json"
+ACCUMULATOR_MAX_ITEMS = 400
+ACCUMULATOR_MAX_AGE = timedelta(hours=48)
+BODY_EXCERPT_MAX_CHARS = 2000
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 class DailyBriefValidationError(ValueError):
@@ -154,11 +159,15 @@ def read_email_digest(data_dir: Path | str, *, now: float | datetime | None = No
     if not isinstance(raw_emails, list) or not isinstance(raw_accounts, list):
         return _empty_email(), True
     items = []
+    is_v2 = _count(payload.get("version")) >= 2
+    generated = _parse_datetime(payload.get("generatedAt"))
+    if is_v2 and (generated is None or _today_local(generated) != _today_local(current)):
+        return _empty_email(), False
     for raw in raw_emails:
         if not isinstance(raw, dict):
             continue
         received = _parse_datetime(raw.get("receivedAt"))
-        if received is None or _today_local(received) != _today_local(current):
+        if received is None or (not is_v2 and _today_local(received) != _today_local(current)):
             continue
         importance = str(raw.get("importance") or "media").lower()
         if importance not in {"alta", "media", "bassa"}:
@@ -174,6 +183,8 @@ def read_email_digest(data_dir: Path | str, *, now: float | datetime | None = No
             "subject": str(raw.get("subject") or "").strip()[:200],
             "receivedAt": _iso(received),
             "importance": importance,
+            "summary": str(raw.get("summary") or "").strip()[:400],
+            "why": str(raw.get("why") or "").strip()[:200],
         })
     items.sort(key=lambda row: row["receivedAt"], reverse=True)
     accounts = []
@@ -355,6 +366,111 @@ def _normalized_accounts(raw_accounts: Any, emails: list[dict[str, Any]]) -> lis
     return list(accounts.values())
 
 
+def _clean_body_excerpt(value: Any) -> str:
+    text = value[:BODY_EXCERPT_MAX_CHARS] if isinstance(value, str) else ""
+    text = _CONTROL_CHARS_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_email_row(raw: Any, index: int) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise DailyBriefValidationError(f"emails[{index}] must be an object")
+    missing = [
+        field for field in ("account", "from", "subject", "receivedAt")
+        if not isinstance(raw.get(field), str) or not raw[field].strip()
+    ]
+    if missing:
+        raise DailyBriefValidationError(f"emails[{index}] missing: {', '.join(missing)}")
+    received = _parse_datetime(raw["receivedAt"])
+    if received is None:
+        raise DailyBriefValidationError(f"emails[{index}].receivedAt invalid")
+    return {
+        "account": raw["account"].strip()[:100],
+        "messageId": str(raw.get("messageId") or "").strip()[:500],
+        "from": raw["from"].strip()[:320],
+        "fromName": str(raw.get("fromName") or "").strip()[:200],
+        "subject": raw["subject"].strip()[:200],
+        "receivedAt": _iso(received),
+        "bodyExcerpt": _clean_body_excerpt(raw.get("bodyExcerpt")),
+        "listUnsubscribe": bool(raw.get("listUnsubscribe")),
+    }
+
+
+def _email_key(email: dict[str, Any]) -> tuple[Any, ...]:
+    message_id = str(email.get("messageId") or "").strip()
+    if message_id:
+        return ("messageId", message_id)
+    return (
+        "fields",
+        str(email.get("account") or ""),
+        str(email.get("from") or ""),
+        str(email.get("subject") or ""),
+        str(email.get("receivedAt") or ""),
+    )
+
+
+def _load_accumulator(data_dir: Path) -> list[dict[str, Any]]:
+    payload, missing, malformed = _read_json(data_dir / ACCUMULATOR_FILENAME)
+    if missing:
+        return []
+    if malformed or not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        logger.warning("daily brief accumulator malformed; treating it as empty")
+        return []
+    return [row for row in payload["items"] if isinstance(row, dict)]
+
+
+def _write_accumulator(data_dir: Path, items: list[dict[str, Any]], *, now: datetime) -> None:
+    persisted = []
+    for item in items:
+        persisted.append({key: item.get(key, "") for key in (
+            "account", "messageId", "from", "fromName", "subject", "receivedAt", "bodyExcerpt"
+        )})
+    _atomic_write_json(data_dir / ACCUMULATOR_FILENAME, {
+        "version": 1,
+        "updatedAt": _iso(now),
+        "items": persisted,
+    })
+
+
+def accumulate_email_inbox(
+    data_dir: Path | str,
+    body: dict[str, Any],
+    *,
+    now: float | datetime | None = None,
+) -> dict[str, Any]:
+    if not isinstance(body, dict) or not isinstance(body.get("emails"), list):
+        raise DailyBriefValidationError("emails must be a list")
+    current = _now(now)
+    cutoff = current - ACCUMULATOR_MAX_AGE
+    incoming = [_normalize_email_row(raw, index) for index, raw in enumerate(body["emails"])]
+    with _WRITE_LOCK:
+        existing = _load_accumulator(Path(data_dir))
+        combined: dict[tuple[Any, ...], tuple[dict[str, Any], bool]] = {}
+        skipped = 0
+        for row in existing:
+            received = _parse_datetime(row.get("receivedAt"))
+            if received is None or received < cutoff:
+                continue
+            combined[_email_key(row)] = (row, False)
+        for row in incoming:
+            if _parse_datetime(row["receivedAt"]) < cutoff:
+                skipped += 1
+                continue
+            key = _email_key(row)
+            if key in combined:
+                skipped += 1
+                continue
+            combined[key] = (row, True)
+        ordered = sorted(combined.values(), key=lambda pair: pair[0]["receivedAt"], reverse=True)
+        if len(ordered) > ACCUMULATOR_MAX_ITEMS:
+            skipped += sum(1 for _row, is_new in ordered[ACCUMULATOR_MAX_ITEMS:] if is_new)
+            ordered = ordered[:ACCUMULATOR_MAX_ITEMS]
+        items = [row for row, _is_new in ordered]
+        added = sum(1 for _row, is_new in ordered if is_new)
+        _write_accumulator(Path(data_dir), items, now=current)
+    return {"ok": True, "added": added, "total": len(items), "skipped": skipped}
+
+
 def ingest_email_digest(
     data_dir: Path | str,
     body: dict[str, Any],
@@ -365,56 +481,82 @@ def ingest_email_digest(
         raise DailyBriefValidationError("emails must be a list")
     current = _now(now)
     base_dir = Path(data_dir)
-    today = _today_local(current)
+    cutoff = current
     noise = _noise_payload(base_dir)
     vip = _vip_senders(base_dir)
     stored: list[dict[str, Any]] = []
     low_senders: set[str] = set()
-    dropped_old = 0
     noise_dropped = 0
-    for index, raw in enumerate(body["emails"]):
-        if not isinstance(raw, dict):
-            raise DailyBriefValidationError(f"emails[{index}] must be an object")
-        missing = [field for field in ("account", "from", "subject", "receivedAt") if not isinstance(raw.get(field), str) or not raw[field].strip()]
-        if missing:
-            raise DailyBriefValidationError(f"emails[{index}] missing: {', '.join(missing)}")
-        received = _parse_datetime(raw["receivedAt"])
-        if received is None:
-            raise DailyBriefValidationError(f"emails[{index}].receivedAt invalid")
-        if _today_local(received) != today:
-            dropped_old += 1
+    accumulated = _load_accumulator(base_dir)
+    consumed = [row for row in accumulated if (_parse_datetime(row.get("receivedAt")) or current) <= cutoff]
+    incoming = [_normalize_email_row(raw, index) for index, raw in enumerate(body["emails"])]
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    duplicate_dropped = 0
+    for normalized in [*consumed, *incoming]:
+        key = _email_key(normalized)
+        if key in seen:
+            duplicate_dropped += 1
             continue
-        normalized = {
-            "account": raw["account"].strip()[:100],
-            "from": raw["from"].strip()[:320],
-            "fromName": str(raw.get("fromName") or "").strip()[:200],
-            "subject": raw["subject"].strip()[:200],
-            "receivedAt": _iso(received),
-        }
+        seen.add(key)
+        merged.append(normalized)
+    for normalized in merged:
         if matches_noise(normalized, noise):
             noise_dropped += 1
             continue
-        normalized["importance"] = classify_importance(raw, vip_senders=vip)
-        if normalized["importance"] == "bassa" and normalized["from"].lower() not in vip:
-            low_senders.add(normalized["from"].lower())
         stored.append(normalized)
+    from api.email_analysis import analyse_emails
+
+    analyses, analysis_engine, analysis_error = analyse_emails(stored, vip_senders=vip)
+    digest_rows: list[dict[str, Any]] = []
+    for normalized, analysis in zip(stored, analyses):
+        digest_row = {
+            "account": normalized["account"],
+            "from": normalized["from"],
+            "fromName": normalized["fromName"],
+            "subject": normalized["subject"],
+            "receivedAt": normalized["receivedAt"],
+            "importance": analysis["importance"],
+            "summary": analysis["summary"],
+            "why": analysis["why"],
+        }
+        if digest_row["importance"] == "bassa" and digest_row["from"].lower() not in vip:
+            low_senders.add(digest_row["from"].lower())
+        digest_rows.append(digest_row)
     if low_senders:
         merge_noise_list(base_dir, {"senders": sorted(low_senders), "domains": [], "subjectPatterns": []}, now=current, consecutive=True)
     input_noise = _count(body.get("noiseSkipped"))
     digest = {
-        "version": 1,
+        "version": 2,
         "generatedAt": _iso(current),
-        "accounts": _normalized_accounts(body.get("accounts"), stored),
+        "accounts": _normalized_accounts(body.get("accounts"), digest_rows),
         "noiseSkipped": input_noise + noise_dropped,
-        "emails": stored,
+        "emails": digest_rows,
+        "analysisEngine": analysis_engine,
     }
+    if analysis_error:
+        digest["analysisError"] = analysis_error
     _atomic_write_json(base_dir / "daily-email-digest.json", digest)
+    consumed_keys = {_email_key(row) for row in consumed}
+    with _WRITE_LOCK:
+        latest = _load_accumulator(base_dir)
+        kept = [
+            row for row in latest
+            if (_parse_datetime(row.get("receivedAt")) or current) > cutoff
+            or _email_key(row) not in consumed_keys
+        ]
+        _write_accumulator(base_dir, kept, now=current)
     update_run_status(base_dir, now=current, last_error=None)
     logger.info(
-        "daily_brief_email_ingest stored=%d noiseSkipped=%d droppedOld=%d",
-        len(stored), input_noise + noise_dropped, dropped_old,
+        "daily_brief_email_ingest stored=%d noiseSkipped=%d duplicates=%d engine=%s",
+        len(digest_rows), input_noise + noise_dropped, duplicate_dropped, analysis_engine,
     )
-    return {"ok": True, "stored": len(stored), "skipped": dropped_old + noise_dropped}
+    return {
+        "ok": True,
+        "stored": len(digest_rows),
+        "skipped": duplicate_dropped + noise_dropped,
+        "analysed": len(digest_rows),
+    }
 
 
 def update_run_status(
@@ -496,6 +638,8 @@ def handle_cron_daily_brief(handler: Any, path: str, *, data_dir: Path | str = D
     try:
         if path == "/api/cron/daily-brief/email":
             result = ingest_email_digest(data_dir, _read_cron_body(handler))
+        elif path == "/api/cron/daily-brief/email-accumulate":
+            result = accumulate_email_inbox(data_dir, _read_cron_body(handler))
         elif path == "/api/cron/daily-brief/noise":
             result = merge_noise_list(data_dir, _read_cron_body(handler))
             result = {"ok": True, "senders": len(result["senders"]), "domains": len(result["domains"]), "subjectPatterns": len(result["subjectPatterns"])}

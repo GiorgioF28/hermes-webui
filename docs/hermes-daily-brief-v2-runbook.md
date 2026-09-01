@@ -2,69 +2,83 @@
 
 ## Runtime files
 
-Hermes stores only compact local state in `data/`: `daily-email-digest.json`,
-`email-noise-list.json`, `daily-brief-run.json`, and optional `email-vip.json`.
-All are git-ignored. Writes use a sibling `.tmp` followed by `os.replace`.
+Hermes stores local state in `data/`: `daily-email-digest.json`,
+`email-inbox-accumulator.json`, `email-noise-list.json`, `daily-brief-run.json`,
+and optional `email-vip.json`. All are git-ignored. Writes use a sibling `.tmp`
+followed by `os.replace`.
+
+The accumulator keeps at most 400 messages and prunes rows older than 48 hours.
+It stores only the first 2000 normalized characters of the body. The body is
+used for the 07:00 analysis and is deleted when that message is flushed. It is
+never written to `daily-email-digest.json`.
 
 ## Required configuration
 
 1. Set `HERMES_CRON_TOKEN` in the local WebUI `.env`; never commit its value.
-2. In n8n create one Header Auth credential whose header name is
-   `X-Hermes-Cron-Token`, then select it on both HTTP Request nodes.
-3. Two IMAP credentials already exist and are used: `IMAP account`
-   (id `i3B9BJIveTSJgECN`) and `IMAP account 2` (id `VjYxl7eLUtwmtpSM`).
-4. One Gmail OAuth2 credential already exists: `Gmail account`
-   (id `EYHotM8cXYMUtKFz`), credential type `gmailOAuth2` in the public API.
+2. In n8n use the existing Header Auth credential `Hermes Cron Token`, whose
+   header name is `X-Hermes-Cron-Token`, on all three HTTP Request nodes. Never
+   copy its value into code, docs, backups, or logs.
+3. The two IMAP credentials are `IMAP account` (id `i3B9BJIveTSJgECN`) and
+   `IMAP account 2` (id `VjYxl7eLUtwmtpSM`).
+4. The Gmail OAuth2 credential is `Gmail account` (id `EYHotM8cXYMUtKFz`),
+   credential type `gmailOAuth2` in the public API.
 
 ## Current n8n workflow (2026-09-01)
 
-Workflow `HermesDailyBriefV2` stays inactive until Giorgio verifies the
+Workflow `HermesDailyBriefV2` stays `active=false` until Giorgio verifies the
 credential-to-mailbox mapping and performs a reviewed manual run.
 
-Three mail sources, one Gmail and two IMAP:
-
 - `Schedule 07:00 Europe Rome` → `POST check DM` and → `Gmail personale`.
-- `Gmail personale` is the OAuth2 action node (`Message: Get Many`, limit 50,
-  simple output off, query `newer_than:1d`) → `Label Gmail personale` →
-  `Merge accounts` input 0.
-- `IMAP Gmail secondario` (credential `IMAP account 2`) → `Label Gmail
-  secondario` → `Merge accounts` input 1.
-- `IMAP Yahoo` (credential `IMAP account`) → `Label Yahoo` → `Merge accounts`
-  input 2.
-- `Merge accounts` (3 inputs) → `Normalize headers only` → `POST email digest`.
+- `Gmail personale` (`Message: Get Many`, limit 50, simple output off, query
+  `newer_than:1d`) → `Label Gmail personale` → `Normalize email rows` → `POST
+  email digest`.
+- `IMAP Gmail secondario` (`IMAP account 2`) → `Label Gmail secondario` → `POST
+  email accumulate`.
+- `IMAP Yahoo` (`IMAP account`) → `Label Yahoo` → `POST email accumulate`.
 
-Both IMAP nodes are enabled, `postProcessAction: nothing` (mail is never marked
-as read), `customEmailConfig` restricted to `SINCE` today, `forceReconnect` 60.
+Both IMAP nodes use `format: resolved`, keep `postProcessAction: nothing` (mail
+is never marked as read), and no longer set `SINCE today`. Their label nodes
+emit `messageId` and a 2000-character `bodyExcerpt`.
 
-## Structural constraint of the IMAP nodes
+## Accumulation and 07:00 analysis
 
-`n8n-nodes-base.emailReadImap` is a **trigger** node: it declares no inputs, so
-it cannot be placed downstream of `Schedule 07:00 Europe Rome`. n8n core has no
-IMAP *action* node, so there is no mode switch that turns it into one. The two
-IMAP branches therefore run as independent trigger entry points: they fire when
-new mail arrives, and only while the workflow is active. Only the Gmail branch
-is driven by the 07:00 schedule.
+`n8n-nodes-base.emailReadImap` is a trigger with no inputs. The two IMAP
+branches therefore run independently and call `POST
+/api/cron/daily-brief/email-accumulate` as messages arrive, only while the
+workflow is active. With `active=false` they do not accumulate anything. Only
+the Gmail branch is driven by the 07:00 schedule.
 
-Consequence for `Merge accounts`: an execution started by one IMAP trigger
-carries only that account's rows. `Normalize headers only` labels rows by
-account (`gmail-personale`, `gmail-secondario`, `yahoo-personale`) and reports a
-zero count for the accounts absent from that execution.
+At 07:00, `POST /api/cron/daily-brief/email` captures a cutoff, merges Gmail
+rows with accumulated rows at or before that cutoff, deduplicates, applies the
+existing noise/VIP rules, and analyses up to 80 messages in one Prime/Anthropic
+batch. A successful digest is version 2 and adds `summary`, `why`, and
+`importance` without removing v1 fields. It then flushes consumed accumulator
+rows while preserving rows newer than the cutoff.
+
+If the Anthropic credential is missing, the request times out, the call raises,
+or strict JSON parsing fails, Hermes writes the digest anyway with deterministic
+`classify_importance` results, empty `summary`/`why`, `analysisEngine: rules`,
+and a short non-secret `analysisError`. Model failure alone never turns the
+email endpoint into HTTP 500.
 
 ## Verification before activation
 
-- Confirm in the n8n UI that `IMAP account` is really the Yahoo mailbox and
-  `IMAP account 2` is really the secondary Gmail mailbox; the two credentials
-  were previously assigned to all three nodes indiscriminately, so the mapping
-  written here is an assignment to be checked, not an observed fact.
-- Paste the real `HERMES_CRON_TOKEN` value into the `Hermes Cron Token`
-  credential, then run manually once and confirm HTTP 200 on both endpoints.
-- Confirm each mailbox remains unread exactly as before the run.
-- Confirm the card shows a fresh local time, email counts, and DM counts.
-- Confirm no email body appears in the execution data sent to Hermes.
+- Confirm in the n8n UI that `IMAP account` is the Yahoo mailbox and `IMAP
+  account 2` is the secondary Gmail mailbox.
+- Put the real local cron value into `Hermes Cron Token` without recording it,
+  then run manually and confirm HTTP 200 on the accumulator, email digest, and
+  check-DM endpoints.
+- Confirm each IMAP message remains unread.
+- Confirm the card shows mailbox badges, importance ordering, sender, subject,
+  and summary/why when present; a v1 digest must still render.
+- Confirm `daily-email-digest.json` contains no `bodyExcerpt` and the
+  accumulator is empty after flush except for rows newer than the cutoff.
 - Activate the workflow only after all checks pass.
 
 ## Backups
 
-`docs/backups/daily-brief-v2/` holds the pre/post snapshots of every API PUT,
-including `20260901T153038Z-pre-imap-restore.json` and
-`20260901T153047Z-post-imap-restore.json` for this change.
+`docs/backups/daily-brief-v2/` holds pre/post snapshots of every API PUT. The
+accumulator rewiring snapshots are:
+
+- `20260901T160208Z-pre-accumulator.json`
+- `20260901T160208Z-post-accumulator.json`
