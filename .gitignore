@@ -48,6 +48,10 @@ docs/*
 !docs/rfcs/**
 !docs/architecture/
 !docs/architecture/**
+!docs/backups/
+!docs/backups/daily-brief-v2/
+!docs/backups/daily-brief-v2/**
+!docs/hermes-daily-brief-v2-runbook.md
 
 # Local-only AI assistant context — never committed even under docs/.
 docs/AGENTS.md
@@ -61,6 +65,12 @@ docs/.windsurfrules
 graphify-out/
 .graphify_cached.json
 .graphify_uncached.txt
+
+# Daily Brief runtime state (directory retained via data/.gitkeep).
+data/daily-email-digest.json
+data/email-noise-list.json
+data/daily-brief-run.json
+data/email-vip.json
 
 .venv/
 
