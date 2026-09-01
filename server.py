@@ -14,6 +14,13 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from bootstrap import _load_repo_dotenv
+
+# server.py can be launched directly (including by the Windows live service),
+# bypassing bootstrap.py's launcher process. Load the repository .env before
+# importing api.config or route modules so every startup-time getenv sees it.
+_load_repo_dotenv()
+
 # ── SIGPIPE handling ────────────────────────────────────────────────────────
 # Ignore SIGPIPE so a client closing the connection mid-response (browser tab
 # close, network drop, mobile backgrounding, a dropped long-poll, an
