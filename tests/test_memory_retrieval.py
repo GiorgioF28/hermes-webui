@@ -168,19 +168,22 @@ def test_select_returns_relevant_bodies(tmp_path):
 
 
 def test_select_respects_budget(tmp_path):
-    # Ogni body è ~200 chars → ~50 token; budget=60 → max 1 entry
+    # Ogni body è ~200 chars → ~50 token, budget=60.
+    # La quota per-nota tronca entrambi i body invece di far entrare solo il
+    # primo: cambia il numero di note, non l'invariante di budget.
     body_text = "X" * 200  # ~50 tokens
     bodies = {
         "visionbuilts-project.md": body_text,
         "hermes-setup.md": body_text,
     }
     mem_dir = _make_mem_dir(tmp_path, bodies=bodies)
+    budget = 60
     selected = memory_retrieval.select_memories_for_task(
         "visionbuilts hermes setup",
         mem_dir,
-        budget_tokens=60,  # solo 1 body entra
+        budget_tokens=budget,
     )
-    assert len(selected) <= 1
+    assert sum(entry["body_tokens"] for entry in selected) <= budget
 
 
 def test_select_empty_when_no_match(tmp_path):

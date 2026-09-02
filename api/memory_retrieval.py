@@ -423,11 +423,12 @@ def select_memories_unlocked(
 
     selected = []
     used = 0
+    note_cap_chars = int(max_chars * memory_note_share())
     for entry in candidates:
         remaining = max_chars - used
         if remaining <= 0:
             break
-        body = entry["body"]
+        body = _truncate_note(entry["body"], note_cap_chars)
         if len(body) > remaining:
             if not entry.get("always_active"):
                 continue
@@ -480,6 +481,41 @@ def build_unlocked_memory_detail(
 
 
 # ── Body loading ──────────────────────────────────────────────────────────────
+
+DEFAULT_MEMORY_NOTE_SHARE = 0.4
+
+_TRUNCATION_MARK = "\n[…nota troncata alla quota per-nota]"
+
+
+def memory_note_share() -> float:
+    """Quota massima del budget memoria occupabile da una singola nota.
+
+    Impedisce che una nota sovradimensionata monopolizzi il contesto (o, con
+    il vecchio `break`, lo azzeri scartando le note piccole che la seguono).
+    Override: HERMES_PRIME_MEMORY_NOTE_SHARE (0 < x <= 1).
+    """
+    raw = os.getenv("HERMES_PRIME_MEMORY_NOTE_SHARE", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if 0.0 < value <= 1.0:
+            return value
+        logger.warning(
+            "HERMES_PRIME_MEMORY_NOTE_SHARE=%r fuori range (0,1]; uso %s",
+            raw, DEFAULT_MEMORY_NOTE_SHARE,
+        )
+    return DEFAULT_MEMORY_NOTE_SHARE
+
+
+def _truncate_note(body: str, max_chars: int) -> str:
+    """Tronca il corpo alla quota per-nota, lasciando traccia visibile."""
+    if max_chars <= 0 or len(body) <= max_chars:
+        return body
+    keep = max(max_chars - len(_TRUNCATION_MARK), 0)
+    return body[:keep].rstrip() + _TRUNCATION_MARK
+
 
 def _chars_to_tokens(n_chars: int) -> int:
     """Stima il numero di token da una lunghezza in caratteri."""
@@ -547,17 +583,19 @@ def select_memories_for_task(
 
     results: list[dict] = []
     tokens_used = 0
+    note_cap_chars = int(budget_tokens * memory_note_share() * _CHARS_PER_TOKEN)
     for entry, score in scored:
         body = load_memory_body(mem_dir, entry["filename"])
         if not body:
             continue
+        body = _truncate_note(body, note_cap_chars)
         body_tokens = _chars_to_tokens(len(body))
         if tokens_used + body_tokens > budget_tokens:
             logger.debug(
                 "memory_retrieval: skip '%s' (body %d tok > remaining budget %d tok)",
                 entry["title"], body_tokens, budget_tokens - tokens_used,
             )
-            break
+            continue
         results.append({
             **entry,
             "body": body,
