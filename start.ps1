@@ -159,6 +159,11 @@ $PortFinal = if ($Port) {
 }
 $env:HERMES_WEBUI_HOST = $BindHostFinal
 $env:HERMES_WEBUI_PORT = "$PortFinal"
+# server.py loads the repo .env at import with shell `source` semantics, which
+# would override the bind resolved above with whatever .env pins. This launcher
+# already applied .env itself (skipping keys already in the environment), so ask
+# for the same precedence there — same flag ctl.sh sets for the same reason.
+$env:HERMES_WEBUI_PRESERVE_ENV = '1'
 if (-not $env:HERMES_HOME) {
     if ($env:LOCALAPPDATA) {
         $env:HERMES_HOME = Join-Path $env:LOCALAPPDATA 'hermes'
