@@ -130,7 +130,7 @@ def find_prime_memory_dir() -> Path | None:
 
 # ── Scope management ─────────────────────────────────────────────────────────
 
-VALID_SCOPES = frozenset({"hermes", "visionbuilts", "rap", "global"})
+VALID_SCOPES = frozenset({"hermes", "visionbuilts", "libricino", "rap", "global"})
 
 _SCOPE_RE = re.compile(r"^scope:\s*(\w+)", re.MULTILINE)
 
@@ -205,6 +205,41 @@ def normalize_scope(scope: str) -> str:
     """Normalizza uno scope: lowercase, solo valori noti. Default 'global'."""
     s = (scope or "").strip().lower()
     return s if s in VALID_SCOPES else "global"
+
+
+# Vocabolario per progetto: le parole con cui Giorgio nomina di fatto ciascun
+# progetto. Un task che ne tocca due (es. estrarre ricette dai reel dei creator
+# per VisionBuilts) resta volutamente senza scope, cosi' entrambi i contesti
+# restano visibili.
+_SCOPE_VOCABULARY: dict[str, tuple[str, ...]] = {
+    "hermes": ("hermes", "command bridge", "prime", "8788", "webui", "gateway"),
+    "visionbuilts": (
+        "visionbuilts", "vision builds", "console", "n8n", "crm",
+        "influencer", "outreach", "instagram", "reel", "creator",
+    ),
+    "libricino": ("libricino", "ricetta", "ricette"),
+}
+
+_SCOPE_MARKERS: dict[str, tuple[re.Pattern[str], ...]] = {
+    scope: tuple(re.compile(r"\b" + re.escape(m) + r"\b") for m in markers)
+    for scope, markers in _SCOPE_VOCABULARY.items()
+}
+
+
+def classify_task_scope(task: str) -> str:
+    """Deduce lo scope di progetto dal testo del task.
+
+    Ritorna "" se il task non tocca nessun progetto noto oppure se ne tocca
+    piu' di uno: in entrambi i casi il filtro resta disattivato e Prime vede
+    tutte le note, che e' il comportamento storico.
+    """
+    text = str(task or "").casefold()
+    matched = {
+        scope
+        for scope, patterns in _SCOPE_MARKERS.items()
+        if any(pattern.search(text) for pattern in patterns)
+    }
+    return matched.pop() if len(matched) == 1 else ""
 
 
 def parse_note_scope_fast(mem_dir: Path, filename: str) -> str:
@@ -283,7 +318,7 @@ def format_memory_index(entries: list[dict]) -> str:
 def _extract_keywords(task: str, *, min_len: int = 4) -> list[str]:
     """Estrae keyword significative dal task, rimuovendo le stopwords."""
     raw = str(task or "").lower()
-    words = re.findall(r"[a-zA-ZÀ-ÿà-ÿ\-]{" + str(min_len) + r",}", raw)
+    words = re.findall(r"[a-zA-ZÀ-ÿà-ÿ0-9\-]{" + str(min_len) + r",}", raw)
     seen: set[str] = set()
     result: list[str] = []
     for w in words:

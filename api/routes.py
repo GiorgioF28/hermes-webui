@@ -11742,6 +11742,11 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         from api import memory_retrieval
         from api.prime_lean_preset import prime_context_profile
 
+        # Lo scope del task instrada la memoria sul progetto giusto: le note
+        # di un progetto non entrano nei task di un altro. Task che ne
+        # attraversano due restano senza scope -> nessun filtro.
+        _task_scope = memory_retrieval.classify_task_scope(str(message or ""))
+
         if prime_context_profile() == "unlocked" or user == "tom":
             dynamic_parts = []
             _brief = _in_progress_projects_brief(
@@ -11754,7 +11759,7 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
                 heading = "## Current VisionBuilts projects" if user == "tom" else "## Progetti in corso (stato aggiornato)"
                 dynamic_parts.append(heading + "\n" + _brief)
             _mem_ctx = memory_retrieval.build_prime_unlocked_memory_detail(
-                str(message or ""), workspace
+                str(message or ""), workspace, task_scope=_task_scope
             )
             if _mem_ctx:
                 dynamic_parts.append(_mem_ctx)
@@ -11763,7 +11768,7 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         else:
             # Compatibilità byte-for-byte del layout lean introdotto da f94600f1.
             _mem_ctx = memory_retrieval.build_prime_memory_context(
-                str(message or ""), workspace
+                str(message or ""), workspace, task_scope=_task_scope
             )
             if _mem_ctx:
                 prompt_text = prompt_text + "\n\n---\n\n## Memoria rilevante\n" + _mem_ctx
