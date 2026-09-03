@@ -8239,6 +8239,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/bridge/prime/model":
         return _handle_bridge_prime_model(handler, body)
 
+    if parsed.path == "/api/bridge/agents/model":
+        return _handle_bridge_agents_model(handler, body)
+
     if parsed.path == "/api/bridge/prime/workspace":
         return _handle_bridge_prime_workspace(handler, body)
 
@@ -11115,14 +11118,43 @@ def _handle_bridge_tasks(handler, parsed):
 
 
 def _handle_bridge_agents(handler, parsed):
-    """GET /api/bridge/agents — registro vivo/dormiente degli agenti Hermes."""
+    """GET /api/bridge/agents — registro vivo/dormiente degli agenti Hermes.
+
+    "Attivo" = delega in corso (lo stesso segnale dei pianeti) oppure turno di
+    Hermes Prime in streaming; il log d'uso e' solo storia (last_used).
+    """
     try:
-        from api import agent_registry
-        data = agent_registry.get_operational_agent_registry(Path(str(DEFAULT_WORKSPACE)))
+        from api import agent_registry, prime_delegation
+        live = prime_delegation.live_agent_slugs()
+        if _prime_active_snapshot():
+            live[agent_registry.PRIME_AGENT_SLUG] = "hermes prime turno"
+        data = agent_registry.get_operational_agent_registry(
+            Path(str(DEFAULT_WORKSPACE)), live_agents=live
+        )
     except Exception as exc:
         logger.exception("bridge agents failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
     return j(handler, data) or True
+
+
+def _handle_bridge_agents_model(handler, body):
+    """POST /api/bridge/agents/model — override manuale del modello di un sotto-agente.
+
+    Body: {"agent_id": "<slug>", "model": "auto"|"codex"|"claude-..."}.
+    'auto' toglie l'override. Risponde con il registro aggiornato (stessa forma
+    della GET), cosi' la UI ridisegna il pannello senza una seconda chiamata.
+    """
+    from api import agent_models
+
+    agent_id = str((body or {}).get("agent_id") or "").strip()
+    model = str((body or {}).get("model") or "auto").strip()
+    if not agent_id:
+        return bad(handler, "agent_id is required", 400)
+    try:
+        agent_models.set_override(agent_id, model)
+    except ValueError as exc:
+        return bad(handler, str(exc), 400)
+    return _handle_bridge_agents(handler, None)
 
 
 def _handle_bridge_worklog(handler, parsed):

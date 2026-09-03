@@ -86,7 +86,9 @@ def test_agent_registry_folds_alias_usage_into_canonical_agent(monkeypatch, tmp_
     agents = agent_registry.get_operational_agent_registry(tmp_path)["agents"]
 
     assert [a["id"] for a in agents] == ["research-analyst"]
-    assert agents[0]["state"] == "vivo"
+    # Uso recente = storia (last_used), non liveness: senza delega in corso
+    # l'agente e' dormiente. (Prima: "vivo", disegnato verde dal pannello.)
+    assert agents[0]["state"] == "dormiente"
     assert agents[0]["last_used"]["rel"] == "1m fa"
 
 
@@ -111,7 +113,9 @@ def test_agent_registry_marks_live_and_sorts_live_first(monkeypatch, tmp_path):
     agents = agent_registry.build_agent_registry(tmp_path)["agents"]
 
     assert [a["name"] for a in agents] == ["Research Analyst", "Memory Librarian", "Orchestratore"]
-    assert agents[0]["state"] == "vivo"
+    # L'ordine resta per ultimo uso, ma lo stato non e' piu' "vivo": senza
+    # delega in corso e' dormiente (l'uso recente e' solo last_used).
+    assert agents[0]["state"] == "dormiente"
     assert agents[0]["last_used"]["rel"] == "1m fa"
     assert agents[1]["state"] == "dormiente"
     assert agents[2]["state"] == "dormiente"
@@ -168,7 +172,11 @@ def test_agent_registry_marks_idle_gateway_attivo_with_recent_usage(monkeypatch,
 
     agent = agent_registry.build_agent_registry(tmp_path)["agents"][0]
 
-    assert agent["state"] == "attivo"
+    # Gateway fresco ma fermo + uso 5 minuti fa: e' "in attesa", non "attivo".
+    # Attivo lo decide solo una delega in corso (live_agents) o il gateway che
+    # dichiara agenti attivi: l'uso passato non accende piu' il pallino.
+    assert agent["state"] == "in_attesa"
+    assert agent["last_used"]["rel"] == "5m fa"
 
 
 def test_agent_registry_stale_or_missing_gateway_falls_back_to_usage(monkeypatch, tmp_path):
@@ -188,7 +196,10 @@ def test_agent_registry_stale_or_missing_gateway_falls_back_to_usage(monkeypatch
 
     agents = {a["id"]: a for a in agent_registry.build_agent_registry(tmp_path)["agents"]}
 
-    assert agents["memory-librarian"]["state"] == "vivo"
+    # Gateway stantio (5 minuti, soglia 120 s) e uso di ieri: dormiente, con
+    # last_used a testimoniare l'uso. (Prima: "vivo".)
+    assert agents["memory-librarian"]["state"] == "dormiente"
+    assert agents["memory-librarian"]["last_used"] is not None
     assert agents["memory-librarian"]["gateway"]["running"] is False
     assert agents["social-client-contact"]["state"] == "dormiente"
     assert agents["social-client-contact"]["gateway"] == {

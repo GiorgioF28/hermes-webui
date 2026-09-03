@@ -601,6 +601,16 @@ def _model_for(task_type: str, agent_id: str = ""):
     """
     t = (task_type or "").lower()
     a = _agent_slug(agent_id)
+    # Override manuale dal pannello AGENTI: vince su tutto il routing sotto,
+    # compresa la regola "programmatore -> sempre Codex" (e' una scelta esplicita).
+    if agent_id:
+        from api import agent_models
+
+        override = agent_models.get_overrides().get(_AGENT_NOTE_ALIASES.get(a, a))
+        if override == "codex":
+            return _CODEX_MODEL, "Codex"
+        if override:
+            return override, agent_models.label_for(override)
     if a in _CODEX_AGENT_ALIASES or "codic" in t or "code" in t or "dev" in t:
         return _CODEX_MODEL, "Codex"
     # Richiesta esplicita di ragionamento cloud (rara): resta su Opus.
@@ -651,6 +661,26 @@ _AGENT_NOTE_ALIASES = {
     "strategist": "business-strategist",
     "ops": "ops-automation-engineer",
 }
+
+
+def live_agent_slugs() -> dict[str, str]:
+    """Slug canonico -> etichetta del task per ogni delega ancora in corso.
+
+    E' il segnale che accende i pianeti nel Command Bridge; il pannello AGENTI
+    lo usa per dire "attivo" con la stessa verita'. Il Librarian automatico
+    post-delega non ha una card propria ma conta come attivo mentre aggiorna
+    la memoria.
+    """
+    live: dict[str, str] = {}
+    for t in list(_BG_TASKS.values()):
+        if t.get("status") in ("in_corso", "running", "pending"):
+            raw = _agent_slug(str(t.get("agent_id") or t.get("agent") or ""))
+            slug = _AGENT_NOTE_ALIASES.get(raw, raw)
+            label = (str(t.get("agent") or "") + " " + str(t.get("task_type") or "")).strip()
+            live[slug] = label or slug
+        if t.get("librarian_status") == "in_corso":
+            live["memory-librarian"] = "librarian memoria"
+    return live
 
 
 def _agent_note_candidates(agents_dir: Path) -> list[tuple[str, Path]]:

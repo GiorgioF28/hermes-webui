@@ -520,7 +520,11 @@
 '.cb-agent-state.cb-waiting{background:#f5c518;box-shadow:0 0 10px rgba(245,197,24,.6);}',
 '.cb-agent-name{font-family:var(--cb-disp);font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
 '.cb-agent-role{font-size:11px;line-height:1.35;color:var(--cb-muted);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}',
-'.cb-agent-meta{font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-faint);text-align:right;white-space:nowrap;}',
+'.cb-agent-meta{font-family:var(--cb-mono);font-size:9.5px;color:var(--cb-faint);text-align:right;white-space:nowrap;display:flex;flex-direction:column;align-items:flex-end;gap:3px;}',
+'.cb-agent-model{appearance:none;-webkit-appearance:none;border:1px solid var(--cb-line);border-radius:7px;background:rgba(255,255,255,.025);color:var(--cb-accent);font:600 9px var(--cb-mono);letter-spacing:.06em;padding:3px 16px 3px 7px;cursor:pointer;max-width:110px;'
+  + 'background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 12 12\'%3E%3Cpath d=\'M2.5 4.5L6 8l3.5-3.5\' fill=\'none\' stroke=\'%23888\' stroke-width=\'1.4\' stroke-linecap=\'round\'/%3E%3C/svg%3E");'
+  + 'background-repeat:no-repeat;background-position:right 4px center;background-size:9px;}',
+'.cb-agent-model.cb-busy{opacity:.5;pointer-events:none;}',
 '.cb-flex{border-bottom:1px solid var(--cb-line2);padding:12px 14px;background:rgba(255,255,255,.014);}',
 '.cb-flex-top{display:grid;grid-template-columns:minmax(82px,.9fr) minmax(0,1.4fr);gap:12px;align-items:center;}',
 '.cb-flex-num{font-family:var(--cb-disp);font-size:42px;font-weight:750;line-height:.9;color:#fff;}',
@@ -1426,6 +1430,11 @@
     Object.keys(_cbActiveAgents).forEach(function (name) {
       if (!next[name]) window.cbStar.setAgentActive(_cbActiveAgents[name], false);
     });
+    // Il pannello AGENTI legge la stessa verita' dei pianeti: quando cambia
+    // l'insieme degli agenti attivi si aggiorna subito, senza aspettare il timer.
+    var changed = Object.keys(next).length !== Object.keys(_cbActiveAgents).length ||
+      Object.keys(next).some(function (name) { return !_cbActiveAgents[name]; });
+    if (changed) pollAgents();
     _cbActiveAgents = next;
   }
   function pollTasks() {
@@ -1440,7 +1449,8 @@
   function pollAgents() {
     api('api/bridge/agents').then(renderAgents).catch(function () {});
   }
-  function startAgentsPolling() { if (!_cbAgentsTimer) _cbAgentsTimer = setInterval(pollAgents, 30000); }
+  // 5s: il pannello deve seguire i pianeti (3s), non arrivare mezzo minuto dopo.
+  function startAgentsPolling() { if (!_cbAgentsTimer) _cbAgentsTimer = setInterval(pollAgents, 5000); }
   var _cbWorklogTimer = null;
   var _cbBriefPollTicks = 0;
   function pollWorklog() {
@@ -2676,19 +2686,67 @@
     enableDragReorder(grid);
   }
 
+  // Stesse voci del selettore di Hermes Prime, piu' Codex (GPT locale) e Auto
+  // (= routing storico di Prime). Il server valida contro la stessa lista.
+  var AGENT_MODEL_OPTIONS = [
+    ['auto', 'Auto'], ['codex', 'Codex (GPT)'], ['claude-opus-5', 'Opus 5'],
+    ['claude-sonnet-5', 'Sonnet 5'], ['claude-haiku-4-5', 'Haiku 4.5'], ['claude-fable-5-1', 'Fable 5.1']
+  ];
+  var _cbAgentsPending = null;
+
+  function agentModelSelect(a) {
+    var cur = a.model_override || 'auto';
+    return '<select class="cb-agent-model" data-agent-id="' + esc(a.id || '') + '"' +
+      ' aria-label="Modello di ' + esc(a.name || 'agente') + '" title="Modello del sotto-agente">' +
+      AGENT_MODEL_OPTIONS.map(function (o) {
+        return '<option value="' + o[0] + '"' + (o[0] === cur ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select>';
+  }
+
+  function setAgentModel(agentId, model, sel) {
+    if (sel) sel.classList.add('cb-busy');
+    var cfg = window.__HERMES_CONFIG__ || {};
+    return fetch(new URL('api/bridge/agents/model', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: JSON.stringify({ agent_id: agentId, model: model })
+    }).then(function (r) {
+      if (!r.ok) return r.json().catch(function () { return {}; }).then(function (d) { throw new Error(d.error || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function (d) {
+      if (sel) sel.blur();
+      renderAgents(d);
+    }).catch(function (err) {
+      sysNote('Cambio modello agente fallito: ' + String(err && err.message || err));
+      if (sel) sel.classList.remove('cb-busy');
+      pollAgents();
+    });
+  }
+
   function renderAgents(data) {
     var list = $('cbAgentList'), count = $('cbAgentsCount');
     if (!list) return;
+    // Il polling arriva ogni pochi secondi: non distruggere una tendina che
+    // l'utente sta usando; il dato arretrato viene ridisegnato al blur.
+    var ae = document.activeElement;
+    if (ae && ae.classList && ae.classList.contains('cb-agent-model') && list.contains(ae)) {
+      _cbAgentsPending = data;
+      return;
+    }
+    _cbAgentsPending = null;
     var agents = (data && data.agents) || [];
+    // Verde solo con un task davvero in corso (stesso segnale dei pianeti);
+    // giallo = gateway acceso ma fermo; grigio = idle. L'uso recente non e'
+    // liveness: resta come testo "ultimo uso".
     function stateClass(s) {
-      if (s === 'attivo' || s === 'vivo') return 'cb-live';
+      if (s === 'attivo') return 'cb-live';
       if (s === 'in_attesa') return 'cb-waiting';
       return '';
     }
     if (count) {
-      var present = agents.filter(function (a) {
-        return a && (a.state === 'attivo' || a.state === 'vivo' || a.state === 'in_attesa');
-      }).length;
+      var present = (data && typeof data.active_count === 'number')
+        ? data.active_count
+        : agents.filter(function (a) { return a && a.state === 'attivo'; }).length;
       count.textContent = present + '/' + agents.length + ' attivi';
     }
     if (!agents.length) {
@@ -2698,6 +2756,7 @@
     list.innerHTML = agents.map(function (a) {
       var last = a.last_used && a.last_used.rel ? a.last_used.rel : 'mai';
       var status = a.status_label || ((a.state === 'attivo') ? 'live / task attivo' : 'idle / nessun task attivo');
+      if (a.state === 'attivo' && a.live_task) status = 'live / ' + a.live_task;
       return '' +
         '<div class="cb-agent-row">' +
           '<span class="cb-agent-state ' + stateClass(a.state) + '"></span>' +
@@ -2706,9 +2765,17 @@
             '<div class="cb-agent-role">' + esc(a.role || '') + '</div>' +
             '<div class="cb-agent-role">' + esc(status) + '</div>' +
           '</div>' +
-          '<div class="cb-agent-meta">' + esc(a.model || 'auto') + '<br>' + esc(last) + '</div>' +
+          '<div class="cb-agent-meta">' + agentModelSelect(a) + '<span>' + esc(last) + '</span></div>' +
         '</div>';
     }).join('');
+    Array.prototype.forEach.call(list.querySelectorAll('.cb-agent-model'), function (sel) {
+      sel.addEventListener('change', function () {
+        setAgentModel(sel.getAttribute('data-agent-id'), sel.value, sel);
+      });
+      sel.addEventListener('blur', function () {
+        if (_cbAgentsPending) { var d = _cbAgentsPending; _cbAgentsPending = null; renderAgents(d); }
+      });
+    });
   }
 
   var _worklogData = null;

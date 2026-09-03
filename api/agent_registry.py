@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from api import agent_models
 from api.agent_health import _runtime_status_is_fresh
 
 AGENTS_DIR = "06-Agents"
@@ -47,7 +48,26 @@ OPERATIONAL_AGENT_SLUGS = frozenset(PROFILE_TO_AGENT_SLUG.values()) | {PRIME_AGE
 # ma il log d'uso puo' registrarli con lo slug dell'alias. Il loro ultimo uso
 # viene fuso nell'agente canonico invece di creare una riga doppia.
 AGENT_SLUG_ALIASES = {
+    # Nomi con cui Prime delega e con cui il log d'uso registra gli agenti.
+    # Devono coprire gli alias operativi di prime_delegation._AGENT_NOTE_ALIASES
+    # (test di contratto), altrimenti l'uso finisce sotto uno slug orfano e
+    # l'agente risulta "mai" usato.
+    "programmatore": "programmatore-project-engineer",
+    "programmer": "programmatore-project-engineer",
+    "sviluppatore": "programmatore-project-engineer",
+    "developer": "programmatore-project-engineer",
+    "dev": "programmatore-project-engineer",
+    "coder": "programmatore-project-engineer",
+    "codex": "programmatore-project-engineer",
     "ricercatore": "research-analyst",
+    "researcher": "research-analyst",
+    "research": "research-analyst",
+    "analista": "research-analyst",
+    "social": "social-client-contact",
+    "outreach": "social-client-contact",
+    "orchestrator": "orchestratore",
+    "librarian": "memory-librarian",
+    "memoria": "memory-librarian",
 }
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.M)
 _SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
@@ -60,6 +80,12 @@ _cache: dict[str, tuple[float, object, dict]] = {}
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
     return slug or "agent"
+
+
+def canonical_agent_slug(value: str) -> str:
+    """Nome di delega o slug di nota -> slug canonico dell'agente."""
+    slug = _slug(value)
+    return AGENT_SLUG_ALIASES.get(slug, slug)
 
 
 def _read(path: Path) -> str:
@@ -250,15 +276,24 @@ def _gateway_states(now: float | None = None) -> dict[str, dict]:
     return states
 
 
-def build_agent_registry(workspace_path) -> dict:
-    """Read agent notes and usage log, returning the live registry payload."""
+def build_agent_registry(workspace_path, *, live_agents: dict[str, str] | None = None) -> dict:
+    """Read agent notes and usage log, returning the live registry payload.
+
+    ``live_agents`` — slug canonico -> etichetta del task in corso. E' lo stesso
+    segnale che accende i pianeti (deleghe ``in_corso``): un agente e' ``attivo``
+    solo se compare qui (o se il suo gateway dichiara agenti attivi). L'uso
+    recente resta visibile come ``last_used`` ma non e' piu' liveness.
+    """
     workspace = Path(str(workspace_path)).expanduser()
     agents_dir = workspace / "obsidian-vault" / AGENTS_DIR
     usage = _load_usage(workspace)
     now = time.time()
     gateways = _gateway_states(now)
+    live_agents = dict(live_agents or {})
+    overrides = agent_models.get_overrides()
+    model_options = [dict(o) for o in agent_models.MODEL_OPTIONS]
     if not agents_dir.is_dir():
-        return {"ok": True, "agents": [], "count": 0, "exists": False}
+        return {"ok": True, "agents": [], "count": 0, "active_count": 0, "exists": False}
 
     agents = []
     for path in sorted(agents_dir.glob("*.md"), key=lambda p: p.name.lower()):
@@ -274,25 +309,28 @@ def build_agent_registry(workspace_path) -> dict:
             (float((usage.get(key) or {}).get("ts") or 0) for key in usage_keys),
             default=0.0,
         )
-        usage_live = bool(ts and (now - ts) <= LIVE_WINDOW_SECONDS)
-        usage_active = bool(ts and (now - ts) <= ACTIVE_USAGE_WINDOW_SECONDS)
         gateway = gateways.get(agent["id"])
-        if gateway and gateway.get("running"):
-            if int(gateway.get("active") or 0) > 0 or usage_active:
-                state = "attivo"
-            else:
-                state = "in_attesa"
+        gateway_fresh = bool(gateway and gateway.get("running"))
+        gateway_busy = gateway_fresh and int(gateway.get("active") or 0) > 0
+        live_label = live_agents.get(agent["id"], "")
+        if live_label or gateway_busy:
+            state = "attivo"
+        elif gateway_fresh:
+            state = "in_attesa"
         else:
-            state = "vivo" if usage_live else "dormiente"
+            state = "dormiente"
         agent["state"] = state
+        agent["live_task"] = live_label
         if state == "attivo":
             agent["status_label"] = "live / task attivo"
         elif state == "in_attesa":
-            agent["status_label"] = "idle / nessun task attivo"
-        elif state == "vivo":
-            agent["status_label"] = "idle / nessun task attivo"
+            agent["status_label"] = "gateway acceso / nessun task attivo"
         else:
-            agent["status_label"] = "offline / nessun task attivo"
+            agent["status_label"] = "idle / nessun task attivo"
+        override = overrides.get(agent["id"])
+        agent["model_override"] = override
+        agent["model_effective"] = override or "auto"
+        agent["model_options"] = model_options
         agent["gateway"] = gateway or {
             "profile": next((profile for profile, slug in PROFILE_TO_AGENT_SLUG.items() if slug == agent["id"]), None),
             "running": False,
@@ -303,7 +341,7 @@ def build_agent_registry(workspace_path) -> dict:
         agent["_usage_ts"] = ts
         agents.append(agent)
 
-    state_priority = {"attivo": 0, "in_attesa": 1, "vivo": 2, "dormiente": 3}
+    state_priority = {"attivo": 0, "in_attesa": 1, "dormiente": 2}
     agents.sort(
         key=lambda a: (
             state_priority.get(a["state"], 3),
@@ -313,36 +351,53 @@ def build_agent_registry(workspace_path) -> dict:
     )
     for agent in agents:
         agent.pop("_usage_ts", None)
-    return {"ok": True, "agents": agents, "count": len(agents), "exists": True}
+    return {
+        "ok": True,
+        "agents": agents,
+        "count": len(agents),
+        "active_count": sum(1 for a in agents if a["state"] == "attivo"),
+        "exists": True,
+    }
 
 
-def get_agent_registry(workspace_path) -> dict:
+def get_agent_registry(workspace_path, *, live_agents: dict[str, str] | None = None) -> dict:
     """Cached registry with TTL plus agents-dir and usage-log mtime invalidation."""
     workspace = Path(str(workspace_path)).expanduser()
     agents_dir = workspace / "obsidian-vault" / AGENTS_DIR
     usage_log = workspace / "tasks" / USAGE_LOG
-    sig = (_dir_signature(agents_dir), _mtime(usage_log), _gateway_signature())
+    sig = (
+        _dir_signature(agents_dir),
+        _mtime(usage_log),
+        _gateway_signature(),
+        _mtime(Path(agent_models.STORE_PATH)),
+        tuple(sorted((live_agents or {}).items())),
+    )
     key = str(workspace)
     now = time.time()
     with _cache_lock:
         cached = _cache.get(key)
         if cached and (now - cached[0]) < _CACHE_TTL and cached[1] == sig:
             return cached[2]
-    data = build_agent_registry(workspace)
+    data = build_agent_registry(workspace, live_agents=live_agents)
     with _cache_lock:
         _cache[key] = (now, sig, data)
     return data
 
 
-def get_operational_agent_registry(workspace_path) -> dict:
+def get_operational_agent_registry(workspace_path, *, live_agents: dict[str, str] | None = None) -> dict:
     """Return the UI payload restricted to the six delegable agents."""
-    data = get_agent_registry(workspace_path)
+    data = get_agent_registry(workspace_path, live_agents=live_agents)
     agents = [
         agent
         for agent in data.get("agents", [])
         if agent.get("id") in OPERATIONAL_AGENT_SLUGS
     ]
-    return {**data, "agents": agents, "count": len(agents)}
+    return {
+        **data,
+        "agents": agents,
+        "count": len(agents),
+        "active_count": sum(1 for a in agents if a.get("state") == "attivo"),
+    }
 
 
 def record_agent_usage(workspace_path, agent_id: str, task_type: str, task_id: str) -> None:
