@@ -526,7 +526,10 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
                 worker_task, workspace, agent_id=t.get("agent_id"), progress=t
             )
         else:
-            output = await _run_worker(worker_task, model, workspace, agent_id=t.get("agent_id"), progress=t)
+            output = await _run_worker(
+                worker_task, model, workspace, agent_id=t.get("agent_id"), progress=t,
+                mcp_servers=_worker_mcp_servers(workspace, t.get("agent_id") or t.get("agent")),
+            )
         output = _validate_delegation_output(output)
         output = _apply_memory_fence(fence, t, output)
         t.update(
@@ -851,6 +854,23 @@ def _worker_system_prompt(agent_id: str | None, workspace: str) -> str:
         f"{note}\n\n"
         f"{_WORKER_SAFETY_RULES}"
     )
+
+
+def _worker_mcp_servers(workspace: str, agent_id: str | None) -> dict[str, dict[str, Any]]:
+    """MCP di memoria per un worker Claude, secondo il ruolo.
+
+    Il filesystem del Vault (`hermes-memory`) e' solo del Librarian: la memoria
+    canonica la scrive lui (e il recinto annulla comunque le scritture altrui).
+    `notion` invece serve a tutti: il Ricercatore carica i batch nel CRM, il
+    Social aggiorna gli stati. Su Codex il server notion arriva gia' dal
+    config.toml del CLI; qui si copre il fallback Claude, che altrimenti
+    lasciava i worker senza alcuno strumento Notion.
+    """
+    servers = _load_memory_mcp_servers(workspace)
+    slug = _agent_slug(agent_id)
+    if _AGENT_NOTE_ALIASES.get(slug, slug) == _LIBRARIAN_AGENT_ID:
+        return servers
+    return {name: cfg for name, cfg in servers.items() if name == "notion"}
 
 
 def _load_memory_mcp_servers(workspace: str) -> dict[str, dict[str, Any]]:
@@ -1214,7 +1234,8 @@ async def _run_codex_worker_with_fallback(
         _set_progress_fallback(progress, reason, agent_id)
         logger.warning("Codex subagent fallback active -> %s (%.0fs remaining)", status["model"], status["remaining"])
         return await _run_worker(
-            task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress
+            task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress,
+            mcp_servers=_worker_mcp_servers(workspace, agent_id)
         )
 
     if progress is not None:
@@ -1231,7 +1252,8 @@ async def _run_codex_worker_with_fallback(
             _set_progress_fallback(progress, reason, agent_id)
             logger.warning("Codex subagent start failed -> fallback %s", codex_fallback_model(agent_id))
             return await _run_worker(
-                task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress
+                task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress,
+            mcp_servers=_worker_mcp_servers(workspace, agent_id)
             )
         if not is_codex_quota_error(exc):
             raise
@@ -1243,7 +1265,8 @@ async def _run_codex_worker_with_fallback(
             status["remaining"],
         )
         return await _run_worker(
-            task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress
+            task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress,
+            mcp_servers=_worker_mcp_servers(workspace, agent_id)
         )
 
 
