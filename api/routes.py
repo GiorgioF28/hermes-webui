@@ -1156,6 +1156,7 @@ from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 from api import bridge_errors
+from api.claude_cli import resolve_claude_cli_path as _resolve_claude_cli_path
 
 
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
@@ -16048,6 +16049,10 @@ def _get_claude_registry():
                     plugins=[],
                     strict_mcp_config=True,
                     session_id=_sdk_session_id,
+                    # Il CLI che Giorgio aggiorna (npm/app), non quello incorporato
+                    # nell'SDK: l'SDK preferisce il suo _bundled/claude.exe e
+                    # restava a 2.1.169 -> "version 2.1.251 or newer is required".
+                    cli_path=_resolve_claude_cli_path(),
                 )
                 client = ClaudeSDKClient(options=options)
                 # La query del turno deve usare LO STESSO id del client corrente

@@ -26,6 +26,8 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, tool, create_sdk_mcp_server
 
+from api.claude_cli import resolve_claude_cli_path
+
 logger = logging.getLogger(__name__)
 
 # Marker model per instradare a Codex CLI invece che al client Claude.
@@ -1381,6 +1383,8 @@ async def _run_worker(
         strict_mcp_config=True,
         skills=skills,
         env={k: v for k, v in {"NOTION_TOKEN": os.getenv("NOTION_TOKEN")}.items() if v},
+        # Il CLI che Giorgio aggiorna, non quello incorporato nell'SDK (2.1.169).
+        cli_path=resolve_claude_cli_path(),
     )
     client = ClaudeSDKClient(options=opts)
     await client.connect()
