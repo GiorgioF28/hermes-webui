@@ -240,6 +240,64 @@ def _load_usage(workspace: Path) -> dict[str, dict]:
     return latest
 
 
+def _pid_alive(pid: int, record: dict | None = None) -> bool:
+    """Il pid dichiarato e' un gateway Hermes vivo?
+
+    Vivo: helper psutil-based dell'agente (su Windows os.kill(pid, 0) NON e' un
+    no-op, manda un Ctrl+C al gruppo di processi). Identita' (contro il riuso
+    del pid): l'euristica dell'agente sulla cmdline, che pero' fallisce sui
+    gateway per-profilo (`hermes.exe --profile X gateway run` non contiene
+    "hermes gateway"); quindi accetta anche l'argv del record e una cmdline
+    che contenga sia "hermes" sia "gateway".
+    """
+    pid = int(pid)
+    try:
+        from api.agent_health import _gateway_status_module
+
+        status = _gateway_status_module()
+        if not status._pid_exists(pid):
+            return False
+        looks = getattr(status, "_looks_like_gateway_process", None)
+        if callable(looks) and looks(pid):
+            return True
+        by_record = getattr(status, "_record_looks_like_gateway", None)
+        if callable(by_record) and isinstance(record, dict) and by_record(record):
+            return True
+    except Exception:
+        try:
+            import psutil
+
+            if not psutil.pid_exists(pid):
+                return False
+        except Exception:
+            return False
+    try:
+        import psutil
+
+        cmdline = " ".join(psutil.Process(pid).cmdline()).lower()
+        return "hermes" in cmdline and "gateway" in cmdline
+    except Exception:
+        # cmdline non leggibile (permessi): il pid esiste, fidati del record.
+        return isinstance(record, dict) and record.get("kind") == "hermes-gateway"
+
+
+def _gateway_pid(profiles_root: Path, profile: str, payload: dict) -> int | None:
+    """PID dal gateway_state.json; se assente, dal record gateway.pid del profilo."""
+    for source in (payload,):
+        try:
+            pid = int(source.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid > 0:
+            return pid
+    try:
+        record = json.loads((profiles_root / profile / "gateway.pid").read_text(encoding="utf-8"))
+        pid = int(record.get("pid") or 0)
+        return pid if pid > 0 else None
+    except (OSError, ValueError, AttributeError, json.JSONDecodeError):
+        return None
+
+
 def _gateway_states(now: float | None = None) -> dict[str, dict]:
     profiles_root = _profiles_root()
     if profiles_root is None:
@@ -267,9 +325,17 @@ def _gateway_states(now: float | None = None) -> dict[str, dict]:
                 raw_discord = discord_payload.get("state")
                 if isinstance(raw_discord, str) and raw_discord:
                     discord = raw_discord
+        # gateway_state.json viene scritto solo all'avvio (nessun heartbeat):
+        # dopo 120 s il timestamp e' sempre "stantio". Il segnale vero e' il
+        # processo: se il pid dichiarato e' vivo, il gateway e' acceso.
+        # La freschezza resta come fallback per file senza pid.
+        pid = _gateway_pid(profiles_root, profile, payload)
+        running = (pid is not None and _pid_alive(pid, payload)) or (
+            pid is None and _runtime_status_is_fresh(payload, now=reference)
+        )
         states[slug] = {
             "profile": profile,
-            "running": _runtime_status_is_fresh(payload, now=reference),
+            "running": running,
             "active": active,
             "discord": discord,
         }

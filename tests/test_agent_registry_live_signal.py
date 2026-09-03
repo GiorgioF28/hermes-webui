@@ -101,3 +101,57 @@ def test_registry_exposes_model_override_fields(tmp_path, monkeypatch):
     assert [o["id"] for o in agents["research-analyst"]["model_options"]] == [
         o["id"] for o in agent_models.MODEL_OPTIONS
     ]
+
+
+# ── gateway vivo = processo vivo, non timestamp ───────────────────────────────
+#
+# gateway_state.json viene scritto solo all'avvio del gateway (nessun
+# heartbeat), quindi la soglia di freschezza di 120 s lo dichiara "stantio"
+# per tutta la vita del processo e il giallo "in attesa" non compare mai.
+# Il file pero' contiene il pid: se il processo e' vivo, il gateway e' acceso.
+
+def _write_gateway(profiles_root, profile, *, updated_age_s, pid, active=0):
+    from datetime import datetime, timezone
+
+    path = profiles_root / profile / "gateway_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": pid,
+        "kind": "hermes-gateway",
+        "gateway_state": "running",
+        "active_agents": active,
+        "updated_at": datetime.fromtimestamp(time.time() - updated_age_s, timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_stale_timestamp_but_live_pid_means_gateway_on(tmp_path, monkeypatch):
+    profiles = tmp_path / "profiles"
+    _write_agent(tmp_path, "Programmatore Project Engineer")
+    _write_gateway(profiles, "programmatore", updated_age_s=3600, pid=4242)
+    monkeypatch.setattr(agent_registry, "_profiles_root", lambda: profiles)
+    monkeypatch.setattr(agent_registry, "_pid_alive", lambda pid, record=None: pid == 4242)
+    agent = agent_registry.build_agent_registry(tmp_path, live_agents={})["agents"][0]
+    assert agent["state"] == "in_attesa"
+    assert agent["gateway"]["running"] is True
+
+
+def test_stale_timestamp_and_dead_pid_means_gateway_off(tmp_path, monkeypatch):
+    profiles = tmp_path / "profiles"
+    _write_agent(tmp_path, "Programmatore Project Engineer")
+    _write_gateway(profiles, "programmatore", updated_age_s=3600, pid=4242)
+    monkeypatch.setattr(agent_registry, "_profiles_root", lambda: profiles)
+    monkeypatch.setattr(agent_registry, "_pid_alive", lambda pid, record=None: False)
+    agent = agent_registry.build_agent_registry(tmp_path, live_agents={})["agents"][0]
+    assert agent["state"] == "dormiente"
+    assert agent["gateway"]["running"] is False
+
+
+def test_live_pid_with_declared_active_agents_is_attivo(tmp_path, monkeypatch):
+    profiles = tmp_path / "profiles"
+    _write_agent(tmp_path, "Programmatore Project Engineer")
+    _write_gateway(profiles, "programmatore", updated_age_s=3600, pid=4242, active=1)
+    monkeypatch.setattr(agent_registry, "_profiles_root", lambda: profiles)
+    monkeypatch.setattr(agent_registry, "_pid_alive", lambda pid, record=None: True)
+    agent = agent_registry.build_agent_registry(tmp_path, live_agents={})["agents"][0]
+    assert agent["state"] == "attivo"

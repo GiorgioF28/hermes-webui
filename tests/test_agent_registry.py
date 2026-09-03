@@ -1,7 +1,20 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from api import agent_registry
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gateways(monkeypatch):
+    """Isola i test dai gateway reali della macchina.
+
+    Con la liveness basata sul pid, i cinque gateway vivi sul PC facevano
+    risultare "in_attesa" agenti che i test si aspettano "dormiente". I test
+    che vogliono un gateway lo scrivono in tmp_path e ripatchano _profiles_root.
+    """
+    monkeypatch.setattr(agent_registry, "_profiles_root", lambda: None)
 
 
 def _write_agent(root, name, body):
