@@ -114,7 +114,9 @@ async def test_codex_start_error_still_falls_back_to_sonnet(monkeypatch, tmp_pat
 
     result = await pd._run_codex_worker_with_fallback("task", str(tmp_path), progress={})
     assert result == "fallback riuscito"
-    assert worker_calls == [("task", "claude-sonnet-4-6", str(tmp_path))]
+    # Senza agente il fallback e' il Claude di default (per agente: vedi
+    # test_auto_policy_gpt_first).
+    assert worker_calls == [("task", pd.codex_fallback_model(None), str(tmp_path))]
 
 
 def test_codex_fallback_cooldown_is_configurable(monkeypatch):
@@ -152,9 +154,9 @@ async def test_codex_quota_falls_back_to_sonnet_and_reuses_cooldown(monkeypatch,
     progress = {}
     assert await pd._run_codex_worker_with_fallback("task one", str(tmp_path), progress=progress) == "sonnet result"
     assert codex_calls == [("task one", str(tmp_path))]
-    assert worker_calls[0][1] == "claude-sonnet-4-6"
+    assert worker_calls[0][1] == pd.codex_fallback_model(None)
     assert progress["fallback_runtime"] == "sonnet"
-    assert progress["fallback_model"] == "claude-sonnet-4-6"
+    assert progress["fallback_model"] == pd.codex_fallback_model(None)
 
     progress2 = {}
     assert await pd._run_codex_worker_with_fallback("task two", str(tmp_path), progress=progress2) == "sonnet result"

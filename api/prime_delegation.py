@@ -46,10 +46,22 @@ _DELEGATION_ANCHORS: dict[str, dict[str, Any]] = {}
 _DELEGATION_EXECUTION_LOCK = asyncio.Lock()
 _MEMORY_MCP_SERVER_NAMES = ("hermes-memory", "notion")
 _LIBRARIAN_AGENT_ID = "memory-librarian"
-_LIBRARIAN_MODEL = "claude-sonnet-4-6"
+# Il pass memoria e' frequente e meccanico: modello economico (scelta Giorgio).
+_LIBRARIAN_MODEL = "claude-haiku-4-5"
 _CODEX_FALLBACK_MODEL_ENV = "HERMES_CODEX_FALLBACK_MODEL"
 _CODEX_FALLBACK_COOLDOWN_ENV = "HERMES_CODEX_FALLBACK_COOLDOWN_SECONDS"
-_DEFAULT_CODEX_FALLBACK_MODEL = "claude-sonnet-4-6"
+_DEFAULT_CODEX_FALLBACK_MODEL = "claude-sonnet-5"
+# Politica "Auto": GPT (Codex) per tutti finche' ha crediti; a quota esaurita
+# (o con HERMES_SUBAGENT_BRAIN=claude) ogni agente cade sul Claude che gli
+# conviene: Librarian economico, Programmatore il piu' forte nel codice,
+# Social e Ricercatore Sonnet (creativo, veloce). Override manuale dal pannello.
+_AGENT_CLAUDE_MODELS = {
+    "memory-librarian": "claude-haiku-4-5",
+    "programmatore-project-engineer": "claude-opus-5",
+    "social-client-contact": "claude-sonnet-5",
+    "research-analyst": "claude-sonnet-5",
+    "orchestratore": "claude-sonnet-5",
+}
 _DEFAULT_CODEX_FALLBACK_COOLDOWN_SECONDS = 3600.0
 _CODEX_FALLBACK_STATE = {
     "until": 0.0,
@@ -317,6 +329,11 @@ def _persist_bg_task(task_id: str, workspace: str) -> None:
         path = _delegations_log_path(workspace)
         path.parent.mkdir(parents=True, exist_ok=True)
         snapshot = {k: t.get(k) for k in _PERSIST_FIELDS}
+        from api.delegation_store import cap_text
+
+        for key in ("output", "librarian_output"):
+            if isinstance(snapshot.get(key), str):
+                snapshot[key] = cap_text(snapshot[key])
         with path.open("a", encoding="utf-8", errors="replace") as fh:
             fh.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
     except Exception:
@@ -327,6 +344,23 @@ def _persist_bg_task(task_id: str, workspace: str) -> None:
         get_delegation_store(workspace).upsert(bg_task_to_canonical(t))
     except Exception:
         logger.debug("delegation_store sync failed for %s", task_id, exc_info=True)
+
+
+def _compact_delegation_log(path: Path, latest: dict[str, dict]) -> None:
+    """Riscrive delegations.jsonl con un solo record (legacy) per delega."""
+    tmp = path.with_suffix(path.suffix + f".compact.{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8", errors="replace") as fh:
+            for rec in latest.values():
+                fh.write(json.dumps({k: rec.get(k) for k in _PERSIST_FIELDS}, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+        logger.info("delegations.jsonl compattato: %d deleghe", len(latest))
+    except Exception:
+        logger.debug("delegation log compaction failed", exc_info=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _load_bg_tasks(workspace: str) -> None:
@@ -340,10 +374,12 @@ def _load_bg_tasks(workspace: str) -> None:
         return
     try:
         latest: dict[str, dict] = {}
+        n_lines = 0
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line:
                 continue
+            n_lines += 1
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
@@ -357,6 +393,22 @@ def _load_bg_tasks(workspace: str) -> None:
                 # output="") e get_background_tasks() non la filtra per eta',
                 # facendo riapparire le card dopo il riavvio.
                 latest[tid] = _canonical_to_legacy(rec)
+        # Compattazione: il log accumula ~7 righe per delega, ognuna con
+        # l'output intero (167 MB per 473 deleghe, una riga da 12,4 MB).
+        # Tieni l'ultimo record per id con i testi al tetto e riscrivi una volta.
+        from api.delegation_store import cap_text
+
+        capped = False
+        for rec in latest.values():
+            for key in ("output", "librarian_output"):
+                value = rec.get(key)
+                if isinstance(value, str):
+                    limited = cap_text(value)
+                    if limited != value:
+                        rec[key] = limited
+                        capped = True
+        if n_lines > len(latest) or capped:
+            _compact_delegation_log(path, latest)
         for tid, rec in latest.items():
             if tid in _BG_TASKS:
                 continue
@@ -393,6 +445,9 @@ def _load_bg_tasks(workspace: str) -> None:
         _store = get_delegation_store(workspace)
         _live_ids = set(_BG_TASKS.keys())
         _recovered = _store.recover_crashed(_live_ids)
+        _compacted = _store.compact()
+        if _compacted:
+            logger.info("delegation_store: tetto applicato a %d record gia' salvati", _compacted)
         if _recovered:
             logger.info(
                 "delegation_store: recovered %d crashed delegation(s): %s",
@@ -400,6 +455,55 @@ def _load_bg_tasks(workspace: str) -> None:
             )
     except Exception:
         logger.debug("delegation_store crash recovery failed", exc_info=True)
+
+
+def _arm_memory_fence(t: dict, workspace: str):
+    """Recinto memoria per tutti i sotto-agenti tranne Librarian e Prime.
+
+    Fotografa Vault, MEMORY.md e il banco memoria di Prime prima della delega.
+    Best-effort: un errore qui non deve mai bloccare la delega.
+    """
+    try:
+        from api import memory_fence
+
+        agent_ref = t.get("agent_id") or t.get("agent") or ""
+        if not memory_fence.fence_applies(agent_ref):
+            return None
+        extra: list[Path] = []
+        try:
+            from api.memory_retrieval import find_prime_memory_dir
+
+            prime_dir = find_prime_memory_dir()
+            if prime_dir is not None:
+                extra.append(Path(prime_dir))
+        except Exception:
+            pass
+        fence = memory_fence.MemoryFence(workspace, extra_protected=extra)
+        fence.arm()
+        return fence
+    except Exception:
+        logger.debug("memory fence arm failed", exc_info=True)
+        return None
+
+
+def _apply_memory_fence(fence, t: dict, output: str | None):
+    """Ripristina le scritture in memoria e appende il rapporto all'esito."""
+    if fence is None:
+        return output
+    try:
+        from api import memory_fence
+
+        report = fence.enforce()
+    except Exception:
+        logger.debug("memory fence enforce failed", exc_info=True)
+        return output
+    if not report.get("violations"):
+        return output
+    t["memory_fence"] = report
+    logger.warning("memory fence: %s ha toccato la memoria condivisa: %s", t.get("agent"), report)
+    if output is None:
+        return None
+    return str(output).rstrip() + "\n\n" + memory_fence.render_report(report)
 
 
 async def _run_and_store(task_id, task_type, task, model, label, workspace):
@@ -415,6 +519,7 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
         return
     session_id = str(t.get("session_id") or t.get("anchor_session_id") or "hermes-prime")
     worker_task = _task_with_session_rules(task, session_id)
+    fence = _arm_memory_fence(t, workspace)
     try:
         if model == _CODEX_MODEL:
             output = await _run_codex_worker_with_fallback(
@@ -423,6 +528,7 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
         else:
             output = await _run_worker(worker_task, model, workspace, agent_id=t.get("agent_id"), progress=t)
         output = _validate_delegation_output(output)
+        output = _apply_memory_fence(fence, t, output)
         t.update(
             status="ok",
             output=output,
@@ -463,6 +569,8 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
         except Exception:
             logger.debug("librarian hook enqueue failed", exc_info=True)
     except Exception as e:
+        # Anche se la delega fallisce, cio' che ha scritto in memoria va annullato.
+        _apply_memory_fence(fence, t, None)
         # Conserva l'eventuale output PARZIALE accumulato prima del blocco
         # (es. token finiti a meta' risposta): non deve andare perso.
         from api.delegation_store import classify_error as _clf_err
@@ -599,28 +707,22 @@ def _model_for(task_type: str, agent_id: str = ""):
     ragionamento pesante ("opus"/"ragiona"/"reason"/"claude") si usa Opus. Overridabile
     con HERMES_SUBAGENT_BRAIN=claude per tornare al vecchio routing Sonnet/Opus.
     """
-    t = (task_type or "").lower()
-    a = _agent_slug(agent_id)
-    # Override manuale dal pannello AGENTI: vince su tutto il routing sotto,
-    # compresa la regola "programmatore -> sempre Codex" (e' una scelta esplicita).
-    if agent_id:
-        from api import agent_models
+    from api import agent_models
 
+    a = _agent_slug(agent_id)
+    # 1) Override manuale dal pannello AGENTI: vince su tutto.
+    if agent_id:
         override = agent_models.get_overrides().get(_AGENT_NOTE_ALIASES.get(a, a))
         if override == "codex":
             return _CODEX_MODEL, "Codex"
         if override:
             return override, agent_models.label_for(override)
-    if a in _CODEX_AGENT_ALIASES or "codic" in t or "code" in t or "dev" in t:
-        return _CODEX_MODEL, "Codex"
-    # Richiesta esplicita di ragionamento cloud (rara): resta su Opus.
-    if any(k in t for k in ("opus", "ragiona", "reason", "claude")):
-        return "claude-opus-4-8", "Opus"
+    # 2) Brain forzato su Claude: il modello che conviene all'agente.
     if os.getenv("HERMES_SUBAGENT_BRAIN", "codex").strip().lower() == "claude":
-        if "sempl" in t or "simple" in t or "light" in t:
-            return "claude-sonnet-4-6", "Sonnet"
-        return "claude-opus-4-8", "Opus"
-    # Default: Codex per tutti i sotto-agenti (risparmia i crediti cloud).
+        model = claude_model_for_agent(agent_id)
+        return model, agent_models.label_for(model)
+    # 3) Auto: GPT (Codex) per tutti, qualunque sia il task_type. A quota
+    #    esaurita ci pensa _run_codex_worker_with_fallback, per agente.
     return _CODEX_MODEL, "Codex"
 
 
@@ -770,6 +872,36 @@ def _load_memory_mcp_servers(workspace: str) -> dict[str, dict[str, Any]]:
     return selected
 
 
+_LIBRARIAN_MIN_OUTPUT_ENV = "HERMES_LIBRARIAN_MIN_OUTPUT_CHARS"
+_LIBRARIAN_MIN_OUTPUT_CHARS = 300
+_NO_MEMORY_MARKERS = ("[no-memory]", "niente da memorizzare", "nothing to memorize")
+
+
+def _librarian_pass_needed(task_type: str, agent_id: str | None, output: str) -> tuple[bool, str]:
+    """Il pass memoria parte solo se c'e' un esito memorizzabile.
+
+    Prima partiva dopo OGNI delega riuscita, anche per esiti vuoti o di due
+    righe, mettendosi in coda dietro le deleghe. Salta: le deleghe del
+    Librarian stesso, gli esiti marcati [no-memory] / "niente da memorizzare"
+    e quelli sotto HERMES_LIBRARIAN_MIN_OUTPUT_CHARS caratteri.
+    """
+    slug = _agent_slug(agent_id)
+    canonical = _AGENT_NOTE_ALIASES.get(slug, slug)
+    if canonical == _LIBRARIAN_AGENT_ID or str(task_type or "").strip().lower() == "memoria":
+        return False, "delega del Librarian stesso: niente da ri-memorizzare"
+    text = str(output or "").strip()
+    lowered = text.lower()
+    if any(marker in lowered for marker in _NO_MEMORY_MARKERS):
+        return False, "esito marcato come non memorizzabile"
+    try:
+        minimum = int(os.getenv(_LIBRARIAN_MIN_OUTPUT_ENV, "").strip() or _LIBRARIAN_MIN_OUTPUT_CHARS)
+    except ValueError:
+        minimum = _LIBRARIAN_MIN_OUTPUT_CHARS
+    if len(text) < minimum:
+        return False, f"esito troppo corto ({len(text)} caratteri, soglia {minimum}): nessun pass memoria"
+    return True, ""
+
+
 def _enqueue_librarian_pass(
     task_id: str,
     task_type: str,
@@ -781,6 +913,14 @@ def _enqueue_librarian_pass(
 ) -> None:
     """Fire-and-forget: route an Agent Result through the Memory Librarian."""
     t = _BG_TASKS.get(task_id)
+    agent_ref = (t or {}).get("agent_id") or (t or {}).get("agent") or ""
+    needed, reason = _librarian_pass_needed(task_type, agent_ref, output)
+    if not needed:
+        if t is not None:
+            t["librarian_status"] = "skipped"
+            t["librarian_output"] = reason
+            _persist_bg_task(task_id, workspace)
+        return
     if t is not None:
         t["librarian_status"] = "in_corso"
         t["librarian_output"] = ""
@@ -845,7 +985,7 @@ async def _run_librarian_serial(
         except Exception:
             logger.debug("librarian usage ledger append failed", exc_info=True)
         if t is not None:
-            t.update(librarian_status="ok", librarian_output=result)
+            t.update(librarian_status="ok", librarian_output=result, librarian_model=_LIBRARIAN_MODEL)
             _persist_bg_task(task_id, workspace)
     except Exception as exc:
         logger.debug("librarian pass failed for %s", task_id, exc_info=True)
@@ -891,8 +1031,22 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def codex_fallback_model() -> str:
-    return os.getenv(_CODEX_FALLBACK_MODEL_ENV, _DEFAULT_CODEX_FALLBACK_MODEL).strip() or _DEFAULT_CODEX_FALLBACK_MODEL
+def claude_model_for_agent(agent_id: str | None) -> str:
+    """Il Claude che conviene a questo agente (vedi _AGENT_CLAUDE_MODELS)."""
+    slug = _agent_slug(agent_id)
+    canonical = _AGENT_NOTE_ALIASES.get(slug, slug)
+    return _AGENT_CLAUDE_MODELS.get(canonical, _DEFAULT_CODEX_FALLBACK_MODEL)
+
+
+def codex_fallback_model(agent_id: str | None = None) -> str:
+    """Modello Claude a cui cade il sotto-agente quando Codex non e' disponibile.
+
+    HERMES_CODEX_FALLBACK_MODEL, se impostata, vale per tutti (compatibilita');
+    altrimenti la scelta e' per agente."""
+    forced = os.getenv(_CODEX_FALLBACK_MODEL_ENV, "").strip()
+    if forced:
+        return forced
+    return claude_model_for_agent(agent_id)
 
 
 def codex_fallback_cooldown_seconds() -> float:
@@ -1033,12 +1187,12 @@ def reset_codex_fallback_for_tests() -> None:
     _clear_codex_fallback()
 
 
-def _set_progress_fallback(progress: dict | None, reason: str) -> None:
+def _set_progress_fallback(progress: dict | None, reason: str, agent_id: str | None = None) -> None:
     if progress is None:
         return
     progress["runtime"] = "sonnet-fallback"
     progress["fallback_runtime"] = "sonnet"
-    progress["fallback_model"] = codex_fallback_model()
+    progress["fallback_model"] = codex_fallback_model(agent_id)
     progress["fallback_reason"] = reason
     progress["output"] = (
         "Codex esaurito -> fallback Sonnet 4.6 temporaneo. "
@@ -1057,10 +1211,10 @@ async def _run_codex_worker_with_fallback(
     status = _codex_fallback_status()
     if status["active"]:
         reason = status.get("reason") or "cooldown quota Codex"
-        _set_progress_fallback(progress, reason)
+        _set_progress_fallback(progress, reason, agent_id)
         logger.warning("Codex subagent fallback active -> %s (%.0fs remaining)", status["model"], status["remaining"])
         return await _run_worker(
-            task, codex_fallback_model(), workspace, agent_id=agent_id, progress=progress
+            task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress
         )
 
     if progress is not None:
@@ -1074,22 +1228,22 @@ async def _run_codex_worker_with_fallback(
             raise
         if is_codex_start_error(exc):
             reason = str(exc)
-            _set_progress_fallback(progress, reason)
-            logger.warning("Codex subagent start failed -> fallback %s", codex_fallback_model())
+            _set_progress_fallback(progress, reason, agent_id)
+            logger.warning("Codex subagent start failed -> fallback %s", codex_fallback_model(agent_id))
             return await _run_worker(
-                task, codex_fallback_model(), workspace, agent_id=agent_id, progress=progress
+                task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress
             )
         if not is_codex_quota_error(exc):
             raise
         status = _mark_codex_exhausted(str(exc))
-        _set_progress_fallback(progress, status["reason"])
+        _set_progress_fallback(progress, status["reason"], agent_id)
         logger.warning(
             "Codex subagent quota exhausted -> fallback %s for %.0fs",
             status["model"],
             status["remaining"],
         )
         return await _run_worker(
-            task, codex_fallback_model(), workspace, agent_id=agent_id, progress=progress
+            task, codex_fallback_model(agent_id), workspace, agent_id=agent_id, progress=progress
         )
 
 

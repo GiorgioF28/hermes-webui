@@ -113,6 +113,32 @@ def _guess_provider(text_lower: str) -> str:
 
 # ── Status helpers ────────────────────────────────────────────────────────────
 
+# Tetto ai testi persistiti (output, librarian_output, result.text). Senza
+# tetto una delega fallita da 12,4 MB e' finita nel log tre volte e nello
+# stato canonico, riletti per intero a ogni avvio. In RAM il testo resta intero.
+_PERSIST_TEXT_MAX_CHARS_ENV = "HERMES_DELEGATION_PERSIST_MAX_CHARS"
+PERSIST_TEXT_MAX_CHARS = 65_536
+LIBRARIAN_MODEL_DEFAULT = "claude-haiku-4-5"
+
+
+def persist_text_limit() -> int:
+    raw = os.getenv(_PERSIST_TEXT_MAX_CHARS_ENV, "").strip()
+    try:
+        value = int(raw) if raw else PERSIST_TEXT_MAX_CHARS
+    except ValueError:
+        value = PERSIST_TEXT_MAX_CHARS
+    return max(value, 1_000)
+
+
+def cap_text(text: Any, limit: int | None = None) -> str:
+    text = str(text or "")
+    limit = persist_text_limit() if limit is None else int(limit)
+    if len(text) <= limit:
+        return text
+    marker = f"\n[…troncato a {limit} caratteri per la persistenza; originale {len(text)} caratteri]"
+    return text[: max(limit - len(marker), 0)].rstrip() + marker
+
+
 def normalise_status(raw: str) -> str:
     """Map any status string (legacy or canonical) to a canonical value."""
     s = str(raw or "").strip()
@@ -242,7 +268,7 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
     tid = str(t.get("id") or "")
     raw_status = str(t.get("status") or "")
     canonical_status = normalise_status(raw_status)
-    raw_output = str(t.get("output") or "")
+    raw_output = cap_text(t.get("output") or "")
     partial = (raw_status == "parziale")
 
     rt_raw = str(t.get("runtime") or "codex")
@@ -291,12 +317,12 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
         },
         librarian={
             "status": lib_status,
-            "provider": "claude",   # legacy Librarian was always claude
-            "model": "claude-sonnet-4-6",
+            "provider": "claude",   # il pass Librarian gira sempre via SDK Claude
+            "model": str(t.get("librarian_model") or LIBRARIAN_MODEL_DEFAULT),
             "started_at": None,
             "finished_at": None,
             "error": None,
-            "output": str(t.get("librarian_output") or ""),
+            "output": cap_text(t.get("librarian_output") or ""),
         },
         ui={
             "anchor_session_id": str(t.get("anchor_session_id") or t.get("session_id") or "hermes-prime"),
@@ -395,6 +421,40 @@ class DelegationStore:
         """Return all canonical records (one per id, no duplicates)."""
         with self._lock:
             return list(self._read_state().values())
+
+    def compact(self, limit: int | None = None) -> int:
+        """Applica il tetto ai testi dei record gia' salvati e riscrive lo stato.
+
+        Una tantum all'avvio: i record scritti prima del tetto (es. l'output
+        da 12,4 MB di d247) restano altrimenti nello stato per sempre, riletti
+        e riscritti per intero a ogni upsert. Ritorna quanti record ha toccato.
+        """
+        limit = persist_text_limit() if limit is None else int(limit)
+        with self._lock:
+            state = self._read_state()
+            changed = 0
+            for rec in state.values():
+                if not isinstance(rec, dict):
+                    continue
+                touched = False
+                result = rec.get("result")
+                if isinstance(result, dict):
+                    for key in ("text", "raw_excerpt", "stdout_tail", "stderr_tail"):
+                        value = result.get(key)
+                        if isinstance(value, str) and len(value) > limit:
+                            result[key] = cap_text(value, limit)
+                            touched = True
+                librarian = rec.get("librarian")
+                if isinstance(librarian, dict):
+                    value = librarian.get("output")
+                    if isinstance(value, str) and len(value) > limit:
+                        librarian["output"] = cap_text(value, limit)
+                        touched = True
+                if touched:
+                    changed += 1
+            if changed:
+                self._write_state(state)
+            return changed
 
     def get_pending_briefs_count(self) -> int:
         """Count records whose brief is not yet delivered."""

@@ -144,7 +144,9 @@ def test_run_librarian_uses_librarian_agent_memory_mcp_and_skill(monkeypatch, tm
 
     task, model, workspace, kwargs = calls[0]
     assert "Agent Result" in task
-    assert model == "claude-sonnet-4-6"
+    # Il modello del pass e' una scelta di prodotto (oggi Haiku 4.5, economico):
+    # il test vincola l'uso della costante, non il suo valore.
+    assert model == delegation._LIBRARIAN_MODEL
     assert workspace == str(tmp_path)
     assert kwargs["agent_id"] == "memory-librarian"
     assert set(kwargs["mcp_servers"]) == {"hermes-memory", "notion"}
