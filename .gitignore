@@ -78,3 +78,6 @@ data/email-vip.json
 # Dev-only lint tooling (ESLint runtime-error guard) — see TESTING.md
 node_modules/
 package-lock.json
+
+# Stato runtime del Command Bridge (brief queue, deleghe): vive nel workspace, non qui
+tasks/
