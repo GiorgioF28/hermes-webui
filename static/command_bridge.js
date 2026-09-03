@@ -758,12 +758,13 @@
                   '<option value="model:claude-opus-5">Opus 5</option>' +
                   '<option value="model:claude-sonnet-5">Sonnet 5</option>' +
                   '<option value="model:claude-haiku-4-5">Haiku 4.5</option>' +
-                  // Fable 5: disabilitato dal 2026-08-01 perche' sul piano Pro non era
-                  // incluso e l'API rispondeva 429. Dal 2026-08-05 l'account e' su piano
-                  // Max, quindi il gate lato UI e' rimosso: l'entitlement vero lo decide
-                  // comunque l'API (se non fosse coperto tornerebbe 429 e bridge_errors
-                  // lo mostra come "richiede crediti").
-                  '<option value="model:claude-fable-5">Fable 5</option>' +
+                  // Fable 5.1 (2026-09-02) al posto di Fable 5, ormai legacy. Id
+                  // ufficiale Claude API senza suffisso data. Storia: Fable era stato
+                  // disabilitato il 2026-08-01 (piano Pro, 429) e riabilitato il
+                  // 2026-08-05 col piano Max; l'entitlement vero lo decide comunque
+                  // l'API (se non fosse coperto tornerebbe 429 e bridge_errors lo
+                  // mostra come "richiede crediti").
+                  '<option value="model:claude-fable-5-1">Fable 5.1</option>' +
                 '</optgroup>' +
                 '<optgroup label="Altro brain">' +
                   '<option value="lead:codex">Codex (locale)</option>' +
@@ -914,12 +915,15 @@
   var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
   var _primeStreaming = false, _primeStreamId = null, _primeLiveTimer = null;
 
-  // Id modello -> nome umano per l'header (es. claude-fable-5 -> "Fable 5").
+  // Id modello -> nome umano per l'header (es. claude-fable-5-1 -> "Fable 5.1").
+  // I pattern sono prefissi: la voce piu' specifica deve precedere quella
+  // generica (claude-fable-5-1 matcha anche /^claude-fable-5/).
   function prettyModelName(id) {
     var raw = String(id || '').trim();
     if (!raw) return '';
     var m = raw.toLowerCase().replace(/^codex:/, '');
     var known = [
+      [/^claude-fable-5-1/, 'Fable 5.1'],
       [/^claude-fable-5/, 'Fable 5'],
       [/^claude-opus-5/, 'Opus 5'],
       [/^claude-opus-4-8/, 'Opus 4.8'],

@@ -614,10 +614,17 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert 'value="model:claude-opus-5"' in source
     assert 'value="lead:codex"' in source
     assert 'value="action:auto"' in source
-    # Fable 5 selezionabile dal 2026-08-05 (account passato al piano Max): il gate
-    # UI "disabled" e' stato rimosso, l'entitlement reale lo applica l'API.
-    assert 'value="model:claude-fable-5">' in source
-    assert 'claude-fable-5" disabled' not in source
+    # Fable 5.1 (2026-09-02) al posto di Fable 5, ormai legacy: l'id e' quello
+    # ufficiale della Claude API, senza suffisso data. Il gate UI "disabled"
+    # resta rimosso: l'entitlement reale lo applica l'API.
+    assert 'value="model:claude-fable-5-1">Fable 5.1<' in source
+    assert 'value="model:claude-fable-5">' not in source
+    assert 'claude-fable-5-1" disabled' not in source
+    # L'header deve etichettare il nuovo id come "Fable 5.1", non come "Fable 5":
+    # il pattern /^claude-fable-5/ matcha anche claude-fable-5-1, quindi la
+    # voce 5.1 deve precederlo nella mappa.
+    assert "[/^claude-fable-5-1/, 'Fable 5.1']" in source
+    assert source.index("[/^claude-fable-5-1/, 'Fable 5.1']") < source.index("[/^claude-fable-5/, 'Fable 5']")
     assert "api/bridge/prime/lead" in source
     assert "api/bridge/prime/model" in source
     assert "action: 'auto'" in source

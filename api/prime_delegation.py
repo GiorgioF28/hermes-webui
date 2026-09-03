@@ -8,7 +8,7 @@ result to Prime AND records a delegation event so the WebUI can show a card.
 Model routing (auto, per task type):
     semplice  -> Sonnet (claude-sonnet-4-6)
     codice    -> Codex CLI (subprocess) — vedi _run_codex_worker
-    altro     -> Opus   (claude-opus-4-8)
+    altro     -> Opus   (claude-opus-5)
 """
 from __future__ import annotations
 
@@ -605,11 +605,11 @@ def _model_for(task_type: str, agent_id: str = ""):
         return _CODEX_MODEL, "Codex"
     # Richiesta esplicita di ragionamento cloud (rara): resta su Opus.
     if any(k in t for k in ("opus", "ragiona", "reason", "claude")):
-        return "claude-opus-4-8", "Opus"
+        return "claude-opus-5", "Opus"
     if os.getenv("HERMES_SUBAGENT_BRAIN", "codex").strip().lower() == "claude":
         if "sempl" in t or "simple" in t or "light" in t:
             return "claude-sonnet-4-6", "Sonnet"
-        return "claude-opus-4-8", "Opus"
+        return "claude-opus-5", "Opus"
     # Default: Codex per tutti i sotto-agenti (risparmia i crediti cloud).
     return _CODEX_MODEL, "Codex"
 
