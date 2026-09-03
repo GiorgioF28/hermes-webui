@@ -89,7 +89,7 @@ class CodexSystemPromptTests(unittest.TestCase):
         self.sent = []
         self._orig_exec = pd._codex_exec_blocking
 
-        def fake_exec(prompt, workspace):
+        def fake_exec(prompt, workspace, timeout=None):  # timeout: fase del run budget
             self.sent.append(prompt)
             return "fatto"
 

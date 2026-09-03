@@ -36,6 +36,33 @@ _CODEX_MODEL = "__codex_cli__"
 # (implementare una spec + test) sforavano i 600s precedenti. Overridabile con
 # HERMES_CODEX_TIMEOUT. Alzalo ancora se ricompaiono errori 'codex_timeout'.
 _CODEX_TIMEOUT = int(os.getenv("HERMES_CODEX_TIMEOUT", "1000") or "1000")
+# Run budget: il timeout totale e' diviso in lavoro (80%) e wrap-up (20%).
+# Se il lavoro sfora, il wrap-up riceve l'output parziale e consegna un
+# Agent Result PARZIALE invece di perdere tutto (p90 reale delle deleghe a
+# 961 s contro un timeout di 1000 s). HERMES_DELEGATION_WRAPUP_SHARE=0 disattiva.
+_WRAPUP_SHARE_ENV = "HERMES_DELEGATION_WRAPUP_SHARE"
+_DEFAULT_WRAPUP_SHARE = 0.2
+_WRAPUP_MARKER = "\u23f1 ESITO PARZIALE (run budget esaurito, consolidato dal wrap-up)\n"
+
+
+def run_budget_seconds() -> float:
+    return float(_CODEX_TIMEOUT)
+
+
+def wrapup_share() -> float:
+    raw = os.getenv(_WRAPUP_SHARE_ENV, "").strip()
+    try:
+        share = float(raw) if raw else _DEFAULT_WRAPUP_SHARE
+    except ValueError:
+        share = _DEFAULT_WRAPUP_SHARE
+    return min(max(share, 0.0), 0.5)
+
+
+def budget_phases() -> tuple[float, float]:
+    """(secondi di lavoro, secondi di wrap-up): la somma e' il budget totale."""
+    total = run_budget_seconds()
+    wrap = round(total * wrapup_share(), 3)
+    return (round(total - wrap, 3), wrap)
 
 # session_id -> list[ {agent, task_type, task, status, output} ] for the current turn
 _DELEGATIONS: dict[str, list] = {}
@@ -534,14 +561,15 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
             )
         output = _validate_delegation_output(output)
         output = _apply_memory_fence(fence, t, output)
+        partial_result = bool(t.get("result_partial")) or str(output or "").startswith(_WRAPUP_MARKER)
         t.update(
-            status="ok",
+            status="parziale" if partial_result else "ok",
             output=output,
             finished=time.time(),
             failure_reason="",
             error_category="",
             error_code="",
-            result_partial=False,
+            result_partial=partial_result,
         )
         _persist_bg_task(task_id, workspace)
         # Fase 1: enqueue brief for delivery (idempotent)
@@ -1245,6 +1273,8 @@ async def _run_codex_worker_with_fallback(
     try:
         output = await _run_codex_worker(task, workspace, agent_id=agent_id)
         _clear_codex_fallback()
+        if progress is not None and str(output or "").startswith(_WRAPUP_MARKER):
+            progress["result_partial"] = True
         return output
     except Exception as exc:
         if isinstance(exc, CodexTimeoutError):
@@ -1272,7 +1302,7 @@ async def _run_codex_worker_with_fallback(
         )
 
 
-def _codex_exec_blocking(task: str, workspace: str) -> str:
+def _codex_exec_blocking(task: str, workspace: str, timeout: float | None = None) -> str:
     """Run one Codex CLI exec turn (blocking) and return stdout (or raise).
 
     Il prompt viaggia su STDIN (`codex exec -`), MAI come argomento.
@@ -1300,7 +1330,7 @@ def _codex_exec_blocking(task: str, workspace: str) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=_CODEX_TIMEOUT,
+        timeout=float(timeout) if timeout else _CODEX_TIMEOUT,
         shell=False,
     )
     out = (proc.stdout or "").strip()
@@ -1332,25 +1362,71 @@ def _codex_worker_prompt(task: str, agent_id: str | None, workspace: str) -> str
     )
 
 
+def _timeout_partial(exc: subprocess.TimeoutExpired) -> str:
+    """Output parziale (stdout + stderr) di un Codex ucciso dal timeout."""
+    chunks = []
+    for raw in (exc.stdout or exc.output, exc.stderr):
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        raw = str(raw or "").strip()
+        if raw:
+            chunks.append(raw)
+    return "\n".join(chunks)
+
+
+def _codex_wrapup_prompt(task: str, agent_id: str | None, workspace: str, partial: str, *, elapsed: float, budget: float) -> str:
+    system = _worker_system_prompt(agent_id, workspace).strip()
+    agent_label = str(agent_id or "sotto-agente").replace("-", " ").strip().title()
+    partial = str(partial or "").strip()
+    if len(partial) > 12_000:
+        partial = partial[-12_000:]
+        partial = "[...]\n" + partial
+    return (
+        "# ISTRUZIONI DI SISTEMA (vincolanti, non sono il task)\n"
+        f"{system}\n\n"
+        "---\n\n"
+        f"# WRAP-UP PER L'AGENTE {agent_label}: RUN BUDGET ESAURITO\n"
+        f"Il tentativo precedente su questo task e' stato interrotto dopo {elapsed:.0f} s. "
+        "NON riprendere il lavoro e non fare nuove modifiche. "
+        f"Hai al massimo {budget:.0f} s: verifica sul disco cosa e' stato fatto davvero "
+        "(git status, git diff --stat, file creati o modificati), poi consegna SUBITO un "
+        "Agent Result PARZIALE con: fatto (path e commit reali), non fatto, rischi lasciati "
+        "aperti, prossimo passo concreto per chi riprende.\n\n"
+        f"## Task originale\n{str(task).strip()}\n\n"
+        f"## Output parziale del tentativo interrotto\n{partial or '(nessun output)'}\n"
+    )
+
+
 async def _run_codex_worker(task: str, workspace: str, *, agent_id: str | None = None) -> str:
-    """Run a Codex CLI exec turn off the event loop (non-blocking)."""
+    """Run a Codex CLI exec turn off the event loop (non-blocking).
+
+    Run budget in due fasi: lavoro (soft) e, se sfora, un wrap-up breve che
+    riceve l'output parziale e consegna un Agent Result PARZIALE. L'esito del
+    wrap-up e' marcato con _WRAPUP_MARKER cosi' il chiamante lo registra come
+    "parziale" invece di "ok".
+    """
     prompt = _codex_worker_prompt(task, agent_id, workspace)
+    soft, wrap = budget_phases()
+    started = time.time()
     try:
-        return await asyncio.to_thread(_codex_exec_blocking, prompt, workspace)
+        return await asyncio.to_thread(_codex_exec_blocking, prompt, workspace, soft)
     except subprocess.TimeoutExpired as e:
-        # Conserva l'output parziale prodotto da Codex prima del timeout.
-        # Include anche stderr: a quota esaurita il CLI stampa il messaggio di
-        # usage limit e poi resta appeso fino al timeout — senza stderr nel
-        # testo dell'errore is_codex_quota_error non scatterebbe mai.
-        chunks = []
-        for raw in (e.stdout or e.output, e.stderr):
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", "replace")
-            raw = str(raw or "").strip()
-            if raw:
-                chunks.append(raw)
-        partial = "\n".join(chunks)
-        raise CodexTimeoutError(float(getattr(e, "timeout", None) or _CODEX_TIMEOUT), partial) from e
+        partial = _timeout_partial(e)
+        if wrap <= 0:
+            raise CodexTimeoutError(soft, partial) from e
+        logger.warning(
+            "codex worker oltre il budget di lavoro (%.0fs): wrap-up di %.0fs per %s",
+            soft, wrap, agent_id or "sotto-agente",
+        )
+        wrap_prompt = _codex_wrapup_prompt(
+            task, agent_id, workspace, partial, elapsed=time.time() - started, budget=wrap
+        )
+        try:
+            output = await asyncio.to_thread(_codex_exec_blocking, wrap_prompt, workspace, wrap)
+        except subprocess.TimeoutExpired as e2:
+            combined = "\n\n".join(p for p in (partial, _timeout_partial(e2)) if p)
+            raise CodexTimeoutError(soft + wrap, combined) from e2
+        return _WRAPUP_MARKER + str(output or "").strip()
     except (FileNotFoundError, PermissionError, OSError) as e:
         raise CodexStartError(f"Codex CLI non avviabile: {e}") from e
 
@@ -1390,8 +1466,11 @@ async def _run_worker(
     await client.connect()
     parts: list[str] = []
     final = ""
-    try:
-        await client.query(str(task))
+    soft, wrap = budget_phases()
+    wrapped_up = False
+
+    async def _consume() -> None:
+        nonlocal final
         async for m in client.receive_response():
             cls = type(m).__name__
             if cls == "AssistantMessage":
@@ -1413,12 +1492,55 @@ async def _run_worker(
                         provider="claude",
                         partial_output=partial,
                     )
+    try:
+        await client.query(str(task))
+        try:
+            await asyncio.wait_for(_consume(), timeout=soft if soft > 0 else None)
+        except asyncio.TimeoutError:
+            pre = "".join(parts).strip()
+            if wrap <= 0:
+                raise DelegationRuntimeError(
+                    f"Claude worker oltre il run budget ({soft:.0f}s)",
+                    category="timeout", provider="claude", partial_output=pre,
+                )
+            logger.warning("claude worker oltre il budget di lavoro (%.0fs): wrap-up di %.0fs per %s", soft, wrap, agent_id or "sotto-agente")
+            try:
+                await client.interrupt()
+            except Exception:
+                logger.debug("worker interrupt failed", exc_info=True)
+            n0 = len(parts)
+            await client.query(_claude_wrapup_message(task, agent_id, elapsed=soft, budget=wrap))
+            try:
+                await asyncio.wait_for(_consume(), timeout=wrap)
+            except asyncio.TimeoutError:
+                raise DelegationRuntimeError(
+                    f"Claude worker oltre il run budget anche nel wrap-up ({soft + wrap:.0f}s)",
+                    category="timeout", provider="claude", partial_output=pre,
+                )
+            wrapped_up = True
+            wrap_text = "".join(parts[n0:]).strip() or final.strip()
+            if pre:
+                wrap_text = wrap_text + "\n\n## Output parziale prima del wrap-up\n" + pre
+            if progress is not None:
+                progress["result_partial"] = True
+            return _WRAPUP_MARKER + wrap_text
     finally:
         try:
             await client.disconnect()
         except Exception:
             logger.debug("worker disconnect failed", exc_info=True)
     return ("".join(parts).strip() or final.strip())
+
+
+def _claude_wrapup_message(task: str, agent_id: str | None, *, elapsed: float, budget: float) -> str:
+    agent_label = str(agent_id or "sotto-agente").replace("-", " ").strip().title()
+    return (
+        f"WRAP-UP PER L'AGENTE {agent_label}: RUN BUDGET ESAURITO. Il lavoro e' stato interrotto dopo "
+        f"{elapsed:.0f} s. NON riprenderlo e non fare nuove modifiche. Hai al massimo {budget:.0f} s: "
+        "verifica sul disco cosa e' stato fatto davvero (git status, git diff --stat, file creati) e "
+        "consegna SUBITO un Agent Result PARZIALE con: fatto (path e commit reali), non fatto, rischi "
+        "lasciati aperti, prossimo passo concreto per chi riprende."
+    )
 
 
 def build_prime_delegation_server(session_id: str, workspace: str):

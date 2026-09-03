@@ -64,7 +64,7 @@ def test_codex_timeout_with_task_output_mentioning_quota_is_not_quota_error():
 
 @pytest.mark.asyncio
 async def test_codex_timeout_preserves_stderr_partial(monkeypatch):
-    def fake_exec(task, workspace):
+    def fake_exec(task, workspace, timeout=None):  # timeout: fase del run budget
         raise subprocess.TimeoutExpired(
             cmd=["codex", "exec"], timeout=1000,
             output=b"", stderr=b"You've hit your usage limit.",
