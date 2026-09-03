@@ -696,6 +696,35 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _agent_registry_credential_env_names() -> set[str]:
+    """Nomi delle env di credenziali che legge il runtime dell'agente
+    (hermes_cli.auth.PROVIDER_REGISTRY): include i provider a token/OAuth come
+    ANTHROPIC_TOKEN e CLAUDE_CODE_OAUTH_TOKEN, assenti dalla mappa WebUI delle
+    chiavi impostabili. Senza questi nomi lo scrub del profilo li lascerebbe in
+    os.environ e un profilo "vuoto" erediterebbe il token Anthropic del server
+    (upstream #3961/#4544)."""
+    names: set[str] = set()
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        registry = PROVIDER_REGISTRY
+        items = registry.items() if hasattr(registry, "items") else enumerate(registry)
+        for _key, entry in items:
+            for env_var in getattr(entry, "api_key_env_vars", None) or ():
+                if env_var:
+                    names.add(str(env_var))
+    except Exception:
+        logger.debug("Failed to load agent registry credential env names for profile scope", exc_info=True)
+    return names
+
+
+def profile_credential_env_names() -> set[str]:
+    """Tutte le env di credenziali provider: mappa WebUI + registro dell'agente."""
+    names = {str(v) for v in _PROVIDER_ENV_MAP.values() if v}
+    names.update(_agent_registry_credential_env_names())
+    return names
+
+
 @contextmanager
 def profile_env_for_background_worker(
     session,
@@ -749,11 +778,17 @@ def profile_env_for_background_worker(
     try:
         _set_thread_env(**thread_env)
         with _ENV_LOCK:
-            old_runtime_env = {key: os.environ.get(key) for key in runtime_env}
+            # Credenziali provider che il profilo NON definisce: vanno tolte
+            # dall'ambiente del worker, non ereditate dal processo server
+            # (upstream #3961/#4544). Ripristinate a fine worker.
+            scrub_keys = profile_credential_env_names() - set(runtime_env)
+            old_runtime_env = {key: os.environ.get(key) for key in (*runtime_env, *scrub_keys)}
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
             skill_home_snapshot = snapshot_skill_home_modules()
             os.environ.update(runtime_env)
+            for key in scrub_keys:
+                os.environ.pop(key, None)
             os.environ["HERMES_HOME"] = str(profile_home_path)
             try:
                 patch_skill_home_modules(profile_home_path)

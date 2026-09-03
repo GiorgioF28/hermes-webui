@@ -671,6 +671,10 @@ def test_server():
         # ~200MB — impractical to exceed in a test). 5MB is far above any other
         # test's archive payload, so only the bomb test trips it.
         "HERMES_WEBUI_MAX_EXTRACTED_MB":  "5",
+        # server.py carica il .env del repo con semantica `source` (7d83e23b):
+        # senza questo flag HERMES_WEBUI_PORT=8787 del .env vincerebbe sulla
+        # porta di test e il server di prova partirebbe sulla porta sbagliata.
+        "HERMES_WEBUI_PRESERVE_ENV":      "1",
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR":         str(TEST_STATE_DIR),

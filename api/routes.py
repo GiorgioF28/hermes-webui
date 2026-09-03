@@ -213,6 +213,42 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
 from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.profiles import get_active_profile_name as _get_active_profile_name  # noqa: E402
+
+
+def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
+    """Una sessione caricata per id appartiene al profilo attivo?
+
+    Le letture per id (GET /api/session, export) devono rispettare lo stesso
+    confine di profilo di /api/sessions: altrimenti chi conosce un id legge o
+    esporta le conversazioni di un altro profilo (upstream #3982/#3991).
+    Le chiamate interne senza request handler mantengono il comportamento
+    storico (nessun filtro).
+    """
+    if handler is None:
+        return True
+    if not isinstance(session_profile, str):
+        session_profile = None
+    return _profiles_match(session_profile, _get_active_profile_name())
+
+
+def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
+    """Registrare una passkey e' un'azione di autenticazione: serve una sessione.
+
+    Con auth disattivata passa solo dal gate locale del primo avvio (lo stesso
+    della prima password), altrimenti chiunque in LAN potrebbe registrare una
+    passkey e diventare amministratore (upstream #4171).
+    """
+    from api import auth as _auth
+
+    if not _auth.is_auth_enabled():
+        if _onboarding_gate_allows(handler):
+            return True, "", 200
+        return False, "Authentication required", 401
+    cookie_val = _auth.parse_cookie(handler)
+    if not cookie_val or not _auth.verify_session(cookie_val):
+        return False, "Authentication required", 401
+    return True, "", 200
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -5718,6 +5754,9 @@ def handle_get(handler, parsed) -> bool:
             state_db_messages = []
             metadata_summary = None
             _session_profile = getattr(s, 'profile', None) or None
+            # Stesso confine di profilo di /api/sessions anche per id (#3982).
+            if not _session_visible_to_active_profile(_session_profile, handler):
+                return bad(handler, "Session not found", 404)
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -9006,6 +9045,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_registration_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             return j(handler, {"ok": True, "publicKey": registration_options(handler)})
         except PasskeyRateLimitError as e:
@@ -9019,6 +9061,9 @@ def handle_post(handler, parsed) -> bool:
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        ok, error, status = _require_passkey_registration_auth(handler)
+        if not ok:
+            return j(handler, {"error": error}, status=status)
         try:
             result = finish_registration(body, handler)
             result["credentials"] = registered_credentials()
@@ -9264,6 +9309,9 @@ def _handle_session_export(handler, parsed):
     try:
         s = get_session(sid)
     except KeyError:
+        return bad(handler, "Session not found", 404)
+    # L'export per id non deve scavalcare il confine di profilo (#3991).
+    if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
         return bad(handler, "Session not found", 404)
     safe = redact_session_data(s.__dict__)
     payload = json.dumps(safe, ensure_ascii=False, indent=2)
