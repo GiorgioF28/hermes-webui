@@ -542,6 +542,11 @@
 '.cb-flex-item{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px;align-items:start;font-size:11px;color:var(--cb-text);line-height:1.28;}',
 '.cb-flex-tag{font-family:var(--cb-mono);font-size:8.5px;color:var(--cb-accent-2);border:1px solid var(--cb-line2);border-radius:6px;padding:2px 4px;white-space:nowrap;}',
 '.cb-flex-summary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+'.cb-flex-daily-summary{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}',
+'.cb-flex-daily-row{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px;align-items:start;font-size:11px;color:var(--cb-text);line-height:1.28;}',
+'.cb-flex-daily-check{grid-template-columns:auto auto minmax(0,1fr);cursor:pointer;}',
+'.cb-flex-daily-check input{accent-color:var(--cb-accent);margin:1px 0 0;cursor:pointer;}',
+'.cb-flex-daily-check.done{color:var(--cb-faint);text-decoration:line-through;}',
 '.cb-planet{position:relative;flex:1;min-height:0;}',
 '.cb-planet canvas{display:block;}',
 '@media(max-width:980px){.cb-right{display:none;}.cb-petals{left:0;right:0;}}',
@@ -2780,7 +2785,7 @@
 
   var _worklogData = null;
   var _dailyChecklistData = null;
-  var _worklogTab = 'work';
+  var _worklogTab = 'daily';
 
   function renderWorklog(data) {
     _worklogData = data;
@@ -2792,8 +2797,8 @@
     if (!box) return;
     var data = _worklogData;
     var tabs = '<div class="cb-flex-tabs">' +
-      '<button type="button" class="cb-flex-tab ' + (_worklogTab === 'work' ? 'active' : '') + '" data-tab="work">Work log</button>' +
       '<button type="button" class="cb-flex-tab ' + (_worklogTab === 'daily' ? 'active' : '') + '" data-tab="daily">Giornaliere</button>' +
+      '<button type="button" class="cb-flex-tab ' + (_worklogTab === 'work' ? 'active' : '') + '" data-tab="work">Work log</button>' +
       '</div>';
     if (_worklogTab === 'daily') {
       var daily = _dailyChecklistData;
@@ -2801,17 +2806,49 @@
         box.innerHTML = tabs + '<div class="cb-empty">caricamento giornaliere</div>';
       } else {
         var globalStreak = (daily.streaks && daily.streaks.global) || {};
+        // Le giornaliere DA FARE sono il segnale utile del mattino: prima quelle
+        // aperte, poi quelle chiuse oggi, poi lo storico dei giorni passati.
+        var todo = [], doneToday = [];
+        (daily.projects || []).forEach(function (project) {
+          (project.items || []).forEach(function (item) {
+            (item.done ? doneToday : todo).push({ project: project.name, item: item });
+          });
+        });
+        function dailyRow(entry, done) {
+          return '<label class="cb-flex-daily-row cb-flex-daily-check' + (done ? ' done' : '') + '">' +
+            '<input type="checkbox" data-flex-daily-id="' + esc(entry.item.id) + '"' + (done ? ' checked' : '') + '>' +
+            '<span class="cb-flex-tag">' + esc(entry.project || 'Altro') + '</span>' +
+            '<span>' + esc(entry.item.text || '') + '</span>' +
+          '</label>';
+        }
+        var todoHtml = todo.length
+          ? todo.map(function (e) { return dailyRow(e, false); }).join('')
+          : '<div class="cb-empty">tutte le giornaliere di oggi sono chiuse</div>';
+        var doneHtml = doneToday.length
+          ? '<div class="cb-flex-day">fatte oggi</div>' + doneToday.map(function (e) { return dailyRow(e, true); }).join('')
+          : '';
         var history = daily.history || [];
         var historyHtml = history.length ? history.map(function (row) {
           return '<div class="cb-flex-day">' + esc(row.date || '') + '</div>' + (row.items || []).map(function (item) {
             return '<div class="cb-flex-daily-row"><span class="cb-flex-tag">' + esc(item.project_name || 'Altro') + '</span><span>' + esc(item.text || '') + '</span></div>';
           }).join('');
-        }).join('') : '<div class="cb-empty">nessuna giornaliera completata</div>';
+        }).join('') : '';
         box.innerHTML = tabs +
           '<div class="cb-flex-daily-summary">' +
-            '<span class="cb-flex-badge hot">&#128293; streak ' + Number(globalStreak.current || 0) + 'g</span>' +
+            '<span class="cb-flex-badge' + (todo.length ? ' hot' : '') + '">' + todo.length + ' da fare</span>' +
+            '<span class="cb-flex-badge">' + Number(daily.done || 0) + '/' + Number(daily.total || 0) + ' oggi</span>' +
+            '<span class="cb-flex-badge">&#128293; streak ' + Number(globalStreak.current || 0) + 'g</span>' +
             '<span class="cb-flex-badge">record ' + Number(globalStreak.record || 0) + 'g</span>' +
-          '</div><div class="cb-flex-recent">' + historyHtml + '</div>';
+          '</div>' +
+          '<div class="cb-flex-recent">' +
+            '<div class="cb-flex-day">da fare &middot; ' + esc(daily.date || '') + '</div>' + todoHtml +
+            doneHtml + historyHtml +
+          '</div>';
+        Array.prototype.forEach.call(box.querySelectorAll('input[data-flex-daily-id]'), function (checkbox) {
+          checkbox.addEventListener('change', function () {
+            toggleDaily(checkbox.getAttribute('data-flex-daily-id'), checkbox.checked);
+          });
+        });
       }
       wireWorklogTabs(box);
       return;
@@ -3046,20 +3083,32 @@
       }
       if (repo.name) _repoStatusCache[repo.name] = repo;
       var ahead = Number(repo.ahead || 0), behind = Number(repo.behind || 0), dirty = Number(repo.dirty || 0);
+      var stranded = (repo.stranded && repo.stranded.length) ? repo.stranded.length : 0;
       var liveBehind = !!repo.live_behind;
       // Fallback per cache senza il nuovo campo: replica la logica backend
-      if (!liveBehind && (dirty > 0 || ahead > 0 || behind > 0 || (repo.stranded && repo.stranded.length))) {
+      if (!liveBehind && (dirty > 0 || ahead > 0 || behind > 0 || stranded)) {
         liveBehind = true;
       }
       var badgeClass = liveBehind ? 'live-behind' : (behind > 0 ? 'error' : ((ahead > 0 || dirty > 0) ? 'warn' : 'ok'));
-      var badgeExtra = liveBehind
-        ? ' data-repo="' + esc(repo.name) + '" title="Clicca per far mergiare e deployare a Prime" role="button" tabindex="0"'
-        : '';
+      // Etichetta sintetica: dice COSA manca, non "↑0 ↓0" che a branch allineati
+      // e' sempre zero e nasconde la causa vera (file sporchi / branch orfani).
+      var badgeLabel = 'in pari';
+      if (behind > 0) badgeLabel = 'da aggiornare';
+      else if (ahead > 0) badgeLabel = 'da pushare';
+      else if (dirty > 0) badgeLabel = 'da committare';
+      else if (stranded > 0) badgeLabel = 'branch orfani';
+      var detail = ahead + ' avanti, ' + behind + ' indietro, ' + dirty + ' file modificati, ' + stranded + ' branch orfani';
+      var badgeTitle = liveBehind
+        ? detail + ' — clicca per far mergiare e deployare a Prime'
+        : detail;
+      var badgeExtra = ' title="' + esc(badgeTitle) + '"' + (liveBehind
+        ? ' data-repo="' + esc(repo.name) + '" role="button" tabindex="0"'
+        : '');
       var head = repo.head || {};
       return '<div class="cb-repo-row">' +
         '<div class="cb-repo-main"><span class="cb-repo-name">' + esc(repo.name) + '</span><span class="cb-repo-branch" title="' + esc(repo.branch || '') + '">' + esc(repo.branch || 'n/d') + '</span></div>' +
-        '<span class="cb-repo-badge ' + badgeClass + '"' + badgeExtra + '>↑' + ahead + ' ↓' + behind + '</span>' +
-        '<span class="cb-repo-dirty" title="File modificati">Δ' + dirty + '</span>' +
+        '<span class="cb-repo-badge ' + badgeClass + '"' + badgeExtra + '>' + esc(badgeLabel) + '</span>' +
+        '<span class="cb-repo-dirty" title="' + esc(detail) + '">Δ' + dirty + (stranded ? ' ⑂' + stranded : '') + '</span>' +
         '<span class="cb-repo-headhash" title="' + esc(head.subject || '') + '">' + esc(head.hash || '--') + '</span>' +
       '</div>';
     });
