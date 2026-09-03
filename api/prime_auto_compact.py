@@ -321,6 +321,42 @@ def _prune_prime_tool_results_after_compaction(registry: Any, session_id: str) -
 
 # ── Main entry points ──────────────────────────────────────────────────────────
 
+def precompact_checkpoint_enabled() -> bool:
+    from api import precompact_checkpoint
+
+    return precompact_checkpoint.enabled()
+
+
+def run_precompact_checkpoint(registry: Any, session_id: str) -> dict:
+    """Hook verso api.precompact_checkpoint (sostituibile nei test)."""
+    from api import precompact_checkpoint
+
+    return precompact_checkpoint.run_for_registry(registry, session_id)
+
+
+def _run_checkpoint_or_block(registry: Any, session_id: str, *, before_tokens: int, reason: str):
+    """Checkpoint memoria prima di compattare. Ritorna (checkpoint, None) oppure
+    (None, esito) quando il checkpoint fallisce: fail-closed, niente compact."""
+    if not precompact_checkpoint_enabled():
+        return None, None
+    try:
+        return run_precompact_checkpoint(registry, session_id), None
+    except Exception as exc:
+        event = {
+            "session_id": session_id,
+            "before_tokens": _safe_int(before_tokens),
+            "after_tokens": 0,
+            "after_tokens_unknown": True,
+            "reason": "checkpoint_failed",
+            "compact_reason": reason,
+            "status": "checkpoint_failed",
+            "error": str(exc) or type(exc).__name__,
+        }
+        append_prime_auto_compact_event(event)
+        logger.warning("prime_auto_compact: checkpoint memoria fallito, compattazione rinviata: %s", exc)
+        return None, {"compacted": False, **event}
+
+
 def maybe_auto_compact_prime(
     registry: Any,
     *,
@@ -345,6 +381,13 @@ def maybe_auto_compact_prime(
     decision = state.consider(usage, idle=idle, cap_tokens=cap, force=force)
     if not decision.should_compact:
         return {"compacted": False, "reason": decision.reason, "before_tokens": decision.before_tokens}
+    # Prima di riassumere la conversazione, cio' che non e' ancora in memoria
+    # va salvato dal Librarian. Se fallisce, niente compact (fail-closed).
+    checkpoint, blocked = _run_checkpoint_or_block(
+        registry, session_id, before_tokens=decision.before_tokens, reason=decision.reason
+    )
+    if blocked is not None:
+        return blocked
 
     try:
         if run_service_turn is None:
@@ -374,6 +417,7 @@ def maybe_auto_compact_prime(
             "cooldown_turns": state.cooldown_turns,
             "reason": decision.reason,
             "forced": decision.forced,
+            "checkpoint": checkpoint,
             "status": "ok",
         }
         append_prime_auto_compact_event(event)
@@ -408,6 +452,11 @@ def compact_prime_now(
 ) -> dict:
     """Force a Prime ``/compact`` service turn and log it next to auto events."""
     before_tokens = _safe_int(before_tokens)
+    checkpoint, blocked = _run_checkpoint_or_block(
+        registry, session_id, before_tokens=before_tokens, reason=reason
+    )
+    if blocked is not None:
+        return {"ok": False, **blocked}
     try:
         if run_service_turn is None:
             result = _run_compact_service_turn(registry, session_id, compact_timeout_seconds())
@@ -430,6 +479,7 @@ def compact_prime_now(
             "forced": True,
             "manual": True,
             "pruned_tool_results": pruned_tool_results,
+            "checkpoint": checkpoint,
             "status": "ok",
         }
         append_prime_auto_compact_event(event)
