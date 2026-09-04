@@ -873,16 +873,48 @@ def _agent_note_text(agent_id: str | None, workspace: str) -> str:
         return ""
 
 
+_CONTEXT_FILES_ENV = "HERMES_WORKER_CONTEXT_FILES"
+_CONTEXT_FILE_NAMES = ("AGENTS.md",)
+_CONTEXT_FILE_MAX_CHARS = 6_000
+
+
+def _workspace_context_files(workspace: str) -> str:
+    """Regole del workspace (AGENTS.md) da embeddare nel prompt dei worker.
+
+    Come in hermes-agent upstream, ogni sotto-agente riceve i context files del
+    workspace: e' li' che stanno le regole di lavoro (base = branch checkout-ato,
+    niente origin/master, niente segreti nel repo). HERMES_WORKER_CONTEXT_FILES=0
+    disattiva. Tetto di caratteri per non gonfiare ogni delega.
+    """
+    if os.getenv(_CONTEXT_FILES_ENV, "1").strip().lower() in {"0", "false", "off", "no"}:
+        return ""
+    blocks: list[str] = []
+    for name in _CONTEXT_FILE_NAMES:
+        path = Path(workspace) / name
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        if len(text) > _CONTEXT_FILE_MAX_CHARS:
+            text = text[:_CONTEXT_FILE_MAX_CHARS].rstrip() + f"\n[…troncato a {_CONTEXT_FILE_MAX_CHARS} caratteri]"
+        blocks.append(f"## Regole del workspace ({name})\n{text}")
+    return "\n\n".join(blocks)
+
+
 def _worker_system_prompt(agent_id: str | None, workspace: str) -> str:
     note = _agent_note_text(agent_id, workspace)
+    context = _workspace_context_files(workspace)
     if not note:
-        return _WORKER_PERSONA
+        return _WORKER_PERSONA + (f"\n\n{context}" if context else "")
     return (
         "Sei un sotto-agente operativo di Hermes. Usa la seguente nota agente come "
         "persona e contratto operativo. Rispondi in italiano, concreto e conciso.\n\n"
         "## Nota agente\n"
         f"{note}\n\n"
-        f"{_WORKER_SAFETY_RULES}"
+        + (f"{context}\n\n" if context else "")
+        + f"{_WORKER_SAFETY_RULES}"
     )
 
 
