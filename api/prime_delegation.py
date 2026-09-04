@@ -1478,6 +1478,11 @@ async def _run_worker(
     Se ``progress`` e' fornito, il testo parziale viene scritto live in
     ``progress["output"]`` cosi' che, se il turno si interrompe (token finiti),
     l'esito accumulato fin li' non vada perso."""
+    from api.stall_guard import StallGuard
+
+    # Loop breaker: la N-esima chiamata identica a uno strumento viene negata
+    # (hook PreToolUse) invece di far girare la delega a vuoto fino al budget.
+    _stall_guard = StallGuard()
     opts = ClaudeAgentOptions(
         cwd=str(workspace),
         add_dirs=[str(workspace)],
@@ -1490,6 +1495,7 @@ async def _run_worker(
         plugins=[],
         strict_mcp_config=True,
         skills=skills,
+        hooks=_stall_guard.hooks(),
         env={k: v for k, v in {"NOTION_TOKEN": os.getenv("NOTION_TOKEN")}.items() if v},
         # Il CLI che Giorgio aggiorna, non quello incorporato nell'SDK (2.1.169).
         cli_path=resolve_claude_cli_path(),
@@ -1557,6 +1563,8 @@ async def _run_worker(
                 progress["result_partial"] = True
             return _WRAPUP_MARKER + wrap_text
     finally:
+        if progress is not None and _stall_guard.denied:
+            progress["stall_guard"] = _stall_guard.summary()
         try:
             await client.disconnect()
         except Exception:
