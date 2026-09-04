@@ -323,15 +323,15 @@ def _is_quota_error_text(err_text: str) -> bool:
     )
 
 
-def _clarify_timeout_seconds(default: int = 120) -> int:
-    """Resolve clarify timeout from config, with bounded fallback."""
+def _clarify_timeout_seconds(default: int = 120) -> int | None:
+    """Timeout delle domande all'utente: agent.clarify_timeout (0 = illimitato),
+    poi il vecchio clarify.timeout, poi il default dell'agente. None = nessuna
+    scadenza (upstream #7163: prima la chat leggeva solo clarify.timeout, cadeva
+    su 120 s e trattava 0 come non valido, ignorando il setting dell'agente)."""
     try:
-        cfg = get_config()
-        raw = cfg.get("clarify", {}).get("timeout", default)
-        timeout_seconds = int(raw)
-        if timeout_seconds <= 0:
-            return default
-        return timeout_seconds
+        from api.clarify import resolve_clarify_timeout
+
+        return resolve_clarify_timeout(get_config())
     except Exception:
         return default
 
@@ -5465,15 +5465,17 @@ def _run_agent_streaming(
                 timeout_seconds=timeout,
             )
             entry = _submit_clarify_pending(sid, data)
-            deadline = time.monotonic() + timeout
+            deadline = None if timeout is None else time.monotonic() + timeout
             while True:
                 if cancel_evt.is_set():
                     _clear_clarify_pending(sid)
                     return _clarify_no_response
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    _clear_clarify_pending(sid)
-                    return _clarify_no_response
+                remaining = 1.0
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _clear_clarify_pending(sid)
+                        return _clarify_no_response
                 if entry.event.wait(timeout=min(1.0, remaining)):
                     return _format_clarify_response(entry.data, entry.result)
 

@@ -63,10 +63,16 @@ async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]
     """Raw, unit-testable handler logic. Surfaces a clarify popup and blocks
     (off the event loop) until the user responds or the timeout elapses."""
     raw = dict(args or {})
+    # Stesso timeout della chat: agent.clarify_timeout (0 = attesa illimitata),
+    # non piu' un valore fisso nel codice (upstream #7163).
+    try:
+        timeout = clarify.resolve_clarify_timeout()
+    except Exception:
+        timeout = ASK_USER_TIMEOUT_SECONDS
     payload = clarify.normalize_prompt_payload(
         raw,
         session_id=session_id,
-        timeout_seconds=ASK_USER_TIMEOUT_SECONDS,
+        timeout_seconds=0 if timeout is None else timeout,
     )
     payload["source"] = "claude-ask-user"
     if not clarify.is_valid_ask_user_payload(payload):
@@ -92,7 +98,9 @@ async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]
             logger.debug("Prime ask_user request persistence failed", exc_info=True)
     # entry.event is a threading.Event resolved from the HTTP thread; wait off
     # the asyncio loop so we never block the loop the SDK runs on.
-    resolved = await asyncio.to_thread(entry.event.wait, ASK_USER_TIMEOUT_SECONDS)
+    # timeout=None -> attende finche' l'utente risponde o il turno viene
+    # annullato (clear_pending sveglia l'evento).
+    resolved = await asyncio.to_thread(entry.event.wait, timeout)
     if not resolved or entry.result is None:
         return {
             "content": [

@@ -93,6 +93,45 @@ def _normalize_questions(raw_questions: Any, multi_select: Any = None) -> list[d
     return questions
 
 
+AGENT_DEFAULT_TIMEOUT_SECONDS = 600  # default di agent.clarify_timeout in hermes-agent
+
+
+def resolve_clarify_timeout(cfg: dict | None = None) -> int | None:
+    """Timeout delle domande all'utente, in lockstep con l'agente (upstream #7163).
+
+    Ordine: ``agent.clarify_timeout`` (la chiave dell'agente), poi il vecchio
+    ``clarify.timeout``, altrimenti il default dell'agente (600 s). Un valore
+    <= 0 significa **attesa illimitata** e ritorna ``None``: la card resta
+    finche' l'utente risponde o il turno viene annullato, senza countdown.
+    """
+    if cfg is None:
+        try:
+            from api.config import get_config
+
+            cfg = get_config()
+        except Exception:
+            cfg = {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    candidates = (
+        (cfg.get("agent") or {}).get("clarify_timeout") if isinstance(cfg.get("agent"), dict) else None,
+        (cfg.get("clarify") or {}).get("timeout") if isinstance(cfg.get("clarify"), dict) else None,
+    )
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        return None if value <= 0 else value
+    return AGENT_DEFAULT_TIMEOUT_SECONDS
+
+
+def _timeout_or_default(timeout_seconds: int | None) -> int:
+    """None = default; 0 resta 0 (illimitato), non viene sostituito dal default."""
+    return DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else int(timeout_seconds)
+
+
 def normalize_prompt_payload(
     question: Any,
     choices: Any = None,
@@ -123,7 +162,7 @@ def normalize_prompt_payload(
                 "session_id": session_id,
                 "kind": "ask_user_question",
                 "requested_at": time.time(),
-                "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+                "timeout_seconds": _timeout_or_default(timeout_seconds),
             }
 
     if isinstance(question, list):
@@ -136,7 +175,7 @@ def normalize_prompt_payload(
                 "session_id": session_id,
                 "kind": "ask_user_question",
                 "requested_at": time.time(),
-                "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+                "timeout_seconds": _timeout_or_default(timeout_seconds),
             }
 
     structured_choices = _normalize_options(choices)
@@ -158,7 +197,7 @@ def normalize_prompt_payload(
             "session_id": session_id,
             "kind": "ask_user_question",
             "requested_at": time.time(),
-            "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+            "timeout_seconds": _timeout_or_default(timeout_seconds),
         }
 
     choices_list = [_clean_text(choice) for choice in (choices or []) if _clean_text(choice)]
@@ -168,7 +207,7 @@ def normalize_prompt_payload(
         "session_id": session_id,
         "kind": "clarify",
         "requested_at": time.time(),
-        "timeout_seconds": timeout_seconds or DEFAULT_TIMEOUT_SECONDS,
+        "timeout_seconds": _timeout_or_default(timeout_seconds),
     }
 
 
@@ -248,8 +287,12 @@ def clear_pending(session_key: str) -> int:
 def _with_timeout_metadata(data: dict) -> dict:
     item = dict(data or {})
     requested_at = float(item.get("requested_at") or time.time())
-    timeout_seconds = int(item.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
-    expires_at = float(item.get("expires_at") or requested_at + timeout_seconds)
+    timeout_seconds = _timeout_or_default(item.get("timeout_seconds"))
+    if timeout_seconds <= 0:
+        # Attesa illimitata: nessuna scadenza, nessun countdown nella card.
+        expires_at = None
+    else:
+        expires_at = float(item.get("expires_at") or requested_at + timeout_seconds)
     item["requested_at"] = requested_at
     item["timeout_seconds"] = timeout_seconds
     item["expires_at"] = expires_at
