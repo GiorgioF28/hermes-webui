@@ -2,6 +2,10 @@ import io
 import json
 import os
 import secrets
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -314,3 +318,70 @@ def test_bridge_endpoint_returns_payload_with_no_store_cache():
     with patch.object(routes, "j", capture), patch("api.daily_brief.build_daily_brief_payload", return_value=fake_payload):
         assert routes._handle_bridge_daily_brief(object()) is True
     assert captured == [(fake_payload, {"extra_headers": {"Cache-Control": "no-store"}})]
+
+
+def test_check_auth_lets_cron_routes_through_to_their_own_token_gate(monkeypatch):
+    """Regression: with a WebUI password set, check_auth answered 401 on
+    /api/cron/daily-brief/* before handle_post could reach the cron token
+    gate, so every n8n execution failed with 'Authentication required'."""
+    from types import SimpleNamespace
+    from api.auth import check_auth
+
+    monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+    handler = FakeHandler({"emails": []})
+    handler.command = "POST"
+    for endpoint in ("email", "email-accumulate", "noise", "check-dm"):
+        assert check_auth(handler, SimpleNamespace(path=f"/api/cron/daily-brief/{endpoint}")) is True
+    # The carve-out is a strict prefix: siblings still need a browser session.
+    assert check_auth(handler, SimpleNamespace(path="/api/cron/daily-brief")) is False
+    assert handler.status == 401
+    handler = FakeHandler({"emails": []})
+    assert check_auth(handler, SimpleNamespace(path="/api/crons")) is False
+    assert handler.status == 401
+
+
+def test_real_http_server_cron_accumulate_uses_token_not_cookie(monkeypatch, tmp_path):
+    """End-to-end through server.Handler with auth enabled: no token -> 403
+    from the cron gate (not 401 from the cookie gate); right token -> 200."""
+    import api.daily_brief as daily_brief_module
+    from server import Handler as WebUIHandler
+
+    runtime_secret = secrets.token_urlsafe(32)
+    monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+    monkeypatch.setenv("HERMES_CRON_TOKEN", runtime_secret)
+    # handle_post imports handle_cron_daily_brief lazily, so patching the
+    # module attribute redirects the real server into tmp_path (the default
+    # data_dir is bound at def-time; patching DEFAULT_DATA_DIR would not).
+    real_handler = daily_brief_module.handle_cron_daily_brief
+    monkeypatch.setattr(
+        daily_brief_module,
+        "handle_cron_daily_brief",
+        lambda handler, path: real_handler(handler, path, data_dir=tmp_path),
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), WebUIHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_port}/api/cron/daily-brief/email-accumulate"
+        raw = json.dumps({"accounts": [], "emails": [_email()]}).encode()
+
+        def post(headers):
+            request = urllib.request.Request(url, data=raw, method="POST", headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+        status, body = post({"Content-Type": "application/json"})
+        assert (status, body["error"]) == (403, "forbidden")
+        status, body = post({"Content-Type": "application/json", "X-Hermes-Cron-Token": "wrong"})
+        assert (status, body["error"]) == (403, "forbidden")
+        status, body = post({"Content-Type": "application/json", "X-Hermes-Cron-Token": runtime_secret})
+        assert status == 200, body
+        assert body["ok"] is True
+        assert (tmp_path / ACCUMULATOR_FILENAME).is_file()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)

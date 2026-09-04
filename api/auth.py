@@ -46,6 +46,9 @@ def _resolve_session_ttl() -> int:
 
 
 # ── Public paths (no auth required) ─────────────────────────────────────────
+# Prefix of the Daily Brief cron routes; see check_auth().
+CRON_DAILY_BRIEF_PREFIX = '/api/cron/daily-brief/'
+
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
@@ -495,6 +498,13 @@ def check_auth(handler, parsed) -> bool:
         return True
     # Public paths don't require auth
     if parsed.path in PUBLIC_PATHS or parsed.path.startswith('/static/') or parsed.path.startswith('/session/static/'):
+        return True
+    # Machine-to-machine Daily Brief cron routes (n8n -> Hermes) carry no
+    # browser session: api.daily_brief.handle_cron_daily_brief enforces its own
+    # fail-closed X-Hermes-Cron-Token check (403 when missing/mismatched).
+    # Without this carve-out the cookie gate above answered 401 before the
+    # route was ever reached, which broke every n8n Daily Brief execution.
+    if parsed.path.startswith(CRON_DAILY_BRIEF_PREFIX):
         return True
     # Check session cookie
     cookie_val = parse_cookie(handler)
