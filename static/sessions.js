@@ -1799,10 +1799,17 @@ async function _ensureMessagesLoaded(sid) {
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
-  // Expand render window to cover all loaded messages so the next
-  // renderMessages() doesn't hide most of them behind a tiny window.
+  // Expand render window so the next renderMessages() doesn't hide most of
+  // the loaded messages behind a tiny window — but bound the growth (upstream
+  // #6999/#7006): growing it to the FULL transcript on every force reload
+  // (tab focus, SSE catch-up) zeroed the hidden-before count on long sessions
+  // and widened the non-virtualized render, which is the OOM-on-focus pattern.
+  // Keep the "don't collapse back to 50 rows" intent, cap at 4x the default.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
-    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(), _messageRenderableMessageCount());
+    _messageRenderWindowSize=Math.max(
+      _currentMessageRenderWindowSize(),
+      Math.min(_messageRenderableMessageCount(), (typeof MESSAGE_RENDER_WINDOW_DEFAULT==='number'?MESSAGE_RENDER_WINDOW_DEFAULT:50)*4)
+    );
   }
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
@@ -3453,6 +3460,11 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   // clear S.toolCalls and lose Activity.
   if(typeof window !== 'undefined' && window._streamJustFinished) return;
   if(typeof document !== 'undefined' && document.hidden) return;
+  // Upstream #6999/#7006: if a load for this exact session is already in
+  // flight, it owns the refresh — probing now would duplicate the full
+  // transcript fetch and the O(N) render that exhausts the tab's heap when
+  // the tab comes back into focus.
+  if(typeof _loadingSessionId !== 'undefined' && _loadingSessionId === S.session.session_id) return 'skipped';
   const sid = S.session.session_id;
   const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
   const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
