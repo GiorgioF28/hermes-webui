@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import sqlite3
+from contextlib import closing
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
@@ -101,7 +102,9 @@ def _read_state_db(state_db_path: Path | None) -> dict[str, dict]:
     if state_db_path is None or not state_db_path.exists():
         return {}
     try:
-        with sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True) as conn:
+        # closing(): il context manager di sqlite3 gestisce solo la transazione,
+        # NON chiude la connessione (upstream #6823: handle ro lasciati al GC).
+        with closing(sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
             if "sessions" not in tables:
