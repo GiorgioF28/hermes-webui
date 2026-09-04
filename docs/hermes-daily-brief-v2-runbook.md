@@ -23,10 +23,10 @@ never written to `daily-email-digest.json`.
 4. The Gmail OAuth2 credential is `Gmail account` (id `EYHotM8cXYMUtKFz`),
    credential type `gmailOAuth2` in the public API.
 
-## Current n8n workflow (2026-09-01)
+## Current n8n workflow (2026-09-04)
 
-Workflow `HermesDailyBriefV2` stays `active=false` until Giorgio verifies the
-credential-to-mailbox mapping and performs a reviewed manual run.
+Workflow `HermesDailyBriefV2` is `active=true` and was updated at
+`2026-09-04T14:03Z`.
 
 - `Schedule 07:00 Europe Rome` → `POST check DM` and → `Gmail personale`.
 - `Gmail personale` (`Message: Get Many`, limit 50, simple output off, query
@@ -36,17 +36,18 @@ credential-to-mailbox mapping and performs a reviewed manual run.
   email accumulate`.
 - `IMAP Yahoo` (`IMAP account`) → `Label Yahoo` → `POST email accumulate`.
 
-Both IMAP nodes use `format: resolved`, keep `postProcessAction: nothing` (mail
-is never marked as read), and no longer set `SINCE today`. Their label nodes
-emit `messageId` and a 2000-character `bodyExcerpt`.
+Both IMAP nodes keep `postProcessAction: nothing` (mail is never marked as
+read), `trackLastMessageId: true`, `forceReconnect: 60`, and the current filter
+`UNSEEN SINCE Sept 4`. Their label nodes emit `messageId` and a 2000-character
+`bodyExcerpt`.
 
 ## Accumulation and 07:00 analysis
 
 `n8n-nodes-base.emailReadImap` is a trigger with no inputs. The two IMAP
 branches therefore run independently and call `POST
-/api/cron/daily-brief/email-accumulate` as messages arrive, only while the
-workflow is active. With `active=false` they do not accumulate anything. Only
-the Gmail branch is driven by the 07:00 schedule.
+/api/cron/daily-brief/email-accumulate` as messages arrive. They must not be
+connected to the Schedule node. Only the Gmail branch is driven by the 07:00
+schedule.
 
 At 07:00, `POST /api/cron/daily-brief/email` captures a cutoff, merges Gmail
 rows with accumulated rows at or before that cutoff, deduplicates, applies the
@@ -61,7 +62,24 @@ or strict JSON parsing fails, Hermes writes the digest anyway with deterministic
 and a short non-secret `analysisError`. Model failure alone never turns the
 email endpoint into HTTP 500.
 
-## Verification before activation
+## Recovery and verification after auth-gate fix
+
+Commit `8d111b27` lets `/api/cron/daily-brief/*` pass the cookie gate so the
+dedicated cron-token validation can run. It is committed and tested (19 tests)
+but is not live until Giorgio chooses to restart the 8788 process.
+
+- After restart, toggle the workflow `active` off/on via API to revive the IMAP
+  triggers, which stopped producing executions after the OOM crashes.
+- Confirm one n8n `POST email accumulate` execution returns HTTP 200 and the
+  accumulator receives an item.
+- The next scheduled digest is at 07:00 Europe/Rome. To obtain a brief on the
+  same day, use `Execute workflow` in the n8n UI; the Public API cannot start a
+  manual workflow execution.
+- Keep in mind that `postProcessAction=nothing` leaves mail UNSEEN: reconnects
+  can replay it. Hermes deduplicates content, but future work should reduce the
+  n8n load and OOM risk.
+
+## Verification checklist
 
 - Confirm in the n8n UI that `IMAP account` is the Yahoo mailbox and `IMAP
   account 2` is the secondary Gmail mailbox.
