@@ -543,18 +543,45 @@ HANDLERS = {
 }
 
 
-@server.list_tools()
 async def list_tools() -> list[Tool]:
     return TOOLS
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     handler = HANDLERS.get(name)
     if not handler:
         return [TextContent(type="text", text=json.dumps(
             {"error": f"Unknown tool: {name}"}, ensure_ascii=False))]
     return await handler(arguments)
+
+
+def _register_tool_handlers() -> None:
+    """Registra tools/list e tools/call nel modo della libreria ``mcp`` installata.
+
+    mcp 1.x espone i decoratori ``@server.list_tools()`` / ``@server.call_tool()``;
+    mcp 2.x (richiesta da hermes-agent 0.21) li ha tolti dal Server low-level e
+    usa ``add_request_handler(method, params_type, handler)`` con handler
+    ``(ctx, params) -> Result``."""
+    if hasattr(server, "list_tools"):  # mcp 1.x
+        server.list_tools()(list_tools)
+        server.call_tool()(call_tool)
+        return
+
+    from mcp.types import (  # mcp 2.x
+        CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams,
+    )
+
+    async def _list_tools_v2(ctx, params) -> ListToolsResult:
+        return ListToolsResult(tools=await list_tools())
+
+    async def _call_tool_v2(ctx, params: CallToolRequestParams) -> CallToolResult:
+        return CallToolResult(content=await call_tool(params.name, params.arguments or {}))
+
+    server.add_request_handler("tools/list", PaginatedRequestParams, _list_tools_v2)
+    server.add_request_handler("tools/call", CallToolRequestParams, _call_tool_v2)
+
+
+_register_tool_handlers()
 
 
 async def main():
