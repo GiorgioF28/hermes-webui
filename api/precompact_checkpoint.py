@@ -27,7 +27,11 @@ ENV_ENABLED = "HERMES_PRIME_PRECOMPACT_CHECKPOINT"
 ENV_TIMEOUT = "HERMES_PRIME_PRECOMPACT_TIMEOUT"
 ENV_LOCK_WAIT = "HERMES_PRIME_PRECOMPACT_LOCK_WAIT"
 DEFAULT_TIMEOUT_SECONDS = 150.0
-DEFAULT_LOCK_WAIT_SECONDS = 30.0
+# Attesa sul lock dei pass memoria: un pass Librarian dura fino a un paio di
+# minuti. (Era 30s ed era tarata sul lock delle deleghe, tenuto per 10-15 min
+# da ogni worker: il checkpoint falliva quasi sempre e la compattazione
+# veniva rinviata finche' il contesto superava i 300k token.)
+DEFAULT_LOCK_WAIT_SECONDS = 120.0
 DEFAULT_MAX_CHARS = 40_000
 _PER_MESSAGE_MAX_CHARS = 4_000
 _MARKER_KEY = "precompact_checkpoint_index"
@@ -97,19 +101,23 @@ def _store_for(session_id: str):
 # ── runner sul loop dell'agente ──────────────────────────────────────────────
 
 def librarian_runner(registry: Any, workspace: str, *, timeout: float | None = None) -> Callable[[str], str]:
-    """Esegue il pass Librarian sul loop del registry, dentro il lock delle deleghe."""
+    """Esegue il pass Librarian sul loop del registry, dentro il lock dei pass memoria.
+
+    Non aspetta i worker delle deleghe (lock di esecuzione): la memory fence
+    impedisce loro di scrivere la memoria, quindi il checkpoint puo' girare
+    mentre una delega e' in corso. Aspetta solo un altro pass memoria."""
     total_timeout = timeout or _env_float(ENV_TIMEOUT, DEFAULT_TIMEOUT_SECONDS)
     lock_wait = _env_float(ENV_LOCK_WAIT, DEFAULT_LOCK_WAIT_SECONDS)
 
     async def _pass(prompt: str) -> str:
         from api import prime_delegation as pd
 
-        lock = pd._DELEGATION_EXECUTION_LOCK
+        lock = pd._MEMORY_PASS_LOCK
         try:
             await asyncio.wait_for(lock.acquire(), timeout=lock_wait)
         except asyncio.TimeoutError as exc:
             raise CheckpointError(
-                f"delega in corso: lock memoria non disponibile entro {lock_wait:.0f}s"
+                f"pass memoria in corso: lock memoria non disponibile entro {lock_wait:.0f}s"
             ) from exc
         try:
             return await pd._run_worker(

@@ -31,7 +31,9 @@ def test_auto_is_codex_for_everyone(task_type, agent):
 def test_claude_fallback_is_chosen_per_agent():
     assert pd.codex_fallback_model("librarian") == "claude-haiku-4-5"
     assert pd.codex_fallback_model("memory-librarian") == "claude-haiku-4-5"
-    assert pd.codex_fallback_model("programmatore") == "claude-opus-5"
+    # Era Opus 5: declassato a Sonnet 5 il 2026-09-05 (Codex a quota zero per
+    # giorni = deleghe da 15 minuti su Opus che svuotavano la quota di Prime).
+    assert pd.codex_fallback_model("programmatore") == "claude-sonnet-5"
     assert pd.codex_fallback_model("social") == "claude-sonnet-5"
     assert pd.codex_fallback_model("ricercatore") == "claude-sonnet-5"
 
@@ -49,7 +51,7 @@ def test_env_override_still_wins_for_everyone(monkeypatch):
 
 def test_subagent_brain_claude_uses_per_agent_model(monkeypatch):
     monkeypatch.setenv("HERMES_SUBAGENT_BRAIN", "claude")
-    assert pd._model_for("codice", "programmatore") == ("claude-opus-5", "Opus 5")
+    assert pd._model_for("codice", "programmatore") == ("claude-sonnet-5", "Sonnet 5")
     assert pd._model_for("ricerca", "ricercatore") == ("claude-sonnet-5", "Sonnet 5")
 
 

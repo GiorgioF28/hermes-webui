@@ -73,6 +73,10 @@ _BG_REFS: set = set()
 _TASK_SEQ = itertools.count(1)
 _DELEGATION_ANCHORS: dict[str, dict[str, Any]] = {}
 _DELEGATION_EXECUTION_LOCK = asyncio.Lock()
+# Serializza i pass che SCRIVONO memoria (sync post-delega e checkpoint
+# pre-compattazione). I worker non lo prendono: la memory fence gia' vieta loro
+# di scrivere, cosi' il checkpoint non deve aspettare una delega da 15 minuti.
+_MEMORY_PASS_LOCK = asyncio.Lock()
 _MEMORY_MCP_SERVER_NAMES = ("hermes-memory", "notion")
 _LIBRARIAN_AGENT_ID = "memory-librarian"
 # Il pass memoria e' frequente e meccanico: modello economico (scelta Giorgio).
@@ -82,11 +86,13 @@ _CODEX_FALLBACK_COOLDOWN_ENV = "HERMES_CODEX_FALLBACK_COOLDOWN_SECONDS"
 _DEFAULT_CODEX_FALLBACK_MODEL = "claude-sonnet-5"
 # Politica "Auto": GPT (Codex) per tutti finche' ha crediti; a quota esaurita
 # (o con HERMES_SUBAGENT_BRAIN=claude) ogni agente cade sul Claude che gli
-# conviene: Librarian economico, Programmatore il piu' forte nel codice,
-# Social e Ricercatore Sonnet (creativo, veloce). Override manuale dal pannello.
+# conviene: Librarian economico, Programmatore/Social/Ricercatore Sonnet.
+# Il ripiego del Programmatore era Opus 5: con Codex a quota zero per giorni
+# (2026-09-04/07) una delega da 15 minuti su Opus svuotava la quota di Prime.
+# Chi vuole Opus lo sceglie dal pannello (override manuale, vince su tutto).
 _AGENT_CLAUDE_MODELS = {
     "memory-librarian": "claude-haiku-4-5",
-    "programmatore-project-engineer": "claude-opus-5",
+    "programmatore-project-engineer": "claude-sonnet-5",
     "social-client-contact": "claude-sonnet-5",
     "research-analyst": "claude-sonnet-5",
     "orchestratore": "claude-sonnet-5",
@@ -1026,9 +1032,10 @@ async def _run_librarian(
 ) -> None:
     """Best-effort memory sync pass. It must never change the delegation outcome."""
     async with _DELEGATION_EXECUTION_LOCK:
-        await _run_librarian_serial(
-            task_id, task_type, task, output, workspace, session_id=session_id
-        )
+        async with _MEMORY_PASS_LOCK:
+            await _run_librarian_serial(
+                task_id, task_type, task, output, workspace, session_id=session_id
+            )
 
 
 async def _run_librarian_serial(
@@ -1250,8 +1257,22 @@ def _codex_fallback_status(now: float | None = None) -> dict[str, Any]:
     }
 
 
+def _quota_line(text: str) -> str:
+    """La riga dello stderr che parla di quota (con la data di reset), se c'e'.
+
+    Codex stampa prima rumore (errori della cache modelli, banner) e solo poi
+    "You've hit your usage limit ... try again at ...": tagliando a 240 caratteri
+    dall'inizio la ragione mostrata era il rumore."""
+    for line in str(text or "").splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in _CODEX_QUOTA_BROAD_MARKERS):
+            return line.strip()
+    return ""
+
+
 def _mark_codex_exhausted(reason: str, *, now: float | None = None) -> dict[str, Any]:
     now = time.time() if now is None else float(now)
+    reason = _quota_line(reason) or reason
     clean_reason = re.sub(r"\s+", " ", str(reason or "codex quota exhausted")).strip()[:240]
     _CODEX_FALLBACK_STATE.update({
         "until": now + codex_fallback_cooldown_seconds(),
@@ -1277,7 +1298,7 @@ def _set_progress_fallback(progress: dict | None, reason: str, agent_id: str | N
     progress["fallback_model"] = codex_fallback_model(agent_id)
     progress["fallback_reason"] = reason
     progress["output"] = (
-        "Codex esaurito -> fallback Sonnet 4.6 temporaneo. "
+        f"Codex non disponibile -> ripiego temporaneo su {progress['fallback_model']}. "
         "Esecuzione in corso..."
     )
 
