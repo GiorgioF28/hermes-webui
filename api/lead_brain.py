@@ -168,6 +168,23 @@ def get_claude_quota_state(workspace) -> dict:
     return data
 
 
+def reconcile_lead(workspace) -> dict:
+    """Riporta il capo a Claude quando il failover automatico non ha piu' motivo.
+
+    ``clear_claude_quota`` scatta solo dopo un turno Claude riuscito, ma finche'
+    il capo e' Codex nessun turno Claude parte: senza questo passo il failover
+    restava appiccicato anche a finestra di quota resettata (2026-09-07: 429 alle
+    15:34 con reset alle 15:50, turni delle 16:01-18:38 tutti su Codex). Un pin
+    manuale su Codex non viene mai toccato."""
+    state = get_lead_state(workspace)
+    if state.get("lead") != LEAD_CODEX or state.get("manual"):
+        return state
+    if get_claude_quota_state(workspace):
+        return state  # finestra quota ancora aperta: resta su Codex
+    logger.info("lead-brain: finestra quota Claude passata, ritorno automatico a Claude")
+    return set_lead(workspace, LEAD_CLAUDE, reason="quota Claude resettata: ritorno automatico", manual=False)
+
+
 def set_auto_failover(workspace) -> dict:
     """Mantiene il capo corrente ma riabilita il failover automatico."""
     current = get_lead_state(workspace)

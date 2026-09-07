@@ -11599,9 +11599,11 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
 
     Default Claude. Se Claude esaurisce i crediti durante il turno, flippa il
     capo a Codex (stato persistito in tasks/lead-brain.json) e ritenta lo stesso
-    turno su Codex, passandogli active-context + la risposta parziale. Una volta
-    su Codex ci resta (revert manuale via /api/bridge/prime/lead o cancellando il
-    file di stato) finché Giorgio non lo riporta a Claude.
+    turno su Codex, passandogli active-context + la risposta parziale. Resta su
+    Codex finché la finestra di quota Claude non è passata (poi torna a Claude da
+    solo, vedi lead_brain.reconcile_lead) o finché Giorgio non lo riporta a Claude
+    (/brain claude, tendina del capo, /api/bridge/prime/lead). Un pin manuale su
+    Codex non viene mai toccato.
     """
     from api import lead_brain
 
@@ -11639,6 +11641,9 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
             on_token(reply)
         return {"reply": reply, "delegations": _prime_background_tasks(session_id)}
 
+    # Failover automatico scaduto (finestra quota Claude passata) → si torna a
+    # Claude da soli; un pin manuale su Codex resta com'e'.
+    lead_brain.reconcile_lead(workspace)
     if lead_brain.get_lead(workspace) == lead_brain.LEAD_CODEX:
         return _hermes_prime_reply_codex(message, workspace, attachments, on_token=on_token, on_status=on_status, session_id=session_id, user=user)
     try:
