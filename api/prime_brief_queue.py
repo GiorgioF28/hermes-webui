@@ -53,6 +53,32 @@ def _build_fallback_text(
     return "\n".join(lines)
 
 
+def _mark_brief_on_delegation_card(store, brief: dict, message_index: Any = None) -> None:
+    """Flag the durable delegation card as briefed (Bug A: reload replay).
+
+    Keeps the card out of the client-side `requestBrief` path after a reload,
+    so the anti-replay guarantee of iss-prime-brief-replay-dopo-riavvio holds.
+    Best-effort: a failure here must never abort brief delivery.
+    """
+    try:
+        task_id = str(brief.get("task_id") or "")
+        if not task_id or not hasattr(store, "mark_delegation_brief"):
+            return
+        index = None
+        if isinstance(message_index, int) and message_index >= 0:
+            index = message_index
+        store.mark_delegation_brief(
+            task_id,
+            "delivered",
+            index,
+            agent=str(brief.get("agent") or ""),
+            task_excerpt=str(brief.get("task") or brief.get("task_type") or ""),
+            status=str(brief.get("delegation_status") or ""),
+        )
+    except Exception:
+        logger.debug("prime_brief_queue: delegation card brief flag failed", exc_info=True)
+
+
 class PrimeBriefQueue:
     """Durable queue backed by tasks/prime-brief-queue.jsonl.
 
@@ -271,7 +297,8 @@ class PrimeBriefQueue:
         try:
             from api.prime_session_store import get_prime_session_store
             session_id = str(brief.get("session_id") or "hermes-prime")
-            get_prime_session_store(session_id).inject_assistant_message(
+            store = get_prime_session_store(session_id)
+            index = store.inject_assistant_message(
                 fb_text,
                 meta={
                     "brief_id": brief.get("brief_id", ""),
@@ -280,6 +307,7 @@ class PrimeBriefQueue:
                     "delegation_status": brief.get("delegation_status", ""),
                 },
             )
+            _mark_brief_on_delegation_card(store, brief, index)
             return True
         except Exception:
             logger.debug("prime_brief_queue: fallback delivery failed", exc_info=True)
@@ -346,7 +374,8 @@ class PrimeBriefQueue:
                     usage = result.get("usage") or {}
                     from api.prime_session_store import get_prime_session_store
                     session_id = str(brief.get("session_id") or "hermes-prime")
-                    get_prime_session_store(session_id).inject_assistant_message(
+                    store = get_prime_session_store(session_id)
+                    index = store.inject_assistant_message(
                         reply,
                         meta={
                             "brief_id": brief_id,
@@ -356,6 +385,7 @@ class PrimeBriefQueue:
                             "usage": usage,
                         },
                     )
+                    _mark_brief_on_delegation_card(store, brief, index)
                     llm_delivered = True
             except Exception as exc:
                 logger.debug(

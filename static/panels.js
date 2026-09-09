@@ -1962,7 +1962,9 @@ async function refreshKanbanEvents(){
   if (_currentPanel !== 'kanban' || !_kanbanLatestEventId) return;
   try {
     const eventsEndpoint = '/api/kanban/events';
-    const events = await api(eventsEndpoint + _kanbanBoardQuery({since: _kanbanLatestEventId}));
+    // Poller di sfondo: un timeout qui non deve alzare il toast globale
+    // "Request timed out" (il toast resta per le azioni esplicite dell'utente).
+    const events = await api(eventsEndpoint + _kanbanBoardQuery({since: _kanbanLatestEventId}), {timeoutToast:false, timeoutMs:45000});
     if (events && Array.isArray(events.events) && events.events.length) {
       _kanbanLatestEventId = Number(events.latest_event_id || events.cursor || _kanbanLatestEventId);
       await loadKanban(true);
@@ -3348,7 +3350,7 @@ function _syncLogsWrap() {
   if (out && wrap) out.classList.toggle('wrap', !!wrap.checked);
 }
 
-async function loadLogs(animate) {
+async function loadLogs(animate, opts) {
   const box = $('logsOutput');
   const status = $('logsStatus');
   const refreshBtn = $('logsRefreshBtn');
@@ -3361,7 +3363,10 @@ async function loadLogs(animate) {
   const tail = _selectedLogsTail();
   try {
     if (status) status.textContent = t('logs_loading');
-    const data = await api('/api/logs?file=' + encodeURIComponent(file) + '&tail=' + encodeURIComponent(tail));
+    // background=true (auto-refresh 5s): niente toast di timeout.
+    const background = !!(opts && opts.background);
+    const data = await api('/api/logs?file=' + encodeURIComponent(file) + '&tail=' + encodeURIComponent(tail),
+      background ? {timeoutToast:false, timeoutMs:45000} : {});
     _renderLogs(data);
   } catch(e) {
     _lastLogsLines = [];
@@ -3411,7 +3416,7 @@ function _startLogsAutoRefresh() {
     if (_currentPanel !== 'logs') { _stopLogsAutoRefresh(); return; }
     const toggle = $('logsAutoRefresh');
     if (toggle && !toggle.checked) return;
-    loadLogs(false);
+    loadLogs(false, {background:true});
   }, 5000);
 }
 
@@ -9672,7 +9677,7 @@ function startCronPolling(){
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      const data=await api(`/api/crons/recent?since=${_cronPollSince}`,{timeoutToast:false,timeoutMs:45000});
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           if(c.toast_notifications !== false){

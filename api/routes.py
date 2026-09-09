@@ -6512,7 +6512,7 @@ def handle_get(handler, parsed) -> bool:
         return _handle_approval_pending(handler, parsed)
 
     if parsed.path == "/api/bridge/prime/history":
-        return _handle_bridge_prime_history(handler)
+        return _handle_bridge_prime_history(handler, parsed)
 
     if parsed.path == "/api/bridge/prime/live":
         return _handle_bridge_prime_live(handler)
@@ -11119,6 +11119,7 @@ def _handle_bridge_tasks(handler, parsed):
         from api.delegation_store import get_delegation_store, status_to_legacy
         workspace = Path(str(DEFAULT_WORKSPACE))
         canonical_recs = get_delegation_store(workspace).get_all()
+        canonical_records: list[dict] = []
         live_ids = {t["id"] for t in tasks}
         for rec in canonical_recs:
             rec_session_id = str(
@@ -11132,6 +11133,20 @@ def _handle_bridge_tasks(handler, parsed):
             if tid in live_ids:
                 continue
             brief_status = (rec.get("brief") or {}).get("status", "")
+            # Durable card record even for delivered briefs: the task list stays
+            # unchanged (running / undelivered only) but the history endpoint can
+            # rebuild the historic cards after a reload.
+            canonical_records.append({
+                "id": tid,
+                "agent": rec.get("agent", ""),
+                "task": rec.get("task", ""),
+                "task_type": rec.get("task_type", ""),
+                "status": status_to_legacy(rec.get("status", "")),
+                "started": rec.get("started_at") or rec.get("created_at"),
+                "finished": rec.get("finished_at"),
+                "anchor_message_index": (rec.get("ui") or {}).get("anchor_message_index"),
+                "brief_status": brief_status,
+            })
             if brief_status == "delivered":
                 continue
             # Exposed to UI in legacy format
@@ -11161,9 +11176,26 @@ def _handle_bridge_tasks(handler, parsed):
                 "failure_reason": error.get("message", ""),
                 "error_category": error.get("category", ""),
             })
+        _sync_prime_delegation_records(session_id, canonical_records)
     except Exception:
         logger.debug("bridge tasks: delegation_store augmentation failed", exc_info=True)
-    return j(handler, {"ok": True, "tasks": tasks}) or True
+    _sync_prime_delegation_records(session_id, tasks)
+    payload = {"ok": True, "tasks": tasks}
+    # Multi-device sync piggy-backs on this 3 s poll instead of a new socket:
+    # the tab compares message_count/delegations_rev with what it has rendered.
+    try:
+        from api.prime_session_store import get_prime_session_store
+
+        live = get_prime_session_store(session_id).live()
+        payload["prime_live"] = {
+            "message_count": int(live.get("message_count") or 0),
+            "updated_at": live.get("updated_at"),
+            "delegations_rev": int(live.get("delegations_rev") or 0),
+            "streaming": bool(live.get("active")) or bool(_prime_active_snapshot(session_id)),
+        }
+    except Exception:
+        logger.debug("bridge tasks: prime_live snapshot failed", exc_info=True)
+    return j(handler, payload) or True
 
 
 def _handle_bridge_agents(handler, parsed):
@@ -11496,14 +11528,50 @@ def _prime_turn_lock(session_id: str) -> threading.Lock:
         return _PRIME_TURN_LOCKS.setdefault(session_id, threading.Lock())
 
 
+def _sync_prime_delegation_records(session_id: str, tasks: list[dict]) -> None:
+    """Mirror live/canonical delegation state into the durable session store.
+
+    The delegation cards used to live only in the browser's `_cbTasks` map, so a
+    reload lost them (`/api/bridge/tasks` intentionally hides finished/delivered
+    work). Persisting a small record per delegation lets the history endpoint
+    rebuild those cards. Best-effort: never break the polling endpoint.
+    """
+    if not tasks:
+        return
+    try:
+        from api.prime_session_store import get_prime_session_store
+
+        store = get_prime_session_store(session_id)
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                continue
+            store.upsert_delegation(
+                task_id,
+                agent=str(task.get("agent") or ""),
+                task_excerpt=str(task.get("task") or task.get("task_type") or ""),
+                status=str(task.get("status") or ""),
+                started_at=task.get("started") or task.get("started_at"),
+                finished_at=task.get("finished") or task.get("finished_at"),
+                anchor_message_index=task.get("anchor_message_index"),
+                brief_status=str(task.get("brief_status") or ""),
+            )
+    except Exception:
+        logger.debug("prime delegation record sync failed", exc_info=True)
+
+
 def _prime_background_tasks(session_id: str) -> list[dict]:
     """Filter the legacy no-argument task snapshot without changing test seams."""
     from api.prime_delegation import get_background_tasks
 
-    return [
+    tasks = [
         task for task in get_background_tasks()
         if str(task.get("anchor_session_id") or task.get("session_id") or "hermes-prime") == session_id
     ]
+    _sync_prime_delegation_records(session_id, tasks)
+    return tasks
 
 
 def _prime_system_prompt_for_user(workspace, user: str):
@@ -12065,16 +12133,32 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
 
 
 
-def _handle_bridge_prime_history(handler):
+def _bridge_history_since_index(parsed) -> int:
+    """Read ?since_index=N off the history request (0 when absent/invalid)."""
+    try:
+        raw = parse_qs(getattr(parsed, "query", "") or "").get("since_index", ["0"])[0]
+        value = int(str(raw).strip() or 0)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def _handle_bridge_prime_history(handler, parsed=None):
     """GET /api/bridge/prime/history -- persisted Command Bridge transcript.
 
     Fase 1: include pending_briefs_count so the UI can surface pending briefs
     that survived a server restart (e.g. badge "N brief in attesa").
+
+    Honours ?since_index=N (tail-only fetch for multi-device sync) and uses
+    history_with_tool_events() so the tool-card replay actually has data. The
+    payload also carries the durable `delegations` list plus `message_count`,
+    so a reloaded tab can rebuild the delegation cards without any live task.
     """
     try:
         from api.prime_session_store import get_prime_session_store
         session_id = _request_prime_session_id(handler)
-        hist = get_prime_session_store(session_id).history()
+        since_index = _bridge_history_since_index(parsed)
+        hist = get_prime_session_store(session_id).history_with_tool_events(since_index)
         # Fase 1: annotate with pending brief count (best-effort)
         try:
             from api.prime_brief_queue import get_brief_queue
@@ -12472,7 +12556,12 @@ def _handle_bridge_prime(handler, body):
 
     from api.streaming import _sse
 
-    anchor_message_index = len((store.history() or {}).get("messages") or [])
+    # live() carries message_count, so the anchor no longer copies the whole
+    # transcript (~2 MB) on every turn start just to count it.
+    try:
+        anchor_message_index = int((store.live() or {}).get("message_count") or 0)
+    except Exception:
+        anchor_message_index = len((store.history() or {}).get("messages") or [])
     anchor_created_at = time.time()
     stream_id = store.begin_turn(msg, attachments)
     try:

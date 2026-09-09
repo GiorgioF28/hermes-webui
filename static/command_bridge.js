@@ -1205,6 +1205,27 @@
     m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
   }
+  // Nota di sistema cliccabile: usata quando lo storico non si carica, cosi'
+  // la chat non resta muta e vuota (Bug B) e Giorgio puo' riprovare a mano.
+  function sysNoteRetry(text, onRetry) {
+    var log = $('cbLog'); if (!log) return null;
+    var m = el('div', 'cb-msg cb-from-prime cb-sysnote-retry');
+    m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" role="button" tabindex="0" ' +
+      'style="color:var(--cb-muted);font-style:italic;cursor:pointer;text-decoration:underline">' + esc(text) + '</div>';
+    var btn = m.querySelector('.cb-bubble');
+    var fire = function () {
+      if (m.parentNode) m.parentNode.removeChild(m);
+      if (typeof onRetry === 'function') onRetry();
+    };
+    if (btn) {
+      btn.addEventListener('click', fire);
+      btn.addEventListener('keydown', function (ev) {
+        if (ev && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); fire(); }
+      });
+    }
+    var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
+    return m;
+  }
 
   // ── Todos panel (P2-B) ──────────────────────────────────────────────────
   function renderTodos(snapshot) {
@@ -1320,8 +1341,11 @@
       if (id && _cbTasks[id]) _cbTasks[id].open = open;
     });
   }
-  function renderTask(t) {
+  // opts.replay  = card idratata dallo storico (nessun sysNote "ha finito")
+  // opts.briefed = il brief e' gia' stato consegnato e persistito nel transcript
+  function renderTask(t, opts) {
     if (!t || !t.id) return;
+    opts = (opts && typeof opts === 'object') ? opts : null;
     var log = $('cbLog'); if (!log) return;
     var prev = _cbTasks[t.id];
     var sl = taskIsRunning(t.status) ? '&#8230;' : (t.status === 'ok' || t.status === 'parziale' || t.status === 'done' ? '&#10003;' : '&#10007;');
@@ -1349,16 +1373,19 @@
       wireDelegArrow(c);
       if (t.anchor_message_index != null) c.setAttribute('data-anchor-index', String(t.anchor_message_index));
       var _sb = nearBottom(log); placeTaskCard(c, t); if (_sb) log.scrollTop = log.scrollHeight;
-      _cbTasks[t.id] = { el: c, status: t.status };
+      _cbTasks[t.id] = { el: c, status: t.status, briefed: !!(opts && opts.briefed) };
       // light up the matching planet in the star system
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
-    if (prev && taskIsRunning(prev.status) && !taskIsRunning(t.status)) {
+    if (prev && taskIsRunning(prev.status) && !taskIsRunning(t.status) && !(opts && opts.replay)) {
       sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + ((t.status === 'ok' || t.status === 'done') ? 'finito' : 'fallito') + ' il task.');
     }
     _cbTasks[t.id].status = t.status;
     // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
-    if ((t.status === 'ok' || t.status === 'errore' || t.status === 'done' || t.status === 'failed') && !_cbTasks[t.id].briefed) {
+    // Le card idratate dallo storico non rilanciano MAI il brief: il testo e'
+    // gia' nel transcript (zero regressione su iss-prime-brief-replay-dopo-riavvio).
+    if ((t.status === 'ok' || t.status === 'errore' || t.status === 'done' || t.status === 'failed') &&
+        !_cbTasks[t.id].briefed && !(opts && opts.replay)) {
       _cbTasks[t.id].briefed = true;
       requestBrief(t);
     }
@@ -1386,6 +1413,7 @@
         }
       } finally {
         turnUi.close();
+        alignRenderedCountAfterOwnTurn();
         setOrb('idle', 0);
       }
     };
@@ -1445,8 +1473,9 @@
   function pollTasks() {
     api('api/bridge/tasks').then(function (d) {
       var tasks = d && d.tasks ? d.tasks : [];
-      if (tasks.length) tasks.forEach(renderTask);
+      if (tasks.length) tasks.forEach(function (t) { renderTask(t); });
       syncStarActiveAgents(tasks);
+      applyPrimeLiveSnapshot(d && d.prime_live);
     }).catch(function () {});
   }
   function startTaskPolling() { if (!_cbPollTimer) _cbPollTimer = setInterval(pollTasks, 3000); }
@@ -1758,7 +1787,7 @@
     if (!voiceOn) { stopSpeak(); setOrb('idle', 0); }
   }
 
-  function primeSay(who, text, thumbs) {
+  function primeSay(who, text, thumbs, quiet) {
     var log = $('cbLog'); if (!log) return;
     var m = el('div', 'cb-msg ' + (who === 'user' ? 'cb-from-user' : 'cb-from-prime'));
     var imgs = '';
@@ -1775,11 +1804,22 @@
       '<div class="cb-bubble">' + label + imgs + '</div>' +
       (who === 'prime' ? '<div class="cb-msg-foot" hidden></div>' : '');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
-    if (who === 'prime' && userEngaged) speak(text);
+    if (who === 'prime' && userEngaged && !quiet) speak(text);
     return m;
   }
 
   var _cbHistoryLoaded = false;
+  // ── Reload durevole + sync multi-device (Bug B/D) ───────────────────────
+  // _cbRenderedCount = quanti messaggi del transcript server sono gia' a video.
+  // Serve sia per GET history?since_index=N sia per capire se un altro device
+  // (telefono) ha scritto qualcosa mentre questa scheda era ferma.
+  var _cbHistoryLoading = false;
+  var _cbRenderedCount = 0;
+  var _cbDelegationsRev = null;
+  var _cbSyncBusy = false;
+  var _cbRemoteTurnNode = null;
+  var _cbOwnTurnEndedAt = 0;
+  var CB_HISTORY_RETRY_DELAYS = [1000, 3000, 8000];
   function normalizeAttentionPending(payload) {
     if (!payload) return null;
     return payload.pending || payload;
@@ -2061,59 +2101,234 @@
     actions.appendChild(send);
     return card;
   }
+  // La GET dello storico e' pesante (transcript intero): se salta, prima si
+  // ritentava zero volte e l'errore veniva ingoiato, lasciando #cbLog vuoto in
+  // silenzio (Bug B). Ora: 3 retry con backoff 1s/3s/8s, poi nota cliccabile.
+  function fetchPrimeHistory(sinceIndex) {
+    var n = Number(sinceIndex);
+    if (Number.isFinite(n) && n > 0) {
+      return api('/api/bridge/prime/history?since_index=' + encodeURIComponent(String(n)));
+    }
+    return api('/api/bridge/prime/history');
+  }
+  function fetchPrimeHistoryWithRetry(attempt) {
+    attempt = Number(attempt) || 0;
+    return fetchPrimeHistory(0).catch(function (err) {
+      if (attempt >= CB_HISTORY_RETRY_DELAYS.length) throw err;
+      return new Promise(function (resolve) {
+        setTimeout(resolve, CB_HISTORY_RETRY_DELAYS[attempt]);
+      }).then(function () { return fetchPrimeHistoryWithRetry(attempt + 1); });
+    });
+  }
   function loadPrimeHistory() {
-    if (_cbHistoryLoaded) return Promise.resolve();
-    _cbHistoryLoaded = true;
-    return api('/api/bridge/prime/history').then(function (data) {
-      var log = $('cbLog'); if (!log) return;
-      var pendingClarify = data.pending_clarify || null;
-      var pendingClarifyId = pendingClarify && pendingClarify.clarify_id;
-      (data.messages || []).forEach(function (m, idx) {
-        var node = null;
-        if (
-          m && m._bridge_clarify_event === 'request' &&
-          m._bridge_clarify_payload &&
-          m._bridge_clarify_id !== pendingClarifyId
-        ) {
-          node = renderBridgeClarifyCard(
-            { pending: m._bridge_clarify_payload },
-            {
-              readOnly: true,
-              resolved: !!m._bridge_clarify_resolved,
-              response: m._bridge_clarify_response
-            }
-          );
-          if (node) node.setAttribute('data-cb-msg-index', String(idx));
-          return;
+    if (_cbHistoryLoaded || _cbHistoryLoading) return Promise.resolve();
+    _cbHistoryLoading = true;
+    return fetchPrimeHistoryWithRetry(0).then(function (data) {
+      renderPrimeHistoryPayload(data);
+      // _cbHistoryLoaded passa a true SOLO a caricamento riuscito.
+      _cbHistoryLoaded = true;
+      _cbHistoryLoading = false;
+    }).catch(function () {
+      _cbHistoryLoading = false;
+      _cbHistoryLoaded = false;
+      sysNoteRetry('Storico non caricato - clicca per riprovare', loadPrimeHistory);
+    });
+  }
+  // Un solo messaggio dello storico -> un nodo con data-cb-msg-index, cosi' il
+  // sync incrementale sa cosa e' gia' a video e le card delega hanno l'ancora.
+  function renderPrimeHistoryMessage(m, idx, pendingClarifyId) {
+    var log = $('cbLog'); if (!log || !m) return null;
+    var hasIdx = Number.isFinite(Number(idx));
+    if (hasIdx && log.querySelector('[data-cb-msg-index="' + Number(idx) + '"]')) return null;
+    var node = null;
+    if (
+      m._bridge_clarify_event === 'request' &&
+      m._bridge_clarify_payload &&
+      m._bridge_clarify_id !== pendingClarifyId
+    ) {
+      node = renderBridgeClarifyCard(
+        { pending: m._bridge_clarify_payload },
+        {
+          readOnly: true,
+          resolved: !!m._bridge_clarify_resolved,
+          response: m._bridge_clarify_response
         }
-        node = primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '');
-        if (node) node.setAttribute('data-cb-msg-index', String(idx));
-        // Show usage badge on injected brief messages (e.g. brief delega LLM).
-        // Reuses the same gate and helpers as normal chat turns.
-        if (node && m.role !== 'user' && _hasBridgeUsage(m.usage) && window._showTokenUsage === true) {
-          var _briefBadge = _formatAssistantUsageBadge(m.usage);
-          if (_briefBadge) {
-            var _briefFoot = node.querySelector('.cb-msg-foot');
-            if (_briefFoot) { _briefFoot.textContent = _briefBadge; _briefFoot.hidden = false; }
-          }
-        }
-      });
-      if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
-      pollTasks();
-      var pending = data.pending_turn;
-      if (pending && pending.partial_output) {
-        var node = primeSay('prime', pending.partial_output || '');
-        if (node) node.classList.add('cb-recovered');
-        if (node) startPrimeLivePolling(node.querySelector('.cb-bubble') || node);
+      );
+      if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
+      return node;
+    }
+    node = primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '', null, true);
+    if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
+    // Show usage badge on injected brief messages (e.g. brief delega LLM).
+    // Reuses the same gate and helpers as normal chat turns.
+    if (node && m.role !== 'user' && _hasBridgeUsage(m.usage) && window._showTokenUsage === true) {
+      var _briefBadge = _formatAssistantUsageBadge(m.usage);
+      if (_briefBadge) {
+        var _briefFoot = node.querySelector('.cb-msg-foot');
+        if (_briefFoot) { _briefFoot.textContent = _briefBadge; _briefFoot.hidden = false; }
       }
-      (data.tool_events || []).forEach(function (ev) {
-        if (ev && ev.tool) renderToolCard(ev.tool, ev.summary || '');
+    }
+    return node;
+  }
+  function renderPrimeHistoryMessages(messages, offset, pendingClarifyId) {
+    var start = Number(offset);
+    if (!Number.isFinite(start) || start < 0) start = 0;
+    var rendered = 0;
+    (messages || []).forEach(function (m, i) {
+      if (renderPrimeHistoryMessage(m, start + i, pendingClarifyId)) rendered += 1;
+    });
+    return rendered;
+  }
+  // Record durevole della delega (store) -> forma legacy attesa da renderTask.
+  function delegationRecordToTask(d) {
+    if (!d || !d.id) return null;
+    return {
+      id: String(d.id),
+      agent: d.agent || '',
+      task_type: d.task_type || '',
+      task: d.task_excerpt || '',
+      status: String(d.status || ''),
+      output: '',
+      started: d.started_at,
+      finished: d.finished_at,
+      anchor_message_index: d.anchor_message_index
+    };
+  }
+  // Card delega durevoli (Bug A): dopo un reload le card non esistono piu' in
+  // RAM e /api/bridge/tasks nasconde le finite/consegnate. Le ricreiamo dallo
+  // storico, nello stato finale e senza far ripartire nessun brief.
+  function hydrateDelegationCards(delegations) {
+    if (!delegations || typeof delegations.forEach !== 'function') return 0;
+    var made = 0;
+    delegations.forEach(function (d) {
+      var t = delegationRecordToTask(d);
+      if (!t) return;
+      // Il poller live e' piu' ricco (output, failure_reason): non lo sovrascriviamo.
+      if (_cbTasks[t.id]) return;
+      renderTask(t, {
+        replay: true,
+        briefed: String((d && d.brief_status) || '') === 'delivered'
       });
-      // Prime uses its own scroll container (#cbLog), separate from the generic
-      // chat's #messages. History cards and markdown images can resize after the
-      // fetch resolves, so follow their real layout until the user interacts.
-      settlePrimeHistoryScrollToBottom();
+      made += 1;
+    });
+    return made;
+  }
+  function renderPrimeHistoryPayload(data) {
+    var log = $('cbLog'); if (!log || !data) return;
+    var pendingClarify = data.pending_clarify || null;
+    var pendingClarifyId = pendingClarify && pendingClarify.clarify_id;
+    var messages = data.messages || [];
+    var offset = Number(data.since_index);
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
+    renderPrimeHistoryMessages(messages, offset, pendingClarifyId);
+    // Backend vecchio (nessun message_count): ripiega sul conteggio locale.
+    var total = Number(data.message_count);
+    if (!Number.isFinite(total)) total = Number(data.total);
+    if (!Number.isFinite(total)) total = offset + messages.length;
+    if (total > _cbRenderedCount) _cbRenderedCount = total;
+    hydrateDelegationCards(data.delegations);
+    var rev = Number(data.delegations_rev);
+    if (Number.isFinite(rev)) _cbDelegationsRev = rev;
+    if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
+    pollTasks();
+    var pending = data.pending_turn;
+    if (pending && pending.partial_output) {
+      var node = primeSay('prime', pending.partial_output || '', null, true);
+      if (node) node.classList.add('cb-recovered');
+      if (node) {
+        // Il turno recuperato non e' di questa scheda: trattalo come remoto,
+        // cosi' a fine turno viene sostituito dal messaggio definitivo.
+        _cbRemoteTurnNode = node;
+        startPrimeLivePolling(node.querySelector('.cb-bubble') || node);
+      }
+    }
+    (data.tool_events || []).forEach(function (ev) {
+      if (ev && ev.tool) renderToolCard(ev.tool, ev.summary || '');
+    });
+    // Prime uses its own scroll container (#cbLog), separate from the generic
+    // chat's #messages. History cards and markdown images can resize after the
+    // fetch resolves, so follow their real layout until the user interacts.
+    settlePrimeHistoryScrollToBottom();
+  }
+  // ── Sync multi-device (Bug D) ──────────────────────────────────────────
+  // Nessun socket nuovo: il poller /api/bridge/tasks (3 s) porta prime_live e
+  // questa scheda scarica solo la coda mancante del transcript.
+  function ownPrimeTurnInFlight() {
+    return !!_primeStreaming && !_cbRemoteTurnNode;
+  }
+  function noteOwnPrimeTurnEnded() {
+    _cbOwnTurnEndedAt = Date.now();
+    alignRenderedCountAfterOwnTurn();
+  }
+  // Il proprio turno scrive user+assistant a video senza data-cb-msg-index:
+  // riallineiamo il contatore al server per non ri-appendere gli stessi messaggi.
+  function alignRenderedCountAfterOwnTurn() {
+    api('/api/bridge/prime/live').then(function (d) {
+      var n = Number(d && d.message_count);
+      if (Number.isFinite(n) && n > _cbRenderedCount) _cbRenderedCount = n;
     }).catch(function () {});
+  }
+  function showRemotePrimeTurn() {
+    if (_cbRemoteTurnNode && _cbRemoteTurnNode.parentNode) return;
+    var node = primeSay('prime', '', null, true);
+    if (!node) return;
+    node.classList.add('cb-remote-turn');
+    var who = node.querySelector('.cb-who');
+    if (who) who.textContent = 'hermes prime \u00b7 altro dispositivo';
+    var bubble = node.querySelector('.cb-bubble');
+    if (bubble) {
+      bubble.textContent = 'Prime sta rispondendo (altro dispositivo)\u2026';
+      bubble.classList.add('cb-recovered');
+    }
+    _cbRemoteTurnNode = node;
+    startPrimeLivePolling(bubble || node);
+  }
+  function clearRemotePrimeTurn() {
+    if (!_cbRemoteTurnNode) return;
+    if (_cbRemoteTurnNode.parentNode) _cbRemoteTurnNode.parentNode.removeChild(_cbRemoteTurnNode);
+    _cbRemoteTurnNode = null;
+    // Il poller live puntava al nodo appena rimosso: fermalo subito invece di
+    // lasciarlo battere su un nodo staccato fino al suo prossimo tick.
+    if (_primeLiveTimer) { clearInterval(_primeLiveTimer); _primeLiveTimer = null; }
+    setPrimeStreaming(false, null);
+  }
+  function applyPrimeLiveSnapshot(live) {
+    // Backend vecchio: campo assente -> comportamento attuale, nessun errore.
+    if (!live || typeof live !== 'object') return;
+    var justFinishedOwn = (Date.now() - _cbOwnTurnEndedAt) < 5000;
+    if (live.streaming && !ownPrimeTurnInFlight() && !justFinishedOwn) showRemotePrimeTurn();
+    else if (!live.streaming) clearRemotePrimeTurn();
+    syncPrimeTranscriptFromServer(live.message_count, live.delegations_rev);
+  }
+  function syncPrimeTranscriptFromServer(serverCount, serverRev) {
+    if (!_cbHistoryLoaded || _cbSyncBusy) return;
+    if (ownPrimeTurnInFlight()) return;
+    var count = Number(serverCount);
+    var rev = Number(serverRev);
+    var needMessages = Number.isFinite(count) && count > _cbRenderedCount;
+    var needDelegations = Number.isFinite(rev) && _cbDelegationsRev !== null && rev !== _cbDelegationsRev;
+    if (!needMessages && !needDelegations) return;
+    _cbSyncBusy = true;
+    var since = _cbRenderedCount;
+    fetchPrimeHistory(since).then(function (data) {
+      if (!data) return;
+      var offset = Number(data.since_index);
+      // Backend vecchio: nessuno slice -> non appendiamo nulla (zero duplicati).
+      if (!Number.isFinite(offset) || offset !== since) return;
+      var log = $('cbLog');
+      var sb = nearBottom(log);
+      var clarifyId = (data.pending_clarify || {}).clarify_id;
+      renderPrimeHistoryMessages(data.messages || [], offset, clarifyId);
+      var total = Number(data.message_count);
+      if (!Number.isFinite(total)) total = offset + (data.messages || []).length;
+      if (total > _cbRenderedCount) _cbRenderedCount = total;
+      hydrateDelegationCards(data.delegations);
+      var newRev = Number(data.delegations_rev);
+      if (Number.isFinite(newRev)) _cbDelegationsRev = newRev;
+      // La bolla del turno remoto resta in fondo, sotto i messaggi appena arrivati.
+      if (_cbRemoteTurnNode && _cbRemoteTurnNode.parentNode && log) log.appendChild(_cbRemoteTurnNode);
+      if (sb && log) log.scrollTop = log.scrollHeight;
+    }).catch(function () {}).then(function () { _cbSyncBusy = false; });
   }
   /* ── Allegati foto per Hermes Prime ─────────────────────────────────────── */
   var pendingAttachments = []; // { name, path, url, type, size }
@@ -2296,6 +2511,7 @@
         turnUi.close();
         if (liveUsage) liveUsage.hidden = true;
         setPrimeStreaming(false, null);
+        noteOwnPrimeTurnEnded();
         if (!_ttsActive) setOrb('idle', 0);
       }
     };
@@ -2323,6 +2539,7 @@
       } finally {
         if (liveUsage) liveUsage.hidden = true;
         setPrimeStreaming(false, null);
+        noteOwnPrimeTurnEnded();
         setOrb('idle', 0);
       }
     };
@@ -2366,7 +2583,7 @@
           }
           if (!reply) showToken('Ricevuto.');
           finish('\u2713 completato');
-          if (d && d.delegations && d.delegations.length) d.delegations.forEach(renderTask);
+          if (d && d.delegations && d.delegations.length) d.delegations.forEach(function (t) { renderTask(t); });
         },
         error: function (d) {
           var base = (d && d.error) ? d.error : 'Hermes Prime non ha completato la risposta.';
