@@ -30,26 +30,67 @@ def _brief_id(task_id: str) -> str:
     return f"brief-{task_id}"
 
 
+_TASK_SUMMARY_MAX = 90
+
+_SUCCESS_STATUSES = frozenset({"completed", "ok", "done", "success"})
+
+_OUTCOME_BY_CATEGORY: dict[str, str] = {
+    "quota_exhausted": (
+        "Fermata: crediti esauriti dell'agente. Riparte quando la quota si "
+        "resetta; nel frattempo non ho un esito affidabile."
+    ),
+    "timeout": (
+        "Interrotta per tempo scaduto: il lavoro puo' essere parziale, va "
+        "ricontrollato sul disco."
+    ),
+    "crash": "Fallita per un errore tecnico dell'agente. Da rilanciare.",
+    "runtime_error": "Fallita per un errore tecnico dell'agente. Da rilanciare.",
+    "transport": "Fallita: agente non raggiungibile. Da rilanciare.",
+    "provider_unavailable": "Fallita: agente non raggiungibile. Da rilanciare.",
+}
+
+_OUTCOME_SUCCESS = "Completata. Verifico gli artefatti prima di dartela per buona."
+_OUTCOME_FAILED = "Fallita. Da rilanciare."
+
+
+def _summarize_task(task: str) -> str:
+    """Collapse the task text to one readable line, max _TASK_SUMMARY_MAX chars."""
+    one_line = " ".join(str(task or "").split())
+    if len(one_line) > _TASK_SUMMARY_MAX:
+        return one_line[: _TASK_SUMMARY_MAX - 3].rstrip() + "..."
+    return one_line
+
+
 def _build_fallback_text(
     task_id: str,
     agent: str,
     status: str,
     output: str,
     error_category: str = "",
+    task: str = "",
 ) -> str:
-    """Build deterministic fallback text (no LLM). Spec §D."""
-    lines = [
-        f"Delega {task_id} completata da {agent or 'agente'}.",
-        f"Stato: {status}.",
-    ]
-    if error_category and error_category not in ("unknown", ""):
-        lines.append(f"Categoria errore: {error_category}.")
-    excerpt = (output or "").strip()[:1200]
-    if excerpt:
-        lines.append(f"Esito grezzo: {excerpt}")
-    lines.append(
-        "Nota: brief intelligente rimandato per crediti/LLM non disponibile."
-    )
+    """Build deterministic fallback text (no LLM), in Italian, max 3 lines.
+
+    Spec: docs/specs/brief-fallback-leggibile.md.
+    The raw agent output is NEVER echoed in the returned text (not even
+    truncated): it stays durable in tasks/delegations.jsonl and in the brief
+    queue, and is reachable from the Work Log instead of the Prime chat.
+    """
+    who = agent or "agente"
+    summary = _summarize_task(task)
+    if summary:
+        lines = [f"Delega {task_id} ({who}): {summary}"]
+    else:
+        lines = [f"Delega {task_id} ({who})."]
+
+    category = str(error_category or "").strip().lower()
+    if str(status or "").strip().lower() in _SUCCESS_STATUSES:
+        lines.append(_OUTCOME_SUCCESS)
+    else:
+        lines.append(_OUTCOME_BY_CATEGORY.get(category, _OUTCOME_FAILED))
+
+    if str(output or "").strip():
+        lines.append("Dettaglio tecnico disponibile nel Work Log.")
     return "\n".join(lines)
 
 
@@ -182,7 +223,7 @@ class PrimeBriefQueue:
                     self._delivered.add(bid)
                 return bid
             # Build fallback text immediately (deterministic, no LLM)
-            fb_text = _build_fallback_text(task_id, agent, status, output, error_category)
+            fb_text = _build_fallback_text(task_id, agent, status, output, error_category, task)
             rec: dict[str, Any] = {
                 "brief_id": bid,
                 "task_id": task_id,
@@ -293,6 +334,7 @@ class PrimeBriefQueue:
                 str(brief.get("delegation_status") or ""),
                 "",
                 str(brief.get("error_category") or ""),
+                str(brief.get("task") or ""),
             )
         try:
             from api.prime_session_store import get_prime_session_store

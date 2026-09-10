@@ -371,15 +371,19 @@ class TestPrimeBriefQueueEnqueue(unittest.TestCase):
         d5 = next(r for r in records if r.get("brief_id") == "brief-d5")
         self.assertEqual(d5["priority"], "high")
 
-    def test_fallback_text_contains_task_id_and_status(self):
+    def test_fallback_text_contains_task_id_agent_and_outcome(self):
         self.queue.enqueue("d6", agent="programmatore", task_type="codice",
                            task="fix bug", status="done", output="fixed!")
         records = _read_jsonl(self.ws / "tasks" / "prime-brief-queue.jsonl")
         d6 = next(r for r in records if r.get("brief_id") == "brief-d6")
         fb = d6.get("fallback_text", "")
         self.assertIn("d6", fb)
-        self.assertIn("done", fb)
         self.assertIn("programmatore", fb)
+        self.assertIn("fix bug", fb)
+        # Italian outcome line, no raw status token and no raw output (spec
+        # docs/specs/brief-fallback-leggibile.md).
+        self.assertIn("Completata.", fb)
+        self.assertNotIn("fixed!", fb)
 
     def test_get_pending_excludes_delivered(self):
         self.queue.enqueue("d7", agent="p", task_type="t", task="t", status="done", output="x")
@@ -453,7 +457,9 @@ class TestFallbackDelivery(unittest.TestCase):
         self.assertTrue(ok)
         content = mock_store.injected_messages[0]["content"]
         self.assertIn("d11", content)
-        self.assertIn("timeout", content)
+        self.assertIn("ricercatore", content)
+        # timeout is rendered as an Italian sentence, not as the raw category.
+        self.assertIn("tempo scaduto", content)
 
 
 # ---------------------------------------------------------------------------
