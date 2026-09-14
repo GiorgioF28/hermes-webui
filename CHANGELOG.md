@@ -1,4 +1,9 @@
 ---
+
+## Unreleased — Prime provider routing
+
+- Prime now uses the same provider selection for chat, brain commands and quota state regardless of its execution workspace.
+- Agents explicitly pinned to Codex no longer silently fall back to Claude on startup or quota errors. Automatic agent routing retains its fallback.
 # Hermes Web UI -- Changelog
 
 ## [Unreleased]

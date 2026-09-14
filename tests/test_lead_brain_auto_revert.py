@@ -50,7 +50,7 @@ def test_prime_reply_reconciles_before_routing():
     from pathlib import Path
 
     src = (Path(__file__).resolve().parents[1] / "api" / "routes.py").read_text(encoding="utf-8")
-    route = src.index("if lead_brain.get_lead(workspace) == lead_brain.LEAD_CODEX:")
-    reconcile = src.rfind("lead_brain.reconcile_lead(workspace)", 0, route)
+    route = src.index("if lead_brain.get_lead(DEFAULT_WORKSPACE) == lead_brain.LEAD_CODEX:")
+    reconcile = src.rfind("lead_brain.reconcile_lead(DEFAULT_WORKSPACE)", 0, route)
     assert reconcile != -1, "reconcile_lead non chiamato prima della scelta Claude/Codex"
     assert route - reconcile < 800, "reconcile_lead troppo lontano dalla scelta della rotta"

@@ -11683,7 +11683,7 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
         from api.prime_delegation import get_background_tasks
         if brain_cmd in (lead_brain.LEAD_CLAUDE, lead_brain.LEAD_CODEX):
             state = lead_brain.set_lead(
-                workspace, brain_cmd, reason="manuale (chat)", manual=True,
+                DEFAULT_WORKSPACE, brain_cmd, reason="manuale (chat)", manual=True,
             )
             reply = (
                 f"Mozek byl nastaven a připnut na {state['lead'].upper()}."
@@ -11691,14 +11691,14 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
                 else f"Ok, capo impostato e pinnato a {state['lead'].upper()}."
             )
         elif brain_cmd == "auto":
-            state = lead_brain.set_auto_failover(workspace)
+            state = lead_brain.set_auto_failover(DEFAULT_WORKSPACE)
             reply = (
                 f"Automatické přepnutí je znovu aktivní. Aktuální mozek: {state['lead'].upper()}."
                 if user == "tom"
                 else f"Failover automatico riattivato. Capo attuale: {state['lead'].upper()}."
             )
         else:
-            state = lead_brain.get_lead_state(workspace)
+            state = lead_brain.get_lead_state(DEFAULT_WORKSPACE)
             mode = "PINNATO" if state.get("manual") else "AUTO"
             reply = (
                 f"Aktuální mozek: {state.get('lead', lead_brain.LEAD_CLAUDE).upper()} ({mode})."
@@ -11709,17 +11709,19 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
             on_token(reply)
         return {"reply": reply, "delegations": _prime_background_tasks(session_id)}
 
+    # Provider state belongs to the control workspace used by the selector,
+    # never to the execution directory selected by /workspace or another chat.
     # Failover automatico scaduto (finestra quota Claude passata) → si torna a
     # Claude da soli; un pin manuale su Codex resta com'e'.
-    lead_brain.reconcile_lead(workspace)
-    if lead_brain.get_lead(workspace) == lead_brain.LEAD_CODEX:
+    lead_brain.reconcile_lead(DEFAULT_WORKSPACE)
+    if lead_brain.get_lead(DEFAULT_WORKSPACE) == lead_brain.LEAD_CODEX:
         return _hermes_prime_reply_codex(message, workspace, attachments, on_token=on_token, on_status=on_status, session_id=session_id, user=user)
     try:
         result = _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status, model_state=model_state, stream_id=stream_id, session_id=session_id, user=user)
         # Turno Claude riuscito → la quota evidentemente c'e': spegni il timer
         # del Bridge se era rimasto acceso da una finestra precedente.
         try:
-            lead_brain.clear_claude_quota(workspace)
+            lead_brain.clear_claude_quota(DEFAULT_WORKSPACE)
         except Exception:
             logger.debug("claude quota state clear failed", exc_info=True)
         return result
@@ -11729,13 +11731,13 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
         # reload; la UI lo legge da /api/bridge/prime/claude-quota).
         try:
             lead_brain.record_claude_quota(
-                workspace,
+                DEFAULT_WORKSPACE,
                 reason=(ex.reason or "")[:200],
                 reset_at=bridge_errors.quota_reset_epoch(ex.reason or ""),
             )
         except Exception:
             logger.debug("claude quota state record failed", exc_info=True)
-        current = lead_brain.get_lead_state(workspace)
+        current = lead_brain.get_lead_state(DEFAULT_WORKSPACE)
         if current.get("manual"):
             raise RuntimeError(
                 "Claude è pinnato manualmente e ha rifiutato il turno per quota "
@@ -11743,7 +11745,7 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
                 "è disattivato: scegli CODEX dalla UI oppure usa /brain auto."
             ) from ex
         state = lead_brain.set_lead(
-            workspace,
+            DEFAULT_WORKSPACE,
             lead_brain.LEAD_CODEX,
             reason=ex.reason or "anthropic-exhausted",
             manual=False,
@@ -11788,8 +11790,8 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
     prompt = (
         _hermes_prime_persona_text(user)
         + "\n\n=== SUBENTRO COME BRAIN ===\n"
-        "Claude (il brain precedente) ha esaurito i crediti e il comando di Hermes "
-        "Prime passa ora a TE (Codex). Riprendi il filo dallo stato qui sotto e "
+        "Sei Codex, il provider selezionato per Hermes Prime. "
+        "Riprendi il filo dallo stato qui sotto e "
         "rispondi all'utente come capo di stato maggiore.\n\n"
         + handoff
         + "\n\n=== ISTRUZIONI ===\nRispondi SOLO con il messaggio per l'utente: "
@@ -12335,10 +12337,7 @@ def _handle_bridge_prime_claude_quota(handler):
     """
     try:
         from api import lead_brain
-        session_id = _request_prime_session_id(handler)
-        state = lead_brain.get_claude_quota_state(
-            _prime_workspace_from_settings(_prime_store_settings(session_id))
-        )
+        state = lead_brain.get_claude_quota_state(DEFAULT_WORKSPACE)
         return j(
             handler,
             {"ok": True, "quota": state or None, "now": time.time()},

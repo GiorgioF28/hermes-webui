@@ -1311,6 +1311,21 @@ async def _run_codex_worker_with_fallback(
     progress: dict | None = None,
 ) -> str:
     """Run a Codex sub-agent, falling back to Sonnet 4.6 only for quota exhaustion."""
+    from api import agent_models
+
+    slug = _agent_slug(agent_id or "")
+    pinned_codex = agent_models.get_overrides().get(_AGENT_NOTE_ALIASES.get(slug, slug)) == "codex"
+    # A manual provider choice must not silently spend on another provider,
+    # even when an earlier automatic run left a quota cooldown behind.
+    if pinned_codex:
+        if progress is not None:
+            progress["runtime"] = "codex"
+        output = await _run_codex_worker(task, workspace, agent_id=agent_id)
+        _clear_codex_fallback()
+        if progress is not None and str(output or "").startswith(_WRAPUP_MARKER):
+            progress["result_partial"] = True
+        return output
+
     status = _codex_fallback_status()
     if status["active"]:
         reason = status.get("reason") or "cooldown quota Codex"
