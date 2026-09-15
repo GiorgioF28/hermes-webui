@@ -1,0 +1,21 @@
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('node:assert/strict');
+let pending = new Map(), next = 1, visibility, intersection, draws = 0, disconnected = false;
+const document = {hidden:false, addEventListener:(name, fn)=>visibility=fn, removeEventListener:()=>visibility=null};
+const context = {document, requestAnimationFrame:fn=>{const id=next++;pending.set(id,fn);return id;}, cancelAnimationFrame:id=>pending.delete(id), IntersectionObserver:class{constructor(fn){intersection=fn;} observe(){} disconnect(){disconnected=true;}}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync('static/command_animation.js','utf8').replace('export function','function'),context);
+const host = {isConnected:true};
+context.scheduleVisibleAnimation(host,()=>draws++);
+function tick(now){const callbacks=[...pending.values()];pending.clear();callbacks.forEach(fn=>fn(now));}
+assert.equal(pending.size,0);
+intersection([{isIntersecting:true}]);
+for(let t=0;t<1000;t+=1000/60)tick(t);
+assert.ok(draws>15 && draws<=24, String(draws));
+intersection([{isIntersecting:false}]);tick(1001);assert.equal(pending.size,0);
+const prior=draws;tick(2000);assert.equal(draws,prior);
+intersection([{isIntersecting:true}]);document.hidden=true;tick(2001);assert.equal(pending.size,0);
+document.hidden=false;visibility();tick(2100);assert.equal(draws,prior+1);
+host.isConnected=false;tick(2200);assert.equal(pending.size,0);assert.ok(disconnected);assert.equal(visibility,null);
+console.log('PASS: capped FPS, offscreen/hidden pause, resume, disconnected cleanup');

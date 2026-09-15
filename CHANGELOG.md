@@ -8287,3 +8287,5 @@ Critical regressions introduced during the server.py split, caught by users and 
 - **Regression test file added** (`tests/test_regressions.py`): 10 tests, one per introduced bug. These form a permanent regression gate so each class of error can never silently return.
 
 ---
+
+- Bridge performance: batch history scroll/layout work, pause invisible WebGL scenes, cap decorative rendering to 24 FPS, and prevent overlapping background polls.

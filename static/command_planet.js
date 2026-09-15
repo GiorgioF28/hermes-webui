@@ -1,3 +1,4 @@
+import { scheduleVisibleAnimation } from './command_animation.js';
 /* ──────────────────────────────────────────────────────────────────────────
  * Vault Planet — three.js render of the Obsidian vault as a transparent globe
  * with an inside-the-sphere radial tree. Exposes window.cbInitPlanet(el, graph).
@@ -222,7 +223,7 @@ window.cbInitPlanet = function (container, graph) {
   const clock = new THREE.Clock();
   function animate() {
     if (!running) return;
-    requestAnimationFrame(animate);
+
     const t = clock.getElapsedTime();
     const a = orb.amp;
     let scale = 1.06 + Math.sin(t * 1.2) * 0.04, bright = 1, cool = false;
@@ -238,5 +239,5 @@ window.cbInitPlanet = function (container, graph) {
     controls.update();
     renderer.render(scene, camera);
   }
-  animate();
+  scheduleVisibleAnimation(container, animate);
 };

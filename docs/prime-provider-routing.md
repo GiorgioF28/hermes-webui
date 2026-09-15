@@ -33,3 +33,15 @@ model selection, including Codex.
 Tests: `python -m pytest tests/test_codex_prime_tools.py`.
 Optional real read-only MCP smoke: set `HERMES_CODEX_TOOL_SMOKE=1` before that
 suite. This calls only an isolated diagnostic tool; it performs no real work.
+
+## Bridge rendering performance (2026-09-15)
+
+History hydration batches scroll decisions instead of forcing layout for every
+message and delegation card. An isolated headless Brave DOM test with 2,031
+messages and the same 10,577 nodes measured 1,699 ms before and 400 ms after.
+This measures history insertion only, not whole-PC responsiveness.
+Decorative WebGL scenes render at most 24 FPS and pause outside the viewport
+or in hidden tabs. Agent/task polling skips hidden panels and overlapping calls.
+
+Validation: `node tests/command_animation.test.cjs` and
+`python -m pytest tests/test_command_bridge_reload_sync.py tests/test_command_bridge_prime_streaming.py tests/test_prime_session_store_buffer.py -q`.

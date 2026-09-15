@@ -45,7 +45,8 @@
   }
   // Scroll to bottom only if the user is already near it, so reading older
   // messages isn't interrupted while Prime keeps writing.
-  function nearBottom(log) { return !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 64; }
+  var _cbHistoryBatch = 0;
+  function nearBottom(log) { if (_cbHistoryBatch) return false; return !log || (log.scrollHeight - log.scrollTop - log.clientHeight) < 64; }
   var _cancelPrimeHistoryBottomSettle = null;
   function settlePrimeHistoryScrollToBottom() {
     if (_cancelPrimeHistoryBottomSettle) _cancelPrimeHistoryBottomSettle();
@@ -1470,18 +1471,24 @@
     if (changed) pollAgents();
     _cbActiveAgents = next;
   }
+  var _cbTasksInFlight = false;
   function pollTasks() {
+    if (document.hidden || _cbTasksInFlight || (typeof _currentPanel !== "undefined" && _currentPanel !== "bridge")) return;
+    _cbTasksInFlight = true;
     api('api/bridge/tasks').then(function (d) {
       var tasks = d && d.tasks ? d.tasks : [];
       if (tasks.length) tasks.forEach(function (t) { renderTask(t); });
       syncStarActiveAgents(tasks);
       applyPrimeLiveSnapshot(d && d.prime_live);
-    }).catch(function () {});
+    }).catch(function () {}).then(function () { _cbTasksInFlight = false; });
   }
   function startTaskPolling() { if (!_cbPollTimer) _cbPollTimer = setInterval(pollTasks, 3000); }
   var _cbAgentsTimer = null;
+  var _cbAgentsInFlight = false;
   function pollAgents() {
-    api('api/bridge/agents').then(renderAgents).catch(function () {});
+    if (document.hidden || _cbAgentsInFlight || (typeof _currentPanel !== "undefined" && _currentPanel !== "bridge")) return;
+    _cbAgentsInFlight = true;
+    api('api/bridge/agents').then(renderAgents).catch(function () {}).then(function () { _cbAgentsInFlight = false; });
   }
   // 5s: il pannello deve seguire i pianeti (3s), non arrivare mezzo minuto dopo.
   function startAgentsPolling() { if (!_cbAgentsTimer) _cbAgentsTimer = setInterval(pollAgents, 5000); }
@@ -2174,9 +2181,12 @@
     var start = Number(offset);
     if (!Number.isFinite(start) || start < 0) start = 0;
     var rendered = 0;
-    (messages || []).forEach(function (m, i) {
-      if (renderPrimeHistoryMessage(m, start + i, pendingClarifyId)) rendered += 1;
-    });
+    _cbHistoryBatch += 1;
+    try {
+      (messages || []).forEach(function (m, i) {
+        if (renderPrimeHistoryMessage(m, start + i, pendingClarifyId)) rendered += 1;
+      });
+    } finally { _cbHistoryBatch -= 1; }
     return rendered;
   }
   // Record durevole della delega (store) -> forma legacy attesa da renderTask.
@@ -2200,7 +2210,8 @@
   function hydrateDelegationCards(delegations) {
     if (!delegations || typeof delegations.forEach !== 'function') return 0;
     var made = 0;
-    delegations.forEach(function (d) {
+    _cbHistoryBatch += 1;
+    try { delegations.forEach(function (d) {
       var t = delegationRecordToTask(d);
       if (!t) return;
       // Il poller live e' piu' ricco (output, failure_reason): non lo sovrascriviamo.
@@ -2211,6 +2222,7 @@
       });
       made += 1;
     });
+    } finally { _cbHistoryBatch -= 1; }
     return made;
   }
   function renderPrimeHistoryPayload(data) {
@@ -3453,8 +3465,9 @@
     var running = true;
     function frame() {
       if (!running) return;
-      requestAnimationFrame(frame);
-      t += 0.016;
+      setTimeout(frame, 50);
+      if (document.hidden || !host.isConnected || host.offsetParent === null) return;
+      t += 0.05;
       var cx = W / 2, cy = H / 2, base = Math.min(W, H) * 0.5;
       if (base < 2) return;
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);

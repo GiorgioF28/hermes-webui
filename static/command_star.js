@@ -1,3 +1,4 @@
+import { scheduleVisibleAnimation } from './command_animation.js';
 /* ──────────────────────────────────────────────────────────────────────────
  * Hermes Prime — Living Star system (three.js).
  * Hermes Prime (the Orchestratore) IS the star; the worker agents are distinct
@@ -429,7 +430,7 @@ window.cbInitStar = function (container) {
   const clock = new THREE.Clock();
   function animate() {
     if (!running) return;
-    requestAnimationFrame(animate);
+
     const dt = Math.min(0.05, clock.getDelta());
     const t = clock.getElapsedTime();
 
@@ -505,5 +506,5 @@ window.cbInitStar = function (container) {
     controls.update();
     renderer.render(scene, camera);
   }
-  animate();
+  scheduleVisibleAnimation(container, animate);
 };
