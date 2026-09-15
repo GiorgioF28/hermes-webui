@@ -11715,7 +11715,7 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
     # Claude da soli; un pin manuale su Codex resta com'e'.
     lead_brain.reconcile_lead(DEFAULT_WORKSPACE)
     if lead_brain.get_lead(DEFAULT_WORKSPACE) == lead_brain.LEAD_CODEX:
-        return _hermes_prime_reply_codex(message, workspace, attachments, on_token=on_token, on_status=on_status, session_id=session_id, user=user)
+        return _hermes_prime_reply_codex(message, workspace, attachments, on_token=on_token, on_status=on_status, session_id=session_id, user=user, stream_id=stream_id)
     try:
         result = _hermes_prime_reply_claude(message, workspace, attachments, on_token, on_status, model_state=model_state, stream_id=stream_id, session_id=session_id, user=user)
         # Turno Claude riuscito → la quota evidentemente c'e': spegni il timer
@@ -11755,70 +11755,36 @@ def _hermes_prime_reply(message, workspace, attachments=None, on_token=None, on_
             on_status({"state": "handoff", "from": "claude", "to": "codex"})
         return _hermes_prime_reply_codex(
             message, workspace, attachments, on_token=on_token, on_status=on_status, partial=ex.partial,
-            session_id=session_id, user=user,
+            session_id=session_id, user=user, stream_id=stream_id,
         )
 
 
-def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=None, on_status=None, partial="", session_id="hermes-prime", user="giorgio"):
-    """Turno di Prime quando il capo è Codex (one-shot via `codex exec`).
+def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=None, on_status=None, partial="", session_id="hermes-prime", user="giorgio", stream_id=None):
+    """Prime on Codex with the shared Hermes tools and durable conversation."""
+    from api.codex_prime import run_prime, build_prompt
+    from api.bridge_attachments import normalize_prime_attachments, prime_turn_started, record_prime_images, build_prime_attachment_note
+    from api.prime_session_store import get_prime_session_store
 
-    Niente streaming token e niente tool `delega` in-process: Codex risponde come
-    capo di stato maggiore leggendo active-context + handoff. Può comunque agire
-    sul workspace (gira con i suoi permessi CLI come nelle deleghe)."""
-    from api.prime_delegation import get_background_tasks, _codex_exec_blocking
-    from api import lead_brain
-
-    if on_status is not None:
-        on_status({"state": "reasoning"})
-
-    from api.bridge_attachments import build_prime_attachment_note, normalize_prime_attachments, prime_turn_started, record_prime_images
-
-    turn = prime_turn_started() if session_id == "hermes-prime" else prime_turn_started(bridge=session_id)
-    attachments = normalize_prime_attachments(attachments or [], bridge=session_id)
-    if session_id == "hermes-prime":
-        record_prime_images(attachments, turn=turn)
-    else:
-        record_prime_images(attachments, turn=turn, bridge=session_id)
-    handoff = (
-        ("## User message\n" + str(message or "").strip()
-         + (("\n\n## Partial previous reply\n" + str(partial)[:2000]) if partial else ""))
-        if user == "tom"
-        else lead_brain.build_handoff_packet(
-            workspace, user_message=message, partial_reply=partial
-        )
-    )
-    prompt = (
-        _hermes_prime_persona_text(user)
-        + "\n\n=== SUBENTRO COME BRAIN ===\n"
-        "Sei Codex, il provider selezionato per Hermes Prime. "
-        "Riprendi il filo dallo stato qui sotto e "
-        "rispondi all'utente come capo di stato maggiore.\n\n"
-        + handoff
-        + "\n\n=== ISTRUZIONI ===\nRispondi SOLO con il messaggio per l'utente: "
-        "italiano, 2-4 frasi, diretto, da chief of staff. Niente output grezzi né "
-        "elenchi di file. Se serve un lavoro pesante, dillo in una riga (lo si delega)."
-    )
-    if user == "tom":
-        prompt += (
-            "\n\nOdpověz pouze česky a projektový kontext omez na VisionBuilts. "
-            "Sdílenou italskou paměť překládej do češtiny jen v chatu. Každý trvalý "
-            "zápis do paměti musí zůstat výhradně v italštině a nesmí obsahovat přepis "
-            "Tomovy české historie."
-        )
-    prompt += build_prime_attachment_note(attachments, current_turn=turn, bridge=session_id)
-    try:
-        reply = (_codex_exec_blocking(prompt, str(workspace)) or "").strip()
-    except Exception as exc:
-        logger.exception("codex brain reply failed")
-        detail = _redact_text(_sanitize_error(exc))
-        raise RuntimeError(f"Codex CLI non ha completato il turno: {detail}") from exc
-    if reply and on_token is not None:
-        on_token(reply)
-    return {
-        "reply": reply,
-        "delegations": _prime_background_tasks(session_id),
-        "usage": {},
-    }
+    with _prime_turn_lock(session_id):
+        cancel_event = threading.Event()
+        _prime_active_set(session_id=session_id, stream_id=stream_id, cancel_event=cancel_event,
+                          workspace=str(workspace), model=_prime_lead_model_id("codex"), started_at=time.time())
+        try:
+            turn = prime_turn_started() if session_id == "hermes-prime" else prime_turn_started(bridge=session_id)
+            attachments = normalize_prime_attachments(attachments or [], bridge=session_id)
+            record_prime_images(attachments, turn=turn, bridge=session_id)
+            prompt = build_prompt(message, workspace, session_id=session_id, user=user, partial=partial)
+            prompt += build_prime_attachment_note(attachments, current_turn=turn, bridge=session_id)
+            def on_tool(name):
+                if stream_id:
+                    get_prime_session_store(session_id).append_tool_event(stream_id, name, "Hermes tool")
+                if on_status:
+                    on_status({"state": "tool", "tool": name})
+            result = run_prime(prompt, workspace, session_id=session_id, cancel=cancel_event,
+                               on_token=on_token, on_status=on_status, on_tool=on_tool)
+            return {**result, "delegations": _prime_background_tasks(session_id)}
+        finally:
+            _prime_active_clear(stream_id, session_id)
 
 
 def _prime_claude_safe_model(model_state: dict | None, default: str = "claude-opus-5") -> str:

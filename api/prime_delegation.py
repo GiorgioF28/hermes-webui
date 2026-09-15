@@ -1056,14 +1056,22 @@ async def _run_librarian_serial(
         f"## Agent Result\n{output}"
     )
     try:
-        result = await _run_worker(
-            prompt,
-            _LIBRARIAN_MODEL,
-            workspace,
-            agent_id=_LIBRARIAN_AGENT_ID,
-            mcp_servers=_load_memory_mcp_servers(workspace),
-            skills=["sync-hermes-brain"],
-        )
+        from api import agent_models
+        selected = agent_models.get_overrides().get(_LIBRARIAN_AGENT_ID)
+        if selected == "codex":
+            result = await _run_codex_worker_with_fallback(
+                "Usa la skill sync-hermes-brain per questo passaggio di memoria.\n\n" + prompt,
+                workspace, agent_id=_LIBRARIAN_AGENT_ID,
+            )
+        else:
+            result = await _run_worker(
+                prompt,
+                selected or _LIBRARIAN_MODEL,
+                workspace,
+                agent_id=_LIBRARIAN_AGENT_ID,
+                mcp_servers=_load_memory_mcp_servers(workspace),
+                skills=["sync-hermes-brain"],
+            )
         # Il Librarian gira in automatico dopo ogni delega ma finora non lasciava
         # traccia nel registro uso: la sua card nel Command Bridge restava sempre
         # "non vivo". Registra l'uso cosi' il pannello agenti riflette che ha
@@ -1619,7 +1627,7 @@ def _claude_wrapup_message(task: str, agent_id: str | None, *, elapsed: float, b
     )
 
 
-def build_prime_delegation_server(session_id: str, workspace: str):
+def build_prime_delegation_tools(session_id: str, workspace: str):
     """In-process MCP server exposing `delega` to the Hermes Prime session."""
     # Ricarica l'ultimo stato noto delle deleghe (sopravvive a riavvio/crash).
     _load_bg_tasks(workspace)
@@ -1733,4 +1741,11 @@ def build_prime_delegation_server(session_id: str, workspace: str):
             "Segnato '" + nome + "' come " + stato + ". Salvo l'essenziale in memoria "
             "(Librarian) e tengo il contesto pulito."}]}
 
-    return create_sdk_mcp_server(name="team", version="1.0.0", tools=[delega, task_done])
+    return [delega, task_done]
+
+
+def build_prime_delegation_server(session_id: str, workspace: str):
+    return create_sdk_mcp_server(
+        name="team", version="1.0.0",
+        tools=build_prime_delegation_tools(session_id, workspace),
+    )

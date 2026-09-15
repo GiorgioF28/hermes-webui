@@ -2,6 +2,8 @@
 
 ## Unreleased — Prime provider routing
 
+- Codex Prime now connects to the live Hermes delegation, completion, clarification and history tools, with shared persona/memory, cancellation and usage. Automatic Librarian passes honor explicit provider selections.
+
 - Prime now uses the same provider selection for chat, brain commands and quota state regardless of its execution workspace.
 - Agents explicitly pinned to Codex no longer silently fall back to Claude on startup or quota errors. Automatic agent routing retains its fallback.
 # Hermes Web UI -- Changelog
