@@ -45,3 +45,20 @@ or in hidden tabs. Agent/task polling skips hidden panels and overlapping calls.
 
 Validation: `node tests/command_animation.test.cjs` and
 `python -m pytest tests/test_command_bridge_reload_sync.py tests/test_command_bridge_prime_streaming.py tests/test_prime_session_store_buffer.py -q`.
+
+
+## Follow-up: cold reload and misleading CLI error (2026-09-16)
+
+Codex usage-limit failures could be misclassified as a missing executable when
+shutdown logged `thread ... not found`. The runner now prefers structured turn
+errors to stderr warnings, and the classifier distinguishes `codex_quota` from
+Claude quota and executable-specific startup errors. This does not change quota
+or authentication; it reports the actual provider failure.
+
+The initial FPS fix did not cover synchronous procedural texture generation.
+All star/planet maps are now baked PNGs, preserving their original pixels and
+color-space settings. The original generator is retained under scripts; run
+`python scripts/bake_bridge_textures.py` with Playwright Chromium installed, or
+set `BRIDGE_BAKE_BROWSER` to a Chromium executable. No build step runs at startup.
+Isolated Brave star initialization measured 4,257 ms before versus 48 ms after;
+these timings exclude the rest of the app and are not whole-PC latency measurements.

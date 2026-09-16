@@ -172,6 +172,7 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
     proc = None
     events = queue.Queue()
     parts, errors, usage = [], [], {}
+    turn_errors = []
     elapsed, last = 0.0, time.monotonic()
     try:
         proc = subprocess.Popen(command, cwd=str(workspace), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -219,10 +220,12 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
                 usage = event.get("usage") or {}
             elif kind in {"error", "turn.failed"}:
                 err = event.get("error") or {}
-                errors.append(str(err.get("message") if isinstance(err, dict) else err) or str(event.get("message", "Codex error")))
+                detail = (err.get("message") if isinstance(err, dict) else err) or event.get("message")
+                if detail:
+                    turn_errors.append(str(detail))
         if proc.wait(timeout=10) != 0 or not parts:
             from api.helpers import _redact_text
-            raise RuntimeError("Codex Prime: " + _redact_text("".join(errors)[-3000:]))
+            raise RuntimeError("Codex Prime: " + _redact_text("\n".join(turn_errors or errors)[-3000:]))
         return {"reply": "".join(parts), "usage": usage}
     finally:
         runtime.revoke(token)

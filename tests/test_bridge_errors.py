@@ -134,3 +134,15 @@ def test_bridge_prime_emits_error_event_with_branch(monkeypatch):
     assert errs, f"nessun evento error negli SSE: {events}"
     assert errs[-1].get("branch") == be.CODEX_TIMEOUT
     assert errs[-1].get("error")  # messaggio umano presente
+
+
+def test_codex_quota_wins_over_shutdown_noise():
+    info = be.classify(RuntimeError("Codex Prime: You've hit your usage limit. "
+        "OAuth credentials missing for chatcut; thread 123 not found"))
+    assert info["branch"] == be.CODEX_QUOTA
+    assert "Codex" in info["message"]
+
+
+def test_missing_thread_is_not_missing_cli():
+    assert be.classify_branch(RuntimeError("Codex Prime: thread 123 not found")) == be.CODEX_EXIT
+    assert be.classify_branch(FileNotFoundError("workspace missing")) != be.CODEX_NOT_FOUND

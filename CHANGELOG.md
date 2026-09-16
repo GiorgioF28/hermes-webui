@@ -2,6 +2,9 @@
 
 ## Unreleased — Prime provider routing
 
+- Correct Codex quota/error classification: unrelated missing-thread warnings no longer report a missing CLI; primary turn errors take precedence over shutdown logs.
+- Load precomputed Bridge planet textures instead of recalculating procedural noise during every page reload.
+
 - Codex Prime now connects to the live Hermes delegation, completion, clarification and history tools, with shared persona/memory, cancellation and usage. Automatic Librarian passes honor explicit provider selections.
 
 - Prime now uses the same provider selection for chat, brain commands and quota state regardless of its execution workspace.

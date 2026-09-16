@@ -19,6 +19,7 @@ from datetime import datetime as _dt
 # per decidere il messaggio) → non rinominare senza aggiornare la UI e i test.
 CLAUDE_QUOTA = "claude_quota"
 CLAUDE_PLAN_CREDITS = "claude_plan_credits"
+CODEX_QUOTA = "codex_quota"
 CODEX_TIMEOUT = "codex_timeout"
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_AUTH = "codex_auth"
@@ -31,6 +32,10 @@ UNKNOWN = "unknown"
 
 # ramo -> (messaggio utente, hint operativo)
 _MESSAGES = {
+    CODEX_QUOTA: (
+        "Codex ha raggiunto il limite di utilizzo disponibile.",
+        "Attendi il ripristino della quota indicato da Codex, poi riprova. Il CLI è installato; non serve modificare il PATH.",
+    ),
     CLAUDE_QUOTA: (
         "Claude ha esaurito crediti/quota per questa finestra.",
         "Passa a Codex dalla UI (CODEX) o aspetta il reset della finestra.",
@@ -122,9 +127,18 @@ def classify_branch(exc) -> str:
             return CODEX_TIMEOUT
         return PRIME_IDLE_TIMEOUT
 
-    # 3) Eseguibile non trovato / PATH.
-    if name == "FileNotFoundError" or "non trovato" in text or "not found" in text \
-       or "codex.cmd" in text or "no such file" in text:
+    # Quota is the primary turn failure, even if shutdown emits unrelated warnings.
+    if codexy and any(k in text for k in (
+        "hit your usage limit", "usage_limit_exceeded", "usage limit reached",
+        "rate_limit_exceeded", "used up your usage", "credit balance",
+    )):
+        return CODEX_QUOTA
+
+    # Only executable-specific evidence implies a missing CLI, never a missing thread.
+    if (name == "FileNotFoundError" and codexy) or any(k in text for k in (
+        "codex cli non trovato", "codex executable not found", "codex.cmd non nel path",
+        "codex: command not found", "codex.cmd not found",
+    )):
         return CODEX_NOT_FOUND
 
     # 4) Auth Codex (login scaduto/mancante) — specifico di Codex.
@@ -153,7 +167,7 @@ def classify_branch(exc) -> str:
         return CLAUDE_QUOTA
 
     # 6) Codex uscito con exit code != 0.
-    if "codex cli exit" in text or (codexy and "exit" in text):
+    if "codex cli exit" in text or (codexy and ("exit" in text or "codex prime:" in text)):
         return CODEX_EXIT
 
     return UNKNOWN
