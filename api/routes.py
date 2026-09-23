@@ -11173,6 +11173,8 @@ def _handle_bridge_tasks(handler, parsed):
                 "fallback_runtime": rt.get("fallback_runtime", ""),
                 "fallback_model": rt.get("fallback_model", ""),
                 "fallback_reason": rt.get("fallback_reason", ""),
+                "diagnostic_log": result.get("diagnostic_log", ""),
+                "result_partial": bool(result.get("partial")),
                 "failure_reason": error.get("message", ""),
                 "error_category": error.get("category", ""),
             })
@@ -12127,6 +12129,14 @@ def _handle_bridge_prime_history(handler, parsed=None):
         session_id = _request_prime_session_id(handler)
         since_index = _bridge_history_since_index(parsed)
         hist = get_prime_session_store(session_id).history_with_tool_events(since_index)
+        # Rehydrate bounded outcomes without duplicating logs into session state.
+        try:
+            from api.delegation_store import get_delegation_store
+            from api.delegation_outcome import enrich_history_outcomes
+            records = get_delegation_store(Path(str(DEFAULT_WORKSPACE))).get_all()
+            hist["delegations"] = enrich_history_outcomes(hist.get("delegations") or [], records, session_id)
+        except Exception:
+            logger.debug("bridge history: outcome hydration failed", exc_info=True)
         # Fase 1: annotate with pending brief count (best-effort)
         try:
             from api.prime_brief_queue import get_brief_queue

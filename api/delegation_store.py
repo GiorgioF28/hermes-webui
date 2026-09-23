@@ -24,6 +24,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from api.delegation_outcome import normalise_outcome, outcome_summary
+
 logger = logging.getLogger(__name__)
 
 # ── Status normalisation ──────────────────────────────────────────────────────
@@ -168,16 +170,7 @@ def status_to_legacy(canonical: str) -> str:
 
 
 def _ui_summary_from_legacy_task(t: dict) -> str:
-    tid = str(t.get("id") or "").strip()
-    task = " ".join(str(t.get("task") or t.get("task_type") or "task").split())
-    output = " ".join(str(t.get("output") or "").split())
-    status = str(t.get("status") or "")
-    state = "in corso" if status == "in_corso" else ("completato" if status in ("ok", "parziale") else ("interrotta" if status == "interrotta" else "errore"))
-    commit = ""
-    match = re.search(r"\b(?:commit\s+)?([0-9a-f]{7,12})\b", output, flags=re.I)
-    if match:
-        commit = ", commit " + match.group(1)
-    return f"{tid} - {task[:72]}: {state}{commit}"[:140]
+    return outcome_summary(t)
 
 
 # ── Canonical record builder ──────────────────────────────────────────────────
@@ -265,6 +258,7 @@ def make_canonical_record(
 
 def bg_task_to_canonical(t: dict) -> dict[str, Any]:
     """Convert a legacy _BG_TASKS record to canonical schema (non-destructive)."""
+    t = normalise_outcome(t)
     tid = str(t.get("id") or "")
     raw_status = str(t.get("status") or "")
     canonical_status = normalise_status(raw_status)
@@ -296,6 +290,7 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
         result={
             "text": raw_output,
             "raw_excerpt": raw_output[:1200],
+            "diagnostic_log": t.get("diagnostic_log", ""),
             "artifact_paths": [],
             "stdout_tail": "",
             "stderr_tail": "",
@@ -331,6 +326,21 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
             "summary": str(t.get("summary") or _ui_summary_from_legacy_task(t)),
         },
     )
+
+
+def normalise_canonical_outcome(record: dict) -> dict:
+    """Repair presentation only; preserve brief delivery and all execution state."""
+    view = normalise_outcome(record)
+    rec = dict(record)
+    result = dict(rec.get("result") or {})
+    result.update(text=cap_text(view["output"]), diagnostic_log=view["diagnostic_log"],
+                  partial=view["result_partial"])
+    error = dict(rec.get("error") or {})
+    error.update(message=view["failure_reason"], category=view["error_category"])
+    if error.get("category") == "quota_exhausted":
+        error["retryable"] = True
+    rec.update(result=result, error=error, ui={**(rec.get("ui") or {}), "summary": view["summary"]})
+    return rec
 
 
 # ── Store ─────────────────────────────────────────────────────────────────────
@@ -405,6 +415,7 @@ class DelegationStore:
             if not tid:
                 return record
             record = dict(record)
+            record = normalise_canonical_outcome(record)
             record["status"] = normalise_status(record.get("status", "unknown"))
             self._append_jsonl(record)
             state = self._read_state()
@@ -415,12 +426,13 @@ class DelegationStore:
     def get(self, task_id: str) -> dict | None:
         """Return canonical record for task_id, or None."""
         with self._lock:
-            return self._read_state().get(str(task_id))
+            record = self._read_state().get(str(task_id))
+            return normalise_canonical_outcome(record) if record else None
 
     def get_all(self) -> list[dict]:
         """Return all canonical records (one per id, no duplicates)."""
         with self._lock:
-            return list(self._read_state().values())
+            return [normalise_canonical_outcome(r) for r in self._read_state().values()]
 
     def compact(self, limit: int | None = None) -> int:
         """Applica il tetto ai testi dei record gia' salvati e riscrive lo stato.
@@ -436,7 +448,9 @@ class DelegationStore:
             for rec in state.values():
                 if not isinstance(rec, dict):
                     continue
-                touched = False
+                clean = normalise_canonical_outcome(rec)
+                touched = clean != rec
+                rec.update(clean)
                 result = rec.get("result")
                 if isinstance(result, dict):
                     for key in ("text", "raw_excerpt", "stdout_tail", "stderr_tail"):

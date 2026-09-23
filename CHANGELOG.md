@@ -2,6 +2,8 @@
 
 ## Unreleased — Prime provider routing
 
+- Delegation cards separate a bounded technical log from the agent result and a short error. Codex usage-limit failures are classified correctly, partial results survive, and historical cards no longer infer commits from session IDs.
+
 - Correct Codex quota/error classification: unrelated missing-thread warnings no longer report a missing CLI; primary turn errors take precedence over shutdown logs.
 - Load precomputed Bridge planet textures instead of recalculating procedural noise during every page reload.
 

@@ -27,6 +27,7 @@ from typing import Any
 from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, tool, create_sdk_mcp_server
 
 from api.claude_cli import resolve_claude_cli_path
+from api.delegation_outcome import diagnostic_excerpt, normalise_outcome, outcome_summary, process_failure
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +145,16 @@ class CodexStartError(DelegationRuntimeError):
 
 
 class CodexProcessError(DelegationRuntimeError):
-    def __init__(self, exit_code: int, detail: str) -> None:
+    def __init__(self, exit_code: int, detail: str, partial_output: str = "") -> None:
+        category, message = process_failure(detail)
         super().__init__(
-            f"Codex CLI exit {exit_code}: {detail}",
-            category="process_exit",
+            f"Codex CLI exit {exit_code}: {message}",
+            category=category,
             provider="codex",
-            partial_output=detail,
+            partial_output=partial_output,
             exit_code=exit_code,
         )
+        self.diagnostic_log = diagnostic_excerpt(detail)
 
 
 class DelegationOutputError(DelegationRuntimeError):
@@ -241,7 +244,7 @@ _PERSIST_FIELDS = (
     "id", "session_id", "agent", "agent_id", "task_type", "task", "status", "output",
     "started", "finished", "librarian_status", "librarian_output",
     "runtime", "fallback_runtime", "fallback_model", "fallback_reason",
-    "failure_reason", "error_category", "error_code", "result_partial",
+    "failure_reason", "error_category", "error_code", "result_partial", "diagnostic_log",
     "anchor_session_id", "anchor_message_index", "anchor_created_at", "summary",
 )
 
@@ -278,25 +281,7 @@ def _delegation_anchor(session_id: str) -> dict[str, Any]:
 
 
 def _brief_summary(t: dict) -> str:
-    tid = str(t.get("id") or "").strip()
-    task = re.sub(r"\s+", " ", str(t.get("task") or "").strip())
-    output = re.sub(r"\s+", " ", str(t.get("output") or "").strip())
-    status = str(t.get("status") or "")
-    if status == "in_corso":
-        state = "in corso"
-    elif status in ("ok", "parziale", "done"):
-        state = "completato"
-    elif status == "interrotta":
-        state = "interrotta"
-    else:
-        state = "fallita"
-    subject = task or str(t.get("task_type") or t.get("agent") or "delega")
-    commit = ""
-    match = re.search(r"\b(?:commit\s+)?([0-9a-f]{7,12})\b", output, flags=re.I)
-    if match:
-        commit = ", commit " + match.group(1)
-    text = f"{tid} - {subject[:72]}: {state}{commit}".strip()
-    return text[:140]
+    return outcome_summary(t)
 
 
 # Mappa status CANONICO -> LEGACY per la normalizzazione al caricamento.
@@ -352,7 +337,7 @@ def _canonical_to_legacy(rec: dict) -> dict:
         rec["anchor_created_at"] = ui.get("anchor_created_at")
     if not rec.get("summary"):
         rec["summary"] = ui.get("summary") or _brief_summary(rec)
-    return rec
+    return normalise_outcome(rec)
 
 
 def _persist_bg_task(task_id: str, workspace: str) -> None:
@@ -363,7 +348,8 @@ def _persist_bg_task(task_id: str, workspace: str) -> None:
     try:
         path = _delegations_log_path(workspace)
         path.parent.mkdir(parents=True, exist_ok=True)
-        snapshot = {k: t.get(k) for k in _PERSIST_FIELDS}
+        view = normalise_outcome(t)
+        snapshot = {k: view.get(k) for k in _PERSIST_FIELDS}
         from api.delegation_store import cap_text
 
         for key in ("output", "librarian_output"):
@@ -615,7 +601,7 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
         from api.delegation_store import classify_error as _clf_err
 
         err = _clf_err(e)
-        msg = str(e).strip() or "runtime failure"
+        msg = err.get("message") or "runtime failure"
         partials = []
         current = str(t.get("output") or "").strip()
         if current and not current.startswith("Codex esaurito -> fallback Sonnet"):
@@ -633,13 +619,17 @@ async def _run_and_store_serial(task_id, task_type, task, model, label, workspac
             failure_reason=msg,
             error_category=category,
             error_code=error_code,
-            result_partial=bool(partial) and category in {"timeout", "process_exit", "truncated_output"},
+            result_partial=bool(partial) or bool(getattr(e, "diagnostic_log", "")),
+            diagnostic_log=diagnostic_excerpt(getattr(e, "diagnostic_log", "")),
         )
         _persist_bg_task(task_id, workspace)
+        t.update(normalise_outcome(t))
         # Fase 1: enqueue brief for failed delegation (high priority)
         try:
             from api.prime_brief_queue import get_brief_queue
-            brief_output = partial
+            brief_output = t["output"][:12000]
+            if t.get("result_partial"):
+                brief_output += "\nEsecuzione interrotta: verifica report, file e commit esistenti prima di riprendere. Il log tecnico non è una risposta finale e non prova che il lavoro sia perso."
             if msg and msg not in brief_output:
                 brief_output = (brief_output + "\n\n[errore: " + msg + "]").strip()
             get_brief_queue(workspace).enqueue(
@@ -669,7 +659,8 @@ def get_background_tasks(max_age: float = 600.0, *, session_id: str | None = Non
     # Status che indicano una delega ancora in esecuzione (legacy + canonico).
     _RUNNING_STATUSES = frozenset({"in_corso", "running", "pending"})
     out = []
-    for t in list(_BG_TASKS.values()):
+    for raw_task in list(_BG_TASKS.values()):
+        t = normalise_outcome(raw_task)
         task_session_id = str(t.get("anchor_session_id") or t.get("session_id") or "hermes-prime")
         if session_id is not None and task_session_id != session_id:
             continue
@@ -699,6 +690,8 @@ def get_background_tasks(max_age: float = 600.0, *, session_id: str | None = Non
             "fallback_runtime": t.get("fallback_runtime"),
             "fallback_model": t.get("fallback_model"),
             "fallback_reason": t.get("fallback_reason"),
+            "diagnostic_log": t.get("diagnostic_log", ""),
+            "result_partial": bool(t.get("result_partial")),
             "failure_reason": t.get("failure_reason") or (t.get("error") or {}).get("message", ""),
             "error_category": t.get("error_category") or (t.get("error") or {}).get("category", ""),
         })
@@ -711,6 +704,7 @@ def get_background_task(task_id: str) -> dict | None:
     t = _BG_TASKS.get(task_id)
     if not t:
         return None
+    t = normalise_outcome(t)
     return {
         "id": t["id"], "agent": t["agent"], "task_type": t["task_type"],
         "task": t["task"], "status": t["status"], "output": t.get("output", ""),
@@ -725,6 +719,8 @@ def get_background_task(task_id: str) -> dict | None:
         "fallback_runtime": t.get("fallback_runtime"),
         "fallback_model": t.get("fallback_model"),
         "fallback_reason": t.get("fallback_reason"),
+        "diagnostic_log": t.get("diagnostic_log", ""),
+        "result_partial": bool(t.get("result_partial")),
         "failure_reason": t.get("failure_reason") or (t.get("error") or {}).get("message", ""),
         "error_category": t.get("error_category") or (t.get("error") or {}).get("category", ""),
     }
@@ -1181,6 +1177,8 @@ def is_codex_quota_error(exc: Any) -> bool:
     """True when Codex CLI failed because account credits/usage are exhausted."""
     if isinstance(exc, CodexTimeoutError):
         return False
+    if isinstance(exc, CodexProcessError):
+        return exc.category == "quota_exhausted"
     text = f"{type(exc).__name__}: {exc}".lower()
     if "codex" not in text:
         return False
@@ -1413,8 +1411,8 @@ def _codex_exec_blocking(task: str, workspace: str, timeout: float | None = None
     err = (proc.stderr or "").strip()
     if proc.returncode != 0:
         detail = err or out or f"exit code {proc.returncode}"
-        raise CodexProcessError(proc.returncode, detail)
-    return out or err
+        raise CodexProcessError(proc.returncode, detail, partial_output=out)
+    return out
 
 
 def _codex_worker_prompt(task: str, agent_id: str | None, workspace: str) -> str:

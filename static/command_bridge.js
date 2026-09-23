@@ -421,6 +421,8 @@
 '.cb-deleg-details summary{cursor:pointer;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;}',
 '.cb-deleg-details[open] .cb-deleg-full{margin-top:6px;color:var(--cb-text);font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;}',
 '.cb-deleg-failure{margin-top:6px;color:#ff9b91;font-family:var(--cb-sans);font-size:11.5px;line-height:1.4;white-space:pre-wrap;word-break:break-word;}',
+'.cb-deleg-diagnostic pre{max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}',
+'.cb-deleg-partial{margin-top:6px;color:#e0b15d;line-height:1.4;}',
 /* input: a single compact row, fixed at the bottom of the chat console */
 '.cb-chat-input{display:flex;padding:12px 14px 14px;border-top:1px solid var(--cb-line2);}',
 '.cb-chat-input textarea{flex:1;min-width:0;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:12px;',
@@ -1351,8 +1353,11 @@
     var prev = _cbTasks[t.id];
     var sl = taskIsRunning(t.status) ? '&#8230;' : (t.status === 'ok' || t.status === 'parziale' || t.status === 'done' ? '&#10003;' : '&#10007;');
     var full = String(t.output || '').trim();
-    var detail = full ? '<details class="cb-deleg-details"><summary>dettaglio</summary><div class="cb-deleg-full">' + esc(full) + '</div></details>' : '';
-    var failure = String((t && t.failure_reason) || '').trim();
+    var detail = full ? '<details class="cb-deleg-details"><summary>Risultato dell’agente</summary><div class="cb-deleg-full">' + esc(full) + '</div></details>' : '';
+    var failure = String((t && t.failure_reason) || '').trim().slice(0, 500);
+    var diagnostic = String(t.diagnostic_log || '').slice(0, 12000);
+    var diagnosticHtml = diagnostic ? '<details class="cb-deleg-details cb-deleg-diagnostic"><summary>Log tecnico (estratto)</summary><pre>' + esc(diagnostic) + '</pre></details>' : '';
+    var partialHtml = t.result_partial ? '<div class="cb-deleg-partial">Esito parziale: verificare report, file e commit prima di riprendere il lavoro.</div>' : '';
     var failureHtml = failure ? '<div class="cb-deleg-failure"><b>Fallita:</b> ' + esc(failure) + '</div>' : '';
     var fullTask = String((t && t.task) || '').trim();
     var taskFull = fullTask ? '<div class="cb-deleg-taskfull">' + esc(fullTask) + '</div>' : '';
@@ -1361,7 +1366,7 @@
       '<div class="cb-deleg-sumrow">' +
         '<button type="button" class="cb-deleg-arrow" aria-label="Espandi o riduci il testo della delega" title="Espandi / riduci">&#9656;</button>' +
         '<div class="cb-deleg-sumtext"><div class="cb-deleg-summary">' + esc(taskSummary(t)) + '</div>' + taskFull + '</div>' +
-      '</div>' + failureHtml + detail;
+      '</div>' + failureHtml + partialHtml + detail + diagnosticHtml;
     if (prev && prev.el) {
       prev.el.innerHTML = html;
       prev.el.className = 'cb-deleg ' + taskStateClass(t.status) + (prev.open ? ' cb-deleg-open' : '');
@@ -1379,7 +1384,7 @@
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
     if (prev && taskIsRunning(prev.status) && !taskIsRunning(t.status) && !(opts && opts.replay)) {
-      sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + ((t.status === 'ok' || t.status === 'done') ? 'finito' : 'fallito') + ' il task.');
+      sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + (t.result_partial ? 'concluso con esito parziale' : ((t.status === 'ok' || t.status === 'done') ? 'finito' : 'fallito')) + ' il task.');
     }
     _cbTasks[t.id].status = t.status;
     // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
@@ -2198,7 +2203,12 @@
       task_type: d.task_type || '',
       task: d.task_excerpt || '',
       status: String(d.status || ''),
-      output: '',
+      output: d.output || '',
+      failure_reason: d.failure_reason || '',
+      error_category: d.error_category || '',
+      diagnostic_log: d.diagnostic_log || '',
+      result_partial: !!d.result_partial,
+      summary: d.summary || '',
       started: d.started_at,
       finished: d.finished_at,
       anchor_message_index: d.anchor_message_index
