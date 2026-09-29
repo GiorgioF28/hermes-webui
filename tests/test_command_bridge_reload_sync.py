@@ -255,3 +255,86 @@ def test_tasks_endpoint_ignores_other_sessions(tasks_endpoint):
 
     assert captured[-1]["tasks"] == []
     assert store.get_delegations() == []
+
+
+# ── Regressione: il poll a 3 s non deve macinare il file di sessione ─────────
+# Con piu' record canonici del cap dello store, ogni poll riaggiungeva i
+# record sfrattati (una lettura+scrittura del file da 2 MB per record):
+# /api/bridge/tasks arrivava a 80-120 s e bloccava upload e turni chat.
+
+def _canonical(tid: str, started_at: float, brief: str = "delivered") -> dict:
+    return {
+        "id": tid,
+        "agent": "librarian",
+        "task": "task " + tid,
+        "task_type": "ricerca",
+        "status": "done",
+        "started_at": started_at,
+        "finished_at": started_at + 1,
+        "brief": {"status": brief},
+        "ui": {"anchor_session_id": "hermes-prime", "anchor_message_index": 1},
+    }
+
+
+class _CanonicalStore:
+    def __init__(self, records):
+        self._records = records
+
+    def get_all(self):
+        return list(self._records)
+
+
+def test_tasks_endpoint_keeps_newest_records_and_stops_writing_once_synced(tasks_endpoint, monkeypatch):
+    store, captured = tasks_endpoint
+    from api import delegation_store
+
+    monkeypatch.setattr(pss, "DELEGATIONS_CAP", 5)
+    # d0/d1 hanno il brief ancora da consegnare: finiscono in `tasks` pur
+    # essendo piu' vecchi del cap, e non devono sfrattare i record recenti.
+    records = [_canonical(f"d{i}", started_at=1000.0 + i, brief="pending" if i < 2 else "delivered") for i in range(8)]
+    monkeypatch.setattr(delegation_store, "get_delegation_store", lambda workspace: _CanonicalStore(records))
+    _BACKGROUND[0] = []
+
+    _call_tasks()
+
+    assert [r["id"] for r in store.get_delegations()] == ["d3", "d4", "d5", "d6", "d7"]
+    rev_after_first_poll = store.get_delegations_rev()
+
+    _call_tasks()
+
+    assert store.get_delegations_rev() == rev_after_first_poll
+    assert [r["id"] for r in store.get_delegations()] == ["d3", "d4", "d5", "d6", "d7"]
+
+
+def test_tasks_endpoint_writes_the_session_file_once_per_poll(tasks_endpoint, monkeypatch):
+    store, captured = tasks_endpoint
+    from api import delegation_store
+
+    records = [_canonical(f"d{i}", started_at=1000.0 + i) for i in range(20)]
+    monkeypatch.setattr(delegation_store, "get_delegation_store", lambda workspace: _CanonicalStore(records))
+    _BACKGROUND[0] = []
+    writes: list[int] = []
+    original_write = store._write_locked
+    monkeypatch.setattr(store, "_write_locked", lambda data: writes.append(1) or original_write(data))
+
+    _call_tasks()
+
+    assert len(store.get_delegations()) == 20
+    assert len(writes) == 1
+
+
+def test_tasks_endpoint_restores_worker_model_metadata(tasks_endpoint, monkeypatch):
+    store, captured = tasks_endpoint
+    from api import delegation_store
+
+    record = _canonical("d-worker", 1000.0, brief="pending")
+    record["runtime"] = {"primary": "codex", "model": "gpt-6-luna", "reasoning_effort": "medium"}
+    monkeypatch.setattr(delegation_store, "get_delegation_store", lambda workspace: _CanonicalStore([record]))
+    _BACKGROUND[0] = []
+
+    _call_tasks()
+
+    task = captured[-1]["tasks"][0]
+    assert task["runtime"] == "codex"
+    assert task["runtime_model"] == "gpt-6-luna"
+    assert task["reasoning_effort"] == "medium"

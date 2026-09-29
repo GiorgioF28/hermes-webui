@@ -11114,6 +11114,7 @@ def _handle_bridge_tasks(handler, parsed):
     except Exception as exc:
         logger.exception("bridge tasks failed")
         return j(handler, {"ok": False, "error": str(exc)}, status=500) or True
+    ram_tasks = list(tasks)
     # Augment with canonical-store records not in RAM that have undelivered briefs
     try:
         from api.delegation_store import get_delegation_store, status_to_legacy
@@ -11170,6 +11171,8 @@ def _handle_bridge_tasks(handler, parsed):
                 "librarian_status": lib.get("status", ""),
                 "librarian_output": lib.get("output", ""),
                 "runtime": rt.get("primary", ""),
+                "runtime_model": rt.get("model", ""),
+                "reasoning_effort": rt.get("reasoning_effort", ""),
                 "fallback_runtime": rt.get("fallback_runtime", ""),
                 "fallback_model": rt.get("fallback_model", ""),
                 "fallback_reason": rt.get("fallback_reason", ""),
@@ -11178,10 +11181,17 @@ def _handle_bridge_tasks(handler, parsed):
                 "failure_reason": error.get("message", ""),
                 "error_category": error.get("category", ""),
             })
-        _sync_prime_delegation_records(session_id, canonical_records)
+        # Mirror only what the durable store can hold, in one batch: with more
+        # canonical records than DELEGATIONS_CAP every poll re-added the evicted
+        # ones (one full-file rewrite each) and bumped delegations_rev forever.
+        # Live RAM tasks go last so the cap never drops them.
+        from api import prime_session_store as _pss
+        canonical_records.sort(key=lambda r: float(r.get("started") or 0))
+        mirror = canonical_records + ram_tasks
+        _sync_prime_delegation_records(session_id, mirror[-_pss.DELEGATIONS_CAP:])
     except Exception:
         logger.debug("bridge tasks: delegation_store augmentation failed", exc_info=True)
-    _sync_prime_delegation_records(session_id, tasks)
+        _sync_prime_delegation_records(session_id, ram_tasks)
     payload = {"ok": True, "tasks": tasks}
     # Multi-device sync piggy-backs on this 3 s poll instead of a new socket:
     # the tab compares message_count/delegations_rev with what it has rendered.
@@ -11544,23 +11554,25 @@ def _sync_prime_delegation_records(session_id: str, tasks: list[dict]) -> None:
     try:
         from api.prime_session_store import get_prime_session_store
 
-        store = get_prime_session_store(session_id)
+        records: list[tuple[str, dict]] = []
         for task in tasks:
             if not isinstance(task, dict):
                 continue
             task_id = str(task.get("id") or "").strip()
             if not task_id:
                 continue
-            store.upsert_delegation(
-                task_id,
-                agent=str(task.get("agent") or ""),
-                task_excerpt=str(task.get("task") or task.get("task_type") or ""),
-                status=str(task.get("status") or ""),
-                started_at=task.get("started") or task.get("started_at"),
-                finished_at=task.get("finished") or task.get("finished_at"),
-                anchor_message_index=task.get("anchor_message_index"),
-                brief_status=str(task.get("brief_status") or ""),
-            )
+            records.append((task_id, {
+                "agent": str(task.get("agent") or ""),
+                "task_excerpt": str(task.get("task") or task.get("task_type") or ""),
+                "status": str(task.get("status") or ""),
+                "started_at": task.get("started") or task.get("started_at"),
+                "finished_at": task.get("finished") or task.get("finished_at"),
+                "anchor_message_index": task.get("anchor_message_index"),
+                "brief_status": str(task.get("brief_status") or ""),
+            }))
+        # One read + at most one write for the whole batch: per-record upserts
+        # re-parsed the ~2 MB session file for every delegation on each 3 s poll.
+        get_prime_session_store(session_id).upsert_delegations(records)
     except Exception:
         logger.debug("prime delegation record sync failed", exc_info=True)
 

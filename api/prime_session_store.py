@@ -567,6 +567,48 @@ class PrimeSessionStore:
         with self._lock:
             return int(self._read_locked().get("delegations_rev") or 0)
 
+    @staticmethod
+    def _upsert_delegation_locked(data: dict[str, Any], tid: str, fields: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Apply one upsert to the in-RAM session data; returns (record, changed)."""
+        delegations = data.get("delegations")
+        if not isinstance(delegations, list):
+            delegations = []
+            data["delegations"] = delegations
+        record = None
+        for item in delegations:
+            if isinstance(item, dict) and str(item.get("id") or "") == tid:
+                record = item
+                break
+        changed = False
+        if record is None:
+            record = {
+                "id": tid,
+                "agent": "",
+                "task_excerpt": "",
+                "status": "",
+                "started_at": None,
+                "finished_at": None,
+                "anchor_message_index": None,
+                "brief_status": "",
+                "brief_message_index": None,
+            }
+            delegations.append(record)
+            changed = True
+        for key in _DELEGATION_FIELDS:
+            if key not in fields:
+                continue
+            value = fields[key]
+            if value is None or value == "":
+                continue
+            if key == "task_excerpt":
+                value = str(value).strip()[:300]
+            if record.get(key) != value:
+                record[key] = value
+                changed = True
+        if len(delegations) > DELEGATIONS_CAP:
+            del delegations[:-DELEGATIONS_CAP]
+        return record, changed
+
     def upsert_delegation(self, task_id: str, **fields: Any) -> dict[str, Any] | None:
         """Create/update the durable record backing a delegation card.
 
@@ -580,43 +622,7 @@ class PrimeSessionStore:
             return None
         with self._lock:
             data = self._read_locked()
-            delegations = data.get("delegations")
-            if not isinstance(delegations, list):
-                delegations = []
-                data["delegations"] = delegations
-            record = None
-            for item in delegations:
-                if isinstance(item, dict) and str(item.get("id") or "") == tid:
-                    record = item
-                    break
-            changed = False
-            if record is None:
-                record = {
-                    "id": tid,
-                    "agent": "",
-                    "task_excerpt": "",
-                    "status": "",
-                    "started_at": None,
-                    "finished_at": None,
-                    "anchor_message_index": None,
-                    "brief_status": "",
-                    "brief_message_index": None,
-                }
-                delegations.append(record)
-                changed = True
-            for key in _DELEGATION_FIELDS:
-                if key not in fields:
-                    continue
-                value = fields[key]
-                if value is None or value == "":
-                    continue
-                if key == "task_excerpt":
-                    value = str(value).strip()[:300]
-                if record.get(key) != value:
-                    record[key] = value
-                    changed = True
-            if len(delegations) > DELEGATIONS_CAP:
-                del delegations[:-DELEGATIONS_CAP]
+            record, changed = self._upsert_delegation_locked(data, tid, fields)
             if not changed:
                 return dict(record)
             data["delegations_rev"] = int(data.get("delegations_rev") or 0) + 1
@@ -627,6 +633,30 @@ class PrimeSessionStore:
             )
             self._write_locked(data)
             return dict(record)
+
+    def upsert_delegations(self, records: list[tuple[str, dict[str, Any]]]) -> None:
+        """Batch form of :meth:`upsert_delegation`: one read, one write at most.
+
+        The 3 s ``/api/bridge/tasks`` poll mirrors every known delegation; doing
+        that one record at a time re-parsed (and often rewrote) the whole
+        session file per record and starved the streaming lock.
+        """
+        with self._lock:
+            data = self._read_locked()
+            changed_ids: list[tuple[str, str]] = []
+            for task_id, fields in records:
+                tid = str(task_id or "").strip()
+                if not tid:
+                    continue
+                record, changed = self._upsert_delegation_locked(data, tid, fields)
+                if changed:
+                    changed_ids.append((tid, str(record.get("status") or "")))
+            if not changed_ids:
+                return
+            data["delegations_rev"] = int(data.get("delegations_rev") or 0) + 1
+            for tid, status in changed_ids:
+                self._append_journal_locked(data, "delegation_updated", {"task_id": tid, "status": status})
+            self._write_locked(data)
 
     def mark_delegation_brief(
         self,
