@@ -3,7 +3,9 @@ from __future__ import annotations
 
 
 def profile(*, chief: bool = False) -> dict[str, str]:
-    return {"model": "gpt-6-astra" if chief else "gpt-6-luna",
+    # Verified with the Hermes CLI ChatGPT login; GPT-6 Luna is rejected there.
+    # Check app-server model/list AND a real CLI probe before changing this.
+    return {"model": "gpt-6-astra" if chief else "gpt-5.6-luna",
             "reasoning_effort": "high" if chief else "medium"}
 
 
