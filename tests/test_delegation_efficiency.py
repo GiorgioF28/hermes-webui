@@ -19,7 +19,7 @@ def test_worker_cli_pins_luna_and_keeps_full_stdin(monkeypatch, tmp_path):
     task = "task & (with metacharacters)\n" + "x" * 30000
     pd._codex_exec_blocking(task, str(tmp_path))
     cmd, args = calls[0]
-    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-luna"
+    assert cmd[cmd.index("--model") + 1] == "gpt-6-luna"
     assert 'model_reasoning_effort="medium"' in cmd
     assert args["input"] == task and cmd[-1] == "-"
 
@@ -111,16 +111,16 @@ async def test_auto_librarian_defaults_luna_and_records_actual_model(monkeypatch
         return "Memory Update"
     monkeypatch.setattr(pd, "_run_codex_worker_with_fallback", codex)
     await pd._run_librarian_serial("test", "memoria", "task", "result", str(tmp_path))
-    assert pd._BG_TASKS["test"]["librarian_model"] == "gpt-5.6-luna"
+    assert pd._BG_TASKS["test"]["librarian_model"] == "gpt-6-luna"
     assert pd._BG_TASKS["test"]["librarian_provider"] == "codex"
 
 
 def test_model_metadata_roundtrip():
     from api.delegation_store import bg_task_to_canonical
     record = {"id":"d1", "agent":"social", "task":"x", "status":"ok", "runtime":"codex",
-              "runtime_model":"gpt-5.6-luna", "reasoning_effort":"medium", "librarian_model":"gpt-5.6-luna", "librarian_provider":"codex"}
+              "runtime_model":"gpt-6-luna", "reasoning_effort":"medium", "librarian_model":"gpt-6-luna", "librarian_provider":"codex"}
     canonical = bg_task_to_canonical(record)
-    assert canonical["runtime"]["model"] == "gpt-5.6-luna"
+    assert canonical["runtime"]["model"] == "gpt-6-luna"
     restored = pd._canonical_to_legacy(canonical)
-    assert restored["runtime_model"] == "gpt-5.6-luna" and restored["reasoning_effort"] == "medium"
+    assert restored["runtime_model"] == "gpt-6-luna" and restored["reasoning_effort"] == "medium"
     assert restored["librarian_provider"] == "codex"
