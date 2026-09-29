@@ -90,6 +90,8 @@ def test_run_and_store_marks_ok_before_enqueueing_librarian(monkeypatch, tmp_pat
 
 
 def test_run_librarian_is_best_effort_and_records_failure(monkeypatch, tmp_path):
+    from api import agent_models
+    monkeypatch.setattr(agent_models, "get_overrides", lambda: {"memory-librarian": delegation._LIBRARIAN_MODEL})
     task_id = "d-librarian-fail"
     delegation._BG_TASKS[task_id] = {
         "id": task_id,
@@ -116,6 +118,8 @@ def test_run_librarian_is_best_effort_and_records_failure(monkeypatch, tmp_path)
 
 
 def test_run_librarian_uses_librarian_agent_memory_mcp_and_skill(monkeypatch, tmp_path):
+    from api import agent_models
+    monkeypatch.setattr(agent_models, "get_overrides", lambda: {"memory-librarian": delegation._LIBRARIAN_MODEL})
     calls = []
     (tmp_path / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"hermes-memory": {"command": "memory"}, "notion": {"command": "notion"}}}),

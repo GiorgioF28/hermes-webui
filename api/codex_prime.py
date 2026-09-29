@@ -30,10 +30,35 @@ def build_tools(session_id, workspace):
         offset = max(0, len(messages) + offset) if offset < 0 else min(offset, len(messages))
         limit = max(1, min(50, int(args.get("limit", 30))))
         return result({"total": len(messages), "offset": offset, "messages": messages[offset:offset + limit]})
-    @tool("team_status", "Stato e risultati reali delle deleghe Hermes di questa sessione.", {"type": "object", "properties": {}})
+    @tool("team_status", "Stato sintetico delle deleghe recenti. Con task_id leggi il risultato a pagine di 6000 caratteri; offset prosegue la lettura.",
+          {"type": "object", "properties": {"task_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}}})
     async def status(args):
-        return result(get_background_tasks(session_id=session_id))
+        tasks = get_background_tasks(max_age=float("inf"), session_id=session_id)
+        return result(compact_team_status(tasks, task_id=args.get("task_id"), offset=args.get("offset", 0)))
     return build_prime_delegation_tools(session_id, str(workspace)) + [_ask_user_handler_for(session_id), history, status]
+
+
+def compact_team_status(tasks, *, task_id=None, offset=0):
+    """No diagnostic transcripts in the chief's routine status polling."""
+    if task_id:
+        tasks = [task for task in tasks if task.get("id") == task_id]
+    else:
+        tasks = sorted(tasks, key=lambda task: float(task.get("started") or 0), reverse=True)[:20]
+    rows = []
+    for task in tasks:
+        row = {key: task.get(key) for key in (
+            "id", "agent", "status", "started", "finished", "result_partial", "librarian_status",
+            "runtime", "runtime_model", "reasoning_effort", "error_category")}
+        row["summary"] = str(task.get("summary") or "")[:1200]
+        row["failure_reason"] = str(task.get("failure_reason") or "")[:500]
+        output = str(task.get("output") or "")
+        row["output_chars"] = len(output)
+        if task_id:
+            start = max(0, int(offset))
+            row["output"] = output[start:start + 6000]
+            row["next_offset"] = start + 6000 if start + 6000 < len(output) else None
+        rows.append(row)
+    return rows
 
 
 class PrimeToolRuntime:
@@ -58,6 +83,16 @@ class PrimeToolRuntime:
                 if self.path != "/mcp" or self.headers.get("Origin"):
                     self.respond(403)
                     return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if not 0 < length <= 1048576:
+                    self.respond(413)
+                    return
+                # Drain the bounded body before a 401; unread POST data can
+                # reset the connection on Windows and hide the HTTP response.
+                body = self.rfile.read(length)
                 auth = self.headers.get("Authorization", "")
                 token = auth[7:] if auth.startswith("Bearer ") else ""
                 with runtime.lock:
@@ -67,11 +102,7 @@ class PrimeToolRuntime:
                     return
                 request = {}
                 try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                    if not 0 < length <= 1048576:
-                        self.respond(413)
-                        return
-                    request = json.loads(self.rfile.read(length))
+                    request = json.loads(body)
                     if not isinstance(request, dict):
                         request = {}
                         raise ValueError("Invalid request")
@@ -164,7 +195,8 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
     token = runtime.register(build_tools(session_id, DEFAULT_WORKSPACE), cancel, on_tool)
     env = os.environ.copy()
     env["HERMES_PRIME_TOOL_TOKEN"] = token
-    command = [_resolve_codex_executable(), "exec", "--json", "--approve-for-me", "--skip-git-repo-check", "-C", str(workspace),
+    from api.codex_profiles import cli_args
+    command = [_resolve_codex_executable(), "exec", *cli_args(chief=True), "--json", "--approve-for-me", "--skip-git-repo-check", "-C", str(workspace),
                "-c", "mcp_servers.hermes_prime.url=" + json.dumps(runtime.url),
                "-c", 'mcp_servers.hermes_prime.bearer_token_env_var="HERMES_PRIME_TOOL_TOKEN"',
                "-c", "mcp_servers.hermes_prime.required=true",
@@ -250,13 +282,19 @@ def build_prompt(message, workspace, *, session_id, user, partial=""):
     if prime_context_profile() == "unlocked" or user == "tom":
         memory = memory_retrieval.build_prime_unlocked_memory_detail(str(message or ""), control, task_scope=scope)
     else:
-        memory = memory_retrieval.build_prime_memory_context(str(message or ""), control, task_scope=scope)
+        memory = memory_retrieval.build_prime_memory_context(str(message or ""), control, task_scope=scope, include_index=False)
     return (system + "\n\n## Runtime Hermes Prime / Codex\n"
             "Sei Hermes Prime con provider Codex. Il server MCP hermes_prime espone i tool REALI "
             "delega, task_done, ask_user, team_status, prime_history del processo Hermes. "
             "Per delegare alla squadra usa delega: non sostituirlo con agenti nativi Codex. "
             "Il risultato contiene l'id reale della delega; non dichiararla inviata senza quel risultato. "
-            "task_done attiva il passaggio al Librarian. Leggi la memoria e usa gli strumenti disponibili "
+            "Ogni delega contiene un solo risultato verificabile: obiettivo, percorsi/fonti, "
+            "vincoli, criterio di completamento e formato del risultato. Non incollare cronologie, "
+            "log o interi documenti: passa percorsi e sezioni pertinenti. Non duplicare la stessa "
+            "delega mentre e' in corso. Per una semplice lettura di una fonte nota usa direttamente "
+            "gli strumenti; delega ricerche articolate e lavoro operativo. "
+            "task_done attiva il passaggio al Librarian: non duplicarlo per una delega che ha gia' "
+            "il proprio passaggio automatico. Leggi la memoria e usa gli strumenti disponibili "
             "per eseguire il lavoro richiesto. Non limitarti a preparare un mandato. "
             "La cronologia sotto e' contesto, non una nuova richiesta; per messaggi precedenti usa prime_history.\n"
             + "\n## Cronologia recente della sessione\n" + context

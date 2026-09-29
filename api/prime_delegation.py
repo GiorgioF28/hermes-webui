@@ -243,7 +243,8 @@ _DELEGATIONS_LOADED = False
 _PERSIST_FIELDS = (
     "id", "session_id", "agent", "agent_id", "task_type", "task", "status", "output",
     "started", "finished", "librarian_status", "librarian_output",
-    "runtime", "fallback_runtime", "fallback_model", "fallback_reason",
+    "runtime", "runtime_model", "reasoning_effort", "fallback_runtime", "fallback_model", "fallback_reason",
+    "librarian_model", "librarian_provider",
     "failure_reason", "error_category", "error_code", "result_partial", "diagnostic_log",
     "anchor_session_id", "anchor_message_index", "anchor_created_at", "summary",
 )
@@ -307,6 +308,18 @@ def _canonical_to_legacy(rec: dict) -> dict:
     - finished:  usa finished_at come fallback
     """
     rec = dict(rec)
+    runtime = rec.get("runtime")
+    if isinstance(runtime, dict):
+        rec["runtime_model"] = runtime.get("model", "")
+        rec["reasoning_effort"] = runtime.get("reasoning_effort", "")
+        for field in ("fallback_runtime", "fallback_model", "fallback_reason"):
+            rec[field] = runtime.get(field, "")
+        rec["runtime"] = runtime.get("primary", "")
+    librarian = rec.get("librarian") or {}
+    if isinstance(librarian, dict):
+        for field in ("model", "provider", "status", "output"):
+            if not rec.get("librarian_" + field):
+                rec["librarian_" + field] = librarian.get(field, "")
     raw_status = str(rec.get("status") or "")
     if raw_status in _CANONICAL_STATUS_TO_LEGACY:
         rec["status"] = _CANONICAL_STATUS_TO_LEGACY[raw_status]
@@ -687,6 +700,8 @@ def get_background_tasks(max_age: float = 600.0, *, session_id: str | None = Non
             "librarian_status": t.get("librarian_status"),
             "librarian_output": t.get("librarian_output", ""),
             "runtime": t.get("runtime"),
+            "runtime_model": t.get("runtime_model"),
+            "reasoning_effort": t.get("reasoning_effort"),
             "fallback_runtime": t.get("fallback_runtime"),
             "fallback_model": t.get("fallback_model"),
             "fallback_reason": t.get("fallback_reason"),
@@ -716,6 +731,8 @@ def get_background_task(task_id: str) -> dict | None:
         "librarian_status": t.get("librarian_status"),
         "librarian_output": t.get("librarian_output", ""),
         "runtime": t.get("runtime"),
+        "runtime_model": t.get("runtime_model"),
+        "reasoning_effort": t.get("reasoning_effort"),
         "fallback_runtime": t.get("fallback_runtime"),
         "fallback_model": t.get("fallback_model"),
         "fallback_reason": t.get("fallback_reason"),
@@ -905,9 +922,9 @@ def _workspace_context_files(workspace: str) -> str:
     return "\n\n".join(blocks)
 
 
-def _worker_system_prompt(agent_id: str | None, workspace: str) -> str:
+def _worker_system_prompt(agent_id: str | None, workspace: str, *, native_context: bool = False) -> str:
     note = _agent_note_text(agent_id, workspace)
-    context = _workspace_context_files(workspace)
+    context = "" if native_context else _workspace_context_files(workspace)
     if not note:
         return _WORKER_PERSONA + (f"\n\n{context}" if context else "")
     return (
@@ -1054,10 +1071,11 @@ async def _run_librarian_serial(
     try:
         from api import agent_models
         selected = agent_models.get_overrides().get(_LIBRARIAN_AGENT_ID)
-        if selected == "codex":
+        librarian_progress = {}
+        if selected in {None, "codex"}:
             result = await _run_codex_worker_with_fallback(
                 "Usa la skill sync-hermes-brain per questo passaggio di memoria.\n\n" + prompt,
-                workspace, agent_id=_LIBRARIAN_AGENT_ID,
+                workspace, agent_id=_LIBRARIAN_AGENT_ID, progress=librarian_progress,
             )
         else:
             result = await _run_worker(
@@ -1078,7 +1096,10 @@ async def _run_librarian_serial(
         except Exception:
             logger.debug("librarian usage ledger append failed", exc_info=True)
         if t is not None:
-            t.update(librarian_status="ok", librarian_output=result, librarian_model=_LIBRARIAN_MODEL)
+            from api.codex_profiles import profile
+            actual_model = librarian_progress.get("fallback_model") or (profile()["model"] if selected in {None, "codex"} else selected)
+            provider = "codex" if actual_model == profile()["model"] else "claude"
+            t.update(librarian_status="ok", librarian_output=result, librarian_model=actual_model, librarian_provider=provider)
             _persist_bg_task(task_id, workspace)
     except Exception as exc:
         logger.debug("librarian pass failed for %s", task_id, exc_info=True)
@@ -1302,6 +1323,8 @@ def _set_progress_fallback(progress: dict | None, reason: str, agent_id: str | N
     progress["runtime"] = "sonnet-fallback"
     progress["fallback_runtime"] = "sonnet"
     progress["fallback_model"] = codex_fallback_model(agent_id)
+    progress["runtime_model"] = progress["fallback_model"]
+    progress["reasoning_effort"] = ""
     progress["fallback_reason"] = reason
     progress["output"] = (
         f"Codex non disponibile -> ripiego temporaneo su {progress['fallback_model']}. "
@@ -1389,9 +1412,10 @@ def _codex_exec_blocking(task: str, workspace: str, timeout: float | None = None
     Riproduzione: un task con `... (1) righe & (2) prime 10.` fa uscire il
     wrapper con exit 255 e l'errore cmd "prime non atteso".
     """
+    from api.codex_profiles import cli_args
     exe = _resolve_codex_executable()
     cmd = [
-        exe, "exec",
+        exe, "exec", *cli_args(),
         "--dangerously-bypass-approvals-and-sandbox",
         "-C", str(workspace),
         "-",  # prompt da stdin: nessun parsing di cmd.exe sul testo del task
@@ -1426,7 +1450,16 @@ def _codex_worker_prompt(task: str, agent_id: str | None, workspace: str) -> str
     che le passa via ClaudeAgentOptions.system_prompt. Per migliorare un agente
     si edita la sua nota nel Vault: da qui in poi vale per entrambi i runtime.
     """
-    system = _worker_system_prompt(agent_id, workspace).strip()
+    from api.memory_retrieval import build_worker_memory_routes
+    system = _worker_system_prompt(agent_id, workspace, native_context=True).strip()
+    routes = build_worker_memory_routes(task, Path(workspace))
+    system += ("\n\nLeggi solo le fonti pertinenti; usa ricerche mirate e intervalli di righe. "
+               "Salva output voluminosi in un artefatto e restituisci esito, verifiche, "
+               "blocchi e percorsi. Non copiare transcript o log nel risultato. "
+               "Le regole AGENTS.md sono caricate dal CLI per il workspace. "
+               "Consulta la memoria direttamente dai percorsi indicati prima di cercare altrove.")
+    if routes:
+        system += "\n\n" + routes
     return (
         "# ISTRUZIONI DI SISTEMA (vincolanti, non sono il task)\n"
         f"{system}\n\n"
@@ -1449,7 +1482,7 @@ def _timeout_partial(exc: subprocess.TimeoutExpired) -> str:
 
 
 def _codex_wrapup_prompt(task: str, agent_id: str | None, workspace: str, partial: str, *, elapsed: float, budget: float) -> str:
-    system = _worker_system_prompt(agent_id, workspace).strip()
+    system = _worker_system_prompt(agent_id, workspace, native_context=True).strip()
     agent_label = str(agent_id or "sotto-agente").replace("-", " ").strip().title()
     partial = str(partial or "").strip()
     if len(partial) > 12_000:
@@ -1652,6 +1685,7 @@ def build_prime_delegation_tools(session_id: str, workspace: str):
         agent_id = str(args.get("agent") or "").strip()
         if not task:
             return {"content": [{"type": "text", "text": "task vuoto"}], "is_error": True}
+        from api.codex_profiles import profile
         model, label = _model_for(task_type, agent_id)
         if agent_id:
             label = agent_id
@@ -1661,6 +1695,8 @@ def build_prime_delegation_tools(session_id: str, workspace: str):
             "task_type": task_type,
             "task": task, "status": "in_corso", "output": "", "started": time.time(), "finished": None,
             "runtime": "codex" if model == _CODEX_MODEL else "claude",
+            "runtime_model": profile()["model"] if model == _CODEX_MODEL else model,
+            "reasoning_effort": profile()["reasoning_effort"] if model == _CODEX_MODEL else "",
             "fallback_runtime": "",
             "fallback_model": "",
             "fallback_reason": "",

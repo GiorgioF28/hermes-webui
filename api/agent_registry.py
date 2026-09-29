@@ -396,7 +396,14 @@ def build_agent_registry(workspace_path, *, live_agents: dict[str, str] | None =
         override = overrides.get(agent["id"])
         agent["model_override"] = override
         agent["model_effective"] = override or "auto"
-        agent["model_options"] = model_options
+        from api.codex_profiles import profile, label
+        chief = agent["id"] == "hermes-prime-chief-of-staff"
+        agent["codex_profile"] = profile(chief=chief)
+        agent["model_options"] = [
+            {**option, "label": "Codex (" + label(chief=chief) + ")"}
+            if option["id"] == "codex" else dict(option)
+            for option in model_options
+        ]
         agent["gateway"] = gateway or {
             "profile": next((profile for profile, slug in PROFILE_TO_AGENT_SLUG.items() if slug == agent["id"]), None),
             "running": False,

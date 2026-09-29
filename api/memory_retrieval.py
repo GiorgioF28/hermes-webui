@@ -21,7 +21,7 @@ Assunzione sulla struttura della memoria:
 
 La directory si risolve in quest'ordine:
   1. Env HERMES_PRIME_MEMORY_DIR
-  2. Prima directory con memory/MEMORY.md trovata in ~/.claude/projects/
+  2. Directory del workspace in ~/.claude/projects/ (fallback solo se unica)
      (la Claude Code project memory del workspace Hermes setup)
 """
 from __future__ import annotations
@@ -31,6 +31,7 @@ import math
 import os
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ def unlocked_memory_min_score() -> float:
 
 # ── Directory discovery ───────────────────────────────────────────────────────
 
-def find_prime_memory_dir() -> Path | None:
+def find_prime_memory_dir(workspace: Path | None = None) -> Path | None:
     """Trova la directory delle note memoria per Prime.
 
     Cerca (in ordine):
@@ -119,13 +120,40 @@ def find_prime_memory_dir() -> Path | None:
         candidates = sorted(claude_projects.iterdir())
     except OSError:
         return None
-    for project_dir in candidates:
-        if not project_dir.is_dir():
-            continue
-        mem_dir = project_dir / "memory"
-        if mem_dir.is_dir() and (mem_dir / "MEMORY.md").is_file():
+    from api.config import DEFAULT_WORKSPACE
+    workspace = Path(workspace or DEFAULT_WORKSPACE)
+    slug = re.sub(r"[^a-z0-9]", "-", str(workspace.resolve()).casefold())
+    matches = [p / "memory" for p in candidates if (p / "memory" / "MEMORY.md").is_file()]
+    for mem_dir in matches:
+        if mem_dir.parent.name.casefold() == slug:
             return mem_dir
+    # An unrelated project must not silently become Hermes' memory.
+    return matches[0] if len(matches) == 1 else None
+
+
+def resolve_memory_note(mem_dir: Path, filename: str) -> Path | None:
+    """Resolve Markdown only, within memory or the canonical workspace knowledge roots."""
+    from api.config import DEFAULT_WORKSPACE
+    name = unquote(str(filename or "")).replace("\\", "/")
+    if not name or not name.lower().endswith(".md") or "://" in name:
+        return None
+    workspace = Path(DEFAULT_WORKSPACE).resolve()
+    roots = [mem_dir.resolve()] + [workspace / part for part in ("obsidian-vault", "docs", "projects", "tasks")]
+    candidates = [mem_dir / name]
+    # Historical index links used ../obsidian-vault relative to the workspace.
+    for part in ("obsidian-vault", "docs", "projects", "tasks"):
+        prefix = "../" + part + "/"
+        if name.startswith(prefix):
+            candidates.append(workspace / name[3:])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            if any(resolved.is_relative_to(root.resolve()) for root in roots) and resolved.is_file():
+                return resolved
+        except (OSError, ValueError):
+            continue
     return None
+
 
 
 # ── Scope management ─────────────────────────────────────────────────────────
@@ -163,10 +191,8 @@ def _frontmatter_list_value(frontmatter: str, key: str) -> list[str]:
 def parse_note_metadata_fast(mem_dir: Path, filename: str) -> dict:
     """Legge solo il front-matter utile al retrieval: scope, aliases e tags."""
     default = {"scope": "global", "aliases": [], "tags": [], "always_active": False}
-    if not filename or "/" in filename or "\\" in filename or ".." in filename:
-        return default
-    path = mem_dir / filename
-    if not path.is_file():
+    path = resolve_memory_note(mem_dir, filename)
+    if path is None:
         return default
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
@@ -306,6 +332,8 @@ def format_memory_index(entries: list[dict]) -> str:
         title = e.get("title", "")
         filename = e.get("filename", "")
         desc = e.get("description", "")
+        if len(desc) > 96:
+            desc = desc[:93].rsplit(" ", 1)[0] + "..."
         if desc:
             lines.append(f"- [{title}]({filename}) — {desc}")
         else:
@@ -524,11 +552,8 @@ def _chars_to_tokens(n_chars: int) -> int:
 
 def load_memory_body(mem_dir: Path, filename: str) -> str:
     """Carica il corpo di una nota memoria."""
-    # Sanity check: only allow simple .md filenames (no path traversal)
-    if not filename or "/" in filename or "\\" in filename or ".." in filename:
-        return ""
-    path = mem_dir / filename
-    if not path.is_file():
+    path = resolve_memory_note(mem_dir, filename)
+    if path is None:
         return ""
     try:
         return path.read_text(encoding="utf-8", errors="replace").strip()
@@ -616,6 +641,7 @@ def build_memory_context(
     budget_tokens: int | None = None,
     index_only: bool = False,
     task_scope: str = "",
+    include_index: bool = True,
 ) -> str:
     """Costruisce il blocco di contesto memoria per un turno Prime.
 
@@ -634,7 +660,7 @@ def build_memory_context(
     if not entries:
         return ""
 
-    index_text = format_memory_index(entries)
+    index_text = format_memory_index(entries) if (include_index or index_only) else ""
 
     if index_only or budget_tokens <= 0:
         return index_text
@@ -650,7 +676,7 @@ def build_memory_context(
         body_parts.append(f"\n### {entry['title']}\n{entry['body']}")
 
     detail_text = "\n".join(body_parts)
-    return index_text + "\n\n" + detail_text
+    return "\n\n".join(part for part in (index_text, detail_text) if part)
 
 
 def build_prime_memory_context(
@@ -658,6 +684,7 @@ def build_prime_memory_context(
     workspace: Path | None = None,
     *,
     task_scope: str = "",
+    include_index: bool = True,
 ) -> str:
     """Entry point per routes.py: seleziona la mem_dir e costruisce il contesto.
 
@@ -669,7 +696,7 @@ def build_prime_memory_context(
     if mem_dir is None:
         logger.debug("memory_retrieval: nessuna mem_dir trovata, contesto memoria omesso")
         return ""
-    return build_memory_context(task, mem_dir, task_scope=task_scope)
+    return build_memory_context(task, mem_dir, task_scope=task_scope, include_index=include_index)
 
 
 def build_prime_unlocked_memory_detail(
@@ -684,3 +711,30 @@ def build_prime_unlocked_memory_detail(
         logger.debug("memory_retrieval: nessuna mem_dir trovata, dettaglio unlocked omesso")
         return ""
     return build_unlocked_memory_detail(task, mem_dir, task_scope=task_scope)
+
+
+def build_worker_memory_routes(task: str, workspace: Path, *, max_chars: int = 1600) -> str:
+    """Small read-on-demand source packet, never a dump of note bodies or history."""
+    mem_dir = find_prime_memory_dir()
+    if mem_dir is None:
+        return ""
+    entries = parse_memory_index(mem_dir)
+    keywords = _extract_keywords(task, min_len=3)
+    scope = classify_task_scope(task)
+    ranked = []
+    for entry in entries:
+        if scope and entry.get("scope") not in {scope, "global", ""}:
+            continue
+        score = score_entry_relevance(entry, keywords)
+        if score <= 0:
+            continue
+        path = resolve_memory_note(mem_dir, entry["filename"])
+        if path is not None:
+            ranked.append((score, entry, path))
+    ranked.sort(key=lambda item: -item[0])
+    lines = ["## Fonti memoria (lettura selettiva)", "Indice completo: " + str(mem_dir / "MEMORY.md")]
+    for _, entry, path in ranked[:4]:
+        line = "- " + entry["title"] + ": " + str(path)
+        if len("\n".join(lines + [line])) <= max_chars:
+            lines.append(line)
+    return "\n".join(lines) if len("\n".join(lines)) <= max_chars else ""

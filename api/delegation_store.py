@@ -305,14 +305,15 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
         },
         runtime={
             "primary": rt_primary,
-            "model": "",
+            "model": str(t.get("runtime_model") or ""),
+            "reasoning_effort": str(t.get("reasoning_effort") or ""),
             "fallback_runtime": str(t.get("fallback_runtime") or ""),
             "fallback_model": str(t.get("fallback_model") or ""),
             "fallback_reason": str(t.get("fallback_reason") or ""),
         },
         librarian={
             "status": lib_status,
-            "provider": "claude",   # il pass Librarian gira sempre via SDK Claude
+            "provider": str(t.get("librarian_provider") or "claude"),
             "model": str(t.get("librarian_model") or LIBRARIAN_MODEL_DEFAULT),
             "started_at": None,
             "finished_at": None,

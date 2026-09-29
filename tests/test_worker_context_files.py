@@ -59,8 +59,10 @@ def test_can_be_disabled(tmp_path, monkeypatch):
     assert "MAI fast-forwardare" not in pd._worker_system_prompt("ricercatore", str(ws))
 
 
-def test_codex_prompt_carries_it_too(tmp_path):
+def test_codex_uses_native_agents_md_without_duplicate(tmp_path):
     ws = _workspace(tmp_path)
     prompt = pd._codex_worker_prompt("fai una cosa", "programmatore", str(ws))
-    assert "MAI fast-forwardare" in prompt
-    assert prompt.index("MAI fast-forwardare") < prompt.index("# TASK DA ESEGUIRE ORA")
+    assert "MAI fast-forwardare" not in prompt
+    assert "AGENTS.md sono caricate dal CLI" in prompt
+    assert "REGOLE DI SICUREZZA" in prompt
+    assert "fai una cosa" in prompt

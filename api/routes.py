@@ -11374,8 +11374,9 @@ def _hermes_prime_system_prompt(workspace, user: str = "giorgio"):
             append_parts.append("--- Progetti in corso ---\n" + brief)
     append_rules = [
         "Per dettagli profondi (codice, memoria, funzionamento delle componenti) "
-        "NON ricostruirli a mente: delega al Librarian (task_type 'memoria'/'ricerca') "
-        "e usa la sua risposta. Rispondi breve (2-4 frasi), in italiano, da capo di "
+        "consulta prima le fonti pertinenti indicate nell'indice: non ricostruirli a mente. "
+        "Delega al Librarian ricerche articolate e sincronizzazioni, evitando un passaggio "
+        "aggiuntivo per leggere un file noto. Rispondi breve (2-4 frasi), in italiano, da capo di "
         "stato maggiore.",
         "Quando ci sono piu' approcci validi e la scelta dipende da una preferenza "
         "tua o dell'utente, o quando qualcosa non e' chiaro e ti serve un "
