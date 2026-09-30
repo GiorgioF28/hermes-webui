@@ -133,8 +133,8 @@
   }
   function _usageInputTokens(usage) { usage = usage || {}; return Number(usage.input_tokens || 0); }
   function _usageOutputTokens(usage) { usage = usage || {}; return Number(usage.output_tokens || 0); }
-  function _usageCacheReadTokens(usage) { usage = usage || {}; return Number(usage.cache_read_tokens || usage.cache_read_input_tokens || 0); }
-  function _usageCacheWriteTokens(usage) { usage = usage || {}; return Number(usage.cache_write_tokens || usage.cache_creation_input_tokens || 0); }
+  function _usageCacheReadTokens(usage) { usage = usage || {}; return Number(usage.cache_read_tokens || usage.cache_read_input_tokens || usage.cached_input_tokens || 0); }
+  function _usageCacheWriteTokens(usage) { usage = usage || {}; return Number(usage.cache_write_tokens || usage.cache_creation_input_tokens || usage.cache_write_input_tokens || 0); }
   function _usageCost(usage) {
     usage = usage || {};
     var n = Number(usage.estimated_cost_usd != null ? usage.estimated_cost_usd : usage.estimated_cost);
@@ -147,14 +147,27 @@
     if (!_hasBridgeUsage(usage)) return '';
     var parts = ['in ' + _fmtCompactTokens(_usageInputTokens(usage)), 'out ' + _fmtCompactTokens(_usageOutputTokens(usage))];
     var cacheRead = _usageCacheReadTokens(usage), cacheWrite = _usageCacheWriteTokens(usage);
-    if (cacheRead || cacheWrite) parts.push('cache ' + _fmtCompactTokens(cacheRead) + '/' + _fmtCompactTokens(cacheWrite));
+    var codex = usage.provider === 'codex' || usage.cached_input_tokens != null || usage.input_includes_cache === true;
+    if (codex && (usage.cached_input_tokens != null || usage.cache_read_tokens != null)) {
+      var total = _usageInputTokens(usage);
+      parts.push('cache letta ' + _fmtCompactTokens(cacheRead) + (total ? ' (' + Math.round(100 * cacheRead / total) + '%)' : ''));
+      parts.push('non cache ' + _fmtCompactTokens(Math.max(0, total - cacheRead)));
+      if (cacheWrite) parts.push('cache scritta ' + _fmtCompactTokens(cacheWrite));
+    } else if (cacheRead || cacheWrite) parts.push('cache ' + _fmtCompactTokens(cacheRead) + '/' + _fmtCompactTokens(cacheWrite));
     var cost = _usageCost(usage);
     if (cost) parts.push('~$' + (cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)));
     return parts.join(' · ');
   }
+  function _bridgeUsageTitle(usage) {
+    var text = 'Input: ' + _usageInputTokens(usage) + '; output: ' + _usageOutputTokens(usage) + '; cache letta: ' + _usageCacheReadTokens(usage);
+    if (usage && (usage.provider === 'codex' || usage.cached_input_tokens != null)) {
+      text += '. Totale del turno, somma delle chiamate al modello. Input include la cache; non equivale alla quota/ai crediti ChatGPT.';
+    }
+    return text;
+  }
   function _formatLiveUsage(usage) {
     if (!_hasBridgeUsage(usage)) return '';
-    return 'in ' + _fmtCompactTokens(_usageInputTokens(usage)) + ' · out ' + _fmtCompactTokens(_usageOutputTokens(usage));
+    return _formatAssistantUsageBadge(usage);
   }
   function _formatQuotaMoneyShort(value) {
     var n = Number(value);
@@ -1412,7 +1425,7 @@
             if (_hasBridgeUsage(usage) && window._showTokenUsage === true) {
               var badge = _formatAssistantUsageBadge(usage);
               var foot = ph.querySelector('.cb-msg-foot');
-              if (badge && foot) { foot.textContent = badge; foot.hidden = false; }
+              if (badge && foot) { foot.textContent = badge; foot.title = _bridgeUsageTitle(usage); foot.hidden = false; }
             }
             if (userEngaged) speak(reply);
           } else { ph.parentNode.removeChild(ph); }
@@ -2177,7 +2190,7 @@
       var _briefBadge = _formatAssistantUsageBadge(m.usage);
       if (_briefBadge) {
         var _briefFoot = node.querySelector('.cb-msg-foot');
-        if (_briefFoot) { _briefFoot.textContent = _briefBadge; _briefFoot.hidden = false; }
+        if (_briefFoot) { _briefFoot.textContent = _briefBadge; _briefFoot.title = _bridgeUsageTitle(m.usage); _briefFoot.hidden = false; }
       }
     }
     return node;
@@ -2494,10 +2507,10 @@
       if (!_hasBridgeUsage(usage)) return;
       finalUsage = usage;
       var liveText = _formatLiveUsage(usage);
-      if (liveUsage && liveText) { liveUsage.textContent = liveText; liveUsage.hidden = false; }
+      if (liveUsage && liveText) { liveUsage.textContent = liveText; liveUsage.title = _bridgeUsageTitle(usage); liveUsage.hidden = false; }
       if (footLine && window._showTokenUsage === true) {
         var badge = _formatAssistantUsageBadge(usage);
-        if (badge) { footLine.textContent = badge; footLine.hidden = false; }
+        if (badge) { footLine.textContent = badge; footLine.title = _bridgeUsageTitle(usage); footLine.hidden = false; }
       }
     };
     var showStatus = function (state, tool) {

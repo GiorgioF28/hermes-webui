@@ -12705,19 +12705,13 @@ def _prime_lead_model_id(lead: str) -> str:
     """Id del modello che il capo (brain) di Prime sta effettivamente usando.
 
     claude -> il modello risolto per il ramo Claude (con la guardia anti-Codex);
-    codex  -> il model del Codex CLI da ~/.codex/config.toml (best-effort).
+    codex  -> il profilo esplicito passato al CLI da Hermes, indipendente dal desktop.
     Serve alla UI del Command Bridge per mostrare il modello vero (es. Fable 5)
     invece del generico CLOUD/CODEX.
     """
     if str(lead or "").strip().lower() == "codex":
-        try:
-            cfg = (Path.home() / ".codex" / "config.toml").read_text(encoding="utf-8", errors="replace")
-            m = re.search(r'(?m)^\s*model\s*=\s*"([^"]+)"', cfg)
-            if m:
-                return "codex:" + m.group(1)
-        except Exception:
-            logger.debug("codex config model read failed", exc_info=True)
-        return "codex"
+        from api.codex_profiles import profile
+        return "codex:" + profile(chief=True)["model"]
     try:
         return _prime_claude_safe_model(_resolve_prime_model_state())
     except Exception:

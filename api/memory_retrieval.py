@@ -704,13 +704,14 @@ def build_prime_unlocked_memory_detail(
     workspace: Path | None = None,
     *,
     task_scope: str = "",
+    max_chars: int | None = None,
 ) -> str:
     """Entry point per il dettaglio unlocked; l'indice resta nel system prompt."""
     mem_dir = find_prime_memory_dir()
     if mem_dir is None:
         logger.debug("memory_retrieval: nessuna mem_dir trovata, dettaglio unlocked omesso")
         return ""
-    return build_unlocked_memory_detail(task, mem_dir, task_scope=task_scope)
+    return build_unlocked_memory_detail(task, mem_dir, task_scope=task_scope, max_chars=max_chars)
 
 
 def build_worker_memory_routes(task: str, workspace: Path, *, max_chars: int = 1600) -> str:

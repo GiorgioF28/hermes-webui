@@ -16,6 +16,8 @@
 ## [Unreleased]
 
 ### Fixed
+- Prime uses the explicit GPT-6.1 Sol/high profile, including its displayed model; worker profiles remain unchanged. Codex cache statistics render from both stored CLI usage and new responses, with turn totals distinguished from uncached input.
+- Prime's automatic history packet omits token/UI telemetry and bounds long history entries with indices for lossless on-demand retrieval. Stored conversation history is unchanged.
 - Command Bridge repository status now forces a fresh Git check on manual refresh and window return, shows pending file details, and keeps unrelated local branches separate from the current checkout's commit/push state. Temporary delegation prompts are ignored by Git.
 
 

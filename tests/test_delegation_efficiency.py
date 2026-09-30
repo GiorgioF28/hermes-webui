@@ -24,7 +24,7 @@ def test_worker_cli_pins_luna_and_keeps_full_stdin(monkeypatch, tmp_path):
     assert args["input"] == task and cmd[-1] == "-"
 
 
-def test_chief_cli_pins_astra_high(monkeypatch, tmp_path):
+def test_chief_cli_pins_sol_61_high(monkeypatch, tmp_path):
     calls = []
     runtime = SimpleNamespace(url="http://127.0.0.1:1/mcp", register=lambda *a: "test", revoke=lambda *a: None)
     monkeypatch.setattr(cp, "get_runtime", lambda: runtime)
@@ -36,7 +36,7 @@ def test_chief_cli_pins_astra_high(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "Popen", popen)
     with pytest.raises(RuntimeError, match="intercepted"):
         cp.run_prime("test", tmp_path, session_id="s1", cancel=threading.Event())
-    assert calls[0][calls[0].index("--model") + 1] == "gpt-6-astra"
+    assert calls[0][calls[0].index("--model") + 1] == "gpt-6.1-sol"
     assert 'model_reasoning_effort="high"' in calls[0]
 
 

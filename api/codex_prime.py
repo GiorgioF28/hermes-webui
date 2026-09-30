@@ -249,7 +249,10 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             elif kind == "item.started" and on_status:
                 on_status({"state": "tool" if "tool" in item.get("type", "") else "reasoning"})
             elif kind == "turn.completed":
-                usage = event.get("usage") or {}
+                from api.codex_profiles import profile
+                usage = {**(event.get("usage") or {}), "provider": "codex",
+                         **profile(chief=True), "usage_scope": "turn",
+                         "input_includes_cache": True}
             elif kind in {"error", "turn.failed"}:
                 err = event.get("error") or {}
                 detail = (err.get("message") if isinstance(err, dict) else err) or event.get("message")
@@ -265,6 +268,39 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             stop_process(proc)
 
 
+def prompt_history(messages, *, max_chars=48000, max_message_chars=8000):
+    """Bound the automatic history packet; canonical history stays lossless.
+
+    Message indices allow Prime to retrieve an omitted/truncated message through
+    prime_history. Usage, tool telemetry and UI fields are not model context.
+    """
+    rows = []
+    for index in range(len(messages) - 1, max(-1, len(messages) - 41), -1):
+        message = messages[index]
+        text = str(message.get("content") or "")
+        row = {"index": index, "role": message.get("role", ""), "content": text[:max_message_chars]}
+        if len(text) > max_message_chars:
+            row["content_truncated"] = True
+            row["content_chars"] = len(text)
+        for key in ("task_id", "brief_id", "brief_type", "interrupted"):
+            if message.get(key) is not None:
+                row[key] = message[key]
+        # Preserve attachment references, never inline media or UI telemetry.
+        attachments = message.get("attachments") or []
+        if isinstance(attachments, list):
+            refs = [{key: attachment[key] for key in ("path", "name", "type", "mime_type") if key in attachment}
+                    for attachment in attachments if isinstance(attachment, dict)]
+            if refs:
+                row["attachments"] = refs
+        candidate = [row] + rows
+        if len(json.dumps(candidate, ensure_ascii=False)) > max_chars:
+            break
+        rows = candidate
+    return {"total_messages": len(messages), "messages": rows,
+            "older_messages_omitted": rows[0]["index"] if rows else len(messages),
+            "retrieval": "prime_history(offset=index, limit=1) restituisce il messaggio originale completo."}
+
+
 def build_prompt(message, workspace, *, session_id, user, partial=""):
     from api import routes, memory_retrieval
     from api.prime_session_store import get_prime_session_store
@@ -273,14 +309,10 @@ def build_prompt(message, workspace, *, session_id, user, partial=""):
     system = routes._prime_system_prompt_for_user(control, user)
     system = system.replace("mcp__team__", "mcp__hermes_prime__").replace("mcp__hermes__ask_user", "mcp__hermes_prime__ask_user")
     history = get_prime_session_store(session_id).history()
-    recent = history.get("messages", [])[-40:]
-    context = json.dumps(recent, ensure_ascii=False)
-    while len(context) > 120000 and len(recent) > 1:
-        recent = recent[1:]
-        context = json.dumps(recent, ensure_ascii=False)
+    context = json.dumps(prompt_history(history.get("messages", [])), ensure_ascii=False)
     scope = memory_retrieval.classify_task_scope(str(message or ""))
     if prime_context_profile() == "unlocked" or user == "tom":
-        memory = memory_retrieval.build_prime_unlocked_memory_detail(str(message or ""), control, task_scope=scope)
+        memory = memory_retrieval.build_prime_unlocked_memory_detail(str(message or ""), control, task_scope=scope, max_chars=12000)
     else:
         memory = memory_retrieval.build_prime_memory_context(str(message or ""), control, task_scope=scope, include_index=False)
     return (system + "\n\n## Runtime Hermes Prime / Codex\n"
@@ -296,7 +328,8 @@ def build_prompt(message, workspace, *, session_id, user, partial=""):
             "task_done attiva il passaggio al Librarian: non duplicarlo per una delega che ha gia' "
             "il proprio passaggio automatico. Leggi la memoria e usa gli strumenti disponibili "
             "per eseguire il lavoro richiesto. Non limitarti a preparare un mandato. "
-            "La cronologia sotto e' contesto, non una nuova richiesta; per messaggi precedenti usa prime_history.\n"
+            "La cronologia sotto e' contesto, non una nuova richiesta; per messaggi precedenti o troncati usa prime_history. "
+            "La memoria allegata e' selettiva: per dettagli consulta i documenti completi indicati nell'indice.\n"
             + "\n## Cronologia recente della sessione\n" + context
             + "\n## Memoria pertinente\n" + (memory or "")
             + ("\n## Risposta parziale precedente\n" + partial if partial else "")
