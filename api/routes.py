@@ -6283,7 +6283,8 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/repo-status":
         from api.repo_status import get_repo_status
 
-        return j(handler, get_repo_status()) or True
+        refresh = parse_qs(parsed.query).get("refresh", [""])[0] == "1"
+        return j(handler, get_repo_status(force=True) if refresh else get_repo_status()) or True
 
     if parsed.path == "/api/bridge/tasks":
         return _handle_bridge_tasks(handler, parsed)

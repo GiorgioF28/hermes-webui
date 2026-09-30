@@ -32,7 +32,7 @@ REPO_STATUS_CONFIG = {
     "live_repo": "Hermes WebUI",
     # Pattern usati per capire se il codice su disco e' cambiato dopo l'avvio.
     "live_watch_globs": ("api/*.py", "static/*.js", "static/*.css", "*.py"),
-    "cache_ttl_seconds": 30.0,
+    "cache_ttl_seconds": 10.0,
     "command_timeout_seconds": 4.0,
 }
 
@@ -54,6 +54,11 @@ def parse_porcelain_status(output: str) -> dict[str, Any]:
     if branch == "HEAD (no branch)":
         branch = "detached"
 
+    changes = [line for line in lines[1:] if line.strip()]
+    files = [{"status": line[:2], "path": line[3:]} for line in changes]
+    untracked = sum(item["status"] == "??" for item in files)
+    staged = sum(item["status"][0] not in (" ", "?") for item in files)
+    unstaged = sum(item["status"][1:2] not in ("", " ", "?") for item in files)
     ahead_match = _AHEAD_RE.search(header)
     behind_match = _BEHIND_RE.search(header)
     return {
@@ -61,7 +66,12 @@ def parse_porcelain_status(output: str) -> dict[str, Any]:
         "upstream": upstream.strip() if separator and upstream.strip() else None,
         "ahead": int(ahead_match.group(1)) if ahead_match else 0,
         "behind": int(behind_match.group(1)) if behind_match else 0,
-        "dirty": sum(1 for line in lines[1:] if line.strip()),
+        "dirty": len(files),
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "dirty_files": files[:20],
+        "dirty_files_truncated": max(0, len(files) - 20),
     }
 
 
@@ -91,7 +101,7 @@ def compute_live_behind(repo: dict[str, Any]) -> dict[str, Any]:
 
 def _run_git(repo: Path, args: list[str], timeout: float) -> str:
     completed = subprocess.run(
-        ["git", *args],
+        ["git", "-c", "core.quotepath=false", *args],
         cwd=repo,
         capture_output=True,
         text=True,
@@ -159,7 +169,7 @@ def read_repo_status(
     timeout = float(REPO_STATUS_CONFIG["command_timeout_seconds"])
     try:
         status = parse_porcelain_status(
-            runner(repo, ["status", "-sb", "--porcelain"], timeout)
+            runner(repo, ["status", "-sb", "--porcelain", "--untracked-files=all"], timeout)
         )
         head_line = runner(repo, ["log", "-1", "--format=%h %s"], timeout)
         head_hash, _, subject = head_line.partition(" ")
@@ -210,13 +220,17 @@ def get_repo_status(*, force: bool = False) -> dict[str, Any]:
         if not force and cached is not None and now < float(_CACHE["expires_at"]):
             return cached
 
-        repos = [read_repo_status(name, path) for name, path in REPO_STATUS_CONFIG["repos"]]
+        repos = [read_repo_status(
+            name, path,
+            ignored_branches=REPO_STATUS_CONFIG["ignored_branches"].get(name, ()),
+        ) for name, path in REPO_STATUS_CONFIG["repos"]]
         payload = {
             "ok": True,
+            "checked_at": time.time(),
             "repos": repos,
             "workflow": dict(REPO_STATUS_CONFIG["workflow"]),
             "cache_ttl_seconds": REPO_STATUS_CONFIG["cache_ttl_seconds"],
         }
         _CACHE["payload"] = payload
-        _CACHE["expires_at"] = now + float(REPO_STATUS_CONFIG["cache_ttl_seconds"])
+        _CACHE["expires_at"] = time.monotonic() + float(REPO_STATUS_CONFIG["cache_ttl_seconds"])
         return payload

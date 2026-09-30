@@ -863,7 +863,7 @@
     var memToggle = $('cbMemToggle');
     if (memToggle && hero) memToggle.addEventListener('click', function () { hero.classList.toggle('cb-mem-collapsed'); });
     var repoRefresh = $('cbRepoRefresh');
-    if (repoRefresh) repoRefresh.addEventListener('click', refreshRepoStatus);
+    if (repoRefresh) repoRefresh.addEventListener('click', function () { refreshRepoStatus(true); });
     var briefHead = $('cbBriefHead');
     if (briefHead) briefHead.addEventListener('click', toggleDailyBrief);
     // Delegazione click pillola rossa → segnale deploy a Prime
@@ -3323,24 +3323,25 @@
       if (repo.name) _repoStatusCache[repo.name] = repo;
       var ahead = Number(repo.ahead || 0), behind = Number(repo.behind || 0), dirty = Number(repo.dirty || 0);
       var stranded = (repo.stranded && repo.stranded.length) ? repo.stranded.length : 0;
-      var liveBehind = !!repo.live_behind;
-      // Fallback per cache senza il nuovo campo: replica la logica backend
-      if (!liveBehind && (dirty > 0 || ahead > 0 || behind > 0 || stranded)) {
-        liveBehind = true;
-      }
-      var badgeClass = liveBehind ? 'live-behind' : (behind > 0 ? 'error' : ((ahead > 0 || dirty > 0) ? 'warn' : 'ok'));
-      // Etichetta sintetica: dice COSA manca, non "↑0 ↓0" che a branch allineati
-      // e' sempre zero e nasconde la causa vera (file sporchi / branch orfani).
+      // The primary badge describes this checkout. Other local branches are
+      // separate evidence, not uncommitted changes or proof of deployment state.
+      var needsWork = dirty > 0 || ahead > 0 || behind > 0;
+      var badgeClass = needsWork ? 'live-behind' : 'ok';
       var badgeLabel = 'in pari';
-      if (behind > 0) badgeLabel = 'da aggiornare';
+      if (dirty > 0) badgeLabel = 'da committare';
+      else if (ahead > 0 && behind > 0) badgeLabel = 'da sincronizzare';
+      else if (behind > 0) badgeLabel = 'da aggiornare';
       else if (ahead > 0) badgeLabel = 'da pushare';
-      else if (dirty > 0) badgeLabel = 'da committare';
-      else if (stranded > 0) badgeLabel = 'branch orfani';
-      var detail = ahead + ' avanti, ' + behind + ' indietro, ' + dirty + ' file modificati, ' + stranded + ' branch orfani';
-      var badgeTitle = liveBehind
-        ? detail + ' — clicca per far mergiare e deployare a Prime'
-        : detail;
-      var badgeExtra = ' title="' + esc(badgeTitle) + '"' + (liveBehind
+      var detail = ahead + ' avanti, ' + behind + ' indietro, ' + dirty + ' file da committare';
+      if (!repo.upstream) detail += '\nNessun upstream: in pari indica il salvataggio locale.';
+      if (dirty > 0) {
+        detail += '\n' + Number(repo.staged || 0) + ' in staging, ' + Number(repo.unstaged || 0) + ' modificati, ' + Number(repo.untracked || 0) + ' nuovi';
+        (repo.dirty_files || []).forEach(function (file) { detail += '\n' + file.status + ' ' + file.path; });
+        if (repo.dirty_files_truncated) detail += '\n... altri ' + repo.dirty_files_truncated + ' file';
+      }
+      if (stranded) detail += '\nAltri branch non integrati: ' + repo.stranded.map(function (branch) { return branch.branch; }).join(', ');
+      var badgeTitle = detail + (needsWork ? '\nClicca per richiedere a Prime la verifica e la consegna.' : '');
+      var badgeExtra = ' title="' + esc(badgeTitle) + '"' + (needsWork
         ? ' data-repo="' + esc(repo.name) + '" role="button" tabindex="0"'
         : '');
       var head = repo.head || {};
@@ -3359,17 +3360,41 @@
   }
 
   var _repoStatusTimer = null;
-  function refreshRepoStatus() {
-    return api('/api/repo-status').then(renderRepoStatus).catch(function () {
+  var _repoStatusRequest = 0;
+  var _repoStatusListenersBound = false;
+  function refreshRepoStatus(force) {
+    var request = ++_repoStatusRequest;
+    var button = $('cbRepoRefresh');
+    var label = button && button.querySelector('.cb-repo-refresh');
+    if (label) label.textContent = 'verifica…';
+    return api('/api/repo-status' + (force === true ? '?refresh=1' : '')).then(function (data) {
+      if (request !== _repoStatusRequest) return; // Ignore an older response arriving late.
+      renderRepoStatus(data);
+      if (button) {
+        if (label) label.textContent = 'refresh';
+        button.title = data.checked_at ? 'Verificato alle ' + new Date(data.checked_at * 1000).toLocaleTimeString() : 'Aggiorna stato Git';
+      }
+    }).catch(function () {
+      if (request !== _repoStatusRequest) return;
       var list = $('cbRepoList');
-      if (list) list.innerHTML = '<div class="cb-empty">stato repo n/d</div>';
+      if (list) list.innerHTML = '<div class="cb-empty">stato repo n/d — riprova refresh</div>';
+      if (button) { if (label) label.textContent = 'riprova'; button.title = 'Ultimo controllo non riuscito'; }
     });
   }
 
   function startRepoStatusRefresh() {
-    refreshRepoStatus();
+    refreshRepoStatus(true);
     if (_repoStatusTimer) clearInterval(_repoStatusTimer);
-    _repoStatusTimer = setInterval(refreshRepoStatus, 60000);
+    _repoStatusTimer = setInterval(function () {
+      if (!document.hidden) refreshRepoStatus();
+    }, 15000);
+    if (!_repoStatusListenersBound) {
+      _repoStatusListenersBound = true;
+      window.addEventListener('focus', function () { refreshRepoStatus(true); });
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) refreshRepoStatus(true);
+      });
+    }
   }
 
   // Phase 4 will fly the planet camera here; for now scroll to the stage and pulse.
