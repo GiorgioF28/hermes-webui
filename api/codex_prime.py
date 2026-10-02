@@ -205,6 +205,7 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
     events = queue.Queue()
     parts, errors, usage = [], [], {}
     turn_errors = []
+    final_reply = None
     elapsed, last = 0.0, time.monotonic()
     try:
         proc = subprocess.Popen(command, cwd=str(workspace), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -243,9 +244,15 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             kind, item = event.get("type"), event.get("item") or {}
             if kind == "item.completed" and item.get("type") == "agent_message":
                 text = item.get("text") or ""
-                parts.append(text)
+                # CLI messages are whole assistant items, not token fragments.
+                # Older CLI versions omit phase: their last item is the final.
+                phase = item.get("phase")
+                if phase != "commentary":
+                    final_reply = text
+                delta = ("\n\n" if parts else "") + text
+                parts.append(delta)
                 if on_token:
-                    on_token(text)
+                    on_token(delta)
             elif kind == "item.started" and on_status:
                 on_status({"state": "tool" if "tool" in item.get("type", "") else "reasoning"})
             elif kind == "turn.completed":
@@ -258,10 +265,10 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
                 detail = (err.get("message") if isinstance(err, dict) else err) or event.get("message")
                 if detail:
                     turn_errors.append(str(detail))
-        if proc.wait(timeout=10) != 0 or not parts:
+        if proc.wait(timeout=10) != 0 or not final_reply:
             from api.helpers import _redact_text
             raise RuntimeError("Codex Prime: " + _redact_text("\n".join(turn_errors or errors)[-3000:]))
-        return {"reply": "".join(parts), "usage": usage}
+        return {"reply": final_reply, "usage": usage}
     finally:
         runtime.revoke(token)
         if proc is not None:

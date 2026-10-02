@@ -95,7 +95,7 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
 
     class FakeRegistry:
         def get(self, session_id):
-            return None  # simula sessione non esistente → system prompt viene calcolato
+            return None  # simula sessione non esistente â†’ system prompt viene calcolato
 
         def get_or_create(self, session_id, **kwargs):
             assert session_id == "hermes-prime"
@@ -160,7 +160,9 @@ def test_bridge_prime_post_streams_tokens_then_done(monkeypatch):
     assert handler.status == 200
     assert handler.headers["Content-Type"] == "text/event-stream; charset=utf-8"
     assert handler.headers["X-Accel-Buffering"] == "no"
-    assert _events(handler) == [
+    events = _events(handler)
+    assert events[0][0] == "started" and events[0][1]["stream_id"]
+    assert events[1:] == [
         ("status", {"state": "reasoning"}),
         ("token", {"text": "Prima "}),
         ("token", {"text": "parte"}),
@@ -180,6 +182,9 @@ def test_bridge_prime_post_streams_tokens_then_done(monkeypatch):
             "done",
             {
                 "reply": "Prima parte",
+                "stream_id": events[0][1]["stream_id"],
+                "user_message_index": 0,
+                "assistant_message_index": 1,
                 "delegations": [{"id": "prime-2", "status": "in_corso"}],
                 "usage": {
                     "input_tokens": 1200,
@@ -224,7 +229,13 @@ def test_second_prime_turn_queues_without_interrupting_first(monkeypatch):
     first_started = threading.Event()
     release_first = threading.Event()
     second_submitted = threading.Event()
+    second_queued = threading.Event()
     statuses = {"first": [], "second": []}
+
+    def second_status(status):
+        statuses["second"].append(status)
+        if status.get("state") == "queued":
+            second_queued.set()
 
     class _Future:
         def __init__(self, name):
@@ -272,13 +283,13 @@ def test_second_prime_turn_queues_without_interrupting_first(monkeypatch):
         threading.Thread(
             target=routes._hermes_prime_reply,
             args=("two", Path(".")),
-            kwargs={"on_status": statuses["second"].append},
+            kwargs={"on_status": second_status},
         ),
     ]
     threads[0].start()
     assert first_started.wait(timeout=1)
     threads[1].start()
-    time.sleep(0.05)
+    assert second_queued.wait(timeout=1)
 
     assert {"state": "queued"} in statuses["second"]
     assert not second_submitted.is_set()
@@ -297,7 +308,7 @@ def test_second_prime_turn_queues_without_interrupting_first(monkeypatch):
 def test_prime_reply_finalizes_gracefully_on_stalled_turn(monkeypatch):
     # Un turno che si blocca (nessun progresso) deve essere interrotto dal
     # watchdog anti-blocco senza propagare TimeoutError (verrebbe scambiato per
-    # client disconnesso). Qui la future non completa mai e non c'è attività:
+    # client disconnesso). Qui la future non completa mai e non c'Ã¨ attivitÃ :
     # con cap minimo il watchdog stacca e restituisce un messaggio leggibile.
     import concurrent.futures as _futures
 
@@ -345,11 +356,11 @@ def test_prime_reply_finalizes_gracefully_on_stalled_turn(monkeypatch):
     result = routes._hermes_prime_reply("brief", Path("."), on_token=deltas.append)
 
     assert result["reply"]  # non vuoto: l'utente riceve un messaggio leggibile
-    assert deltas and deltas[0] == result["reply"]  # ed è stato anche streamato
+    assert deltas and deltas[0] == result["reply"]  # ed Ã¨ stato anche streamato
     assert result["delegations"] == []
     assert stuck.cancelled  # il watchdog ha provato a cancellare il turno bloccato
-    # ...e la sessione persistente è stata scartata, così il turno successivo
-    # non eredita lo stream a metà (niente desync off-by-one).
+    # ...e la sessione persistente Ã¨ stata scartata, cosÃ¬ il turno successivo
+    # non eredita lo stream a metÃ  (niente desync off-by-one).
     assert reg.closed == ["hermes-prime"]
 
 
@@ -425,9 +436,9 @@ def test_prime_reply_watchdog_pauses_while_ask_user_is_pending(monkeypatch):
 
 
 def test_prime_reply_resets_session_when_turn_disconnects(monkeypatch):
-    # Ctrl+F5 a metà stream -> on_token scrive su un socket morto e il turno
+    # Ctrl+F5 a metÃ  stream -> on_token scrive su un socket morto e il turno
     # solleva un errore di disconnessione. La sessione persistente DEVE essere
-    # scartata (così il turno dopo non eredita lo stream a metà) e l'errore
+    # scartata (cosÃ¬ il turno dopo non eredita lo stream a metÃ ) e l'errore
     # deve comunque propagare a _handle_bridge_prime per l'evento terminale.
     import pytest
 
@@ -481,7 +492,7 @@ def test_bridge_prime_post_emits_terminal_event_on_disconnect_error(monkeypatch)
 
     assert routes._handle_bridge_prime(handler, {"message": "brief"}) is True
     events = _events(handler)
-    assert events and events[-1][0] == "error"  # mai silenzio: c'è un terminale
+    assert events and events[-1][0] == "error"  # mai silenzio: c'Ã¨ un terminale
 
 
 def test_bridge_prime_post_reports_failures_as_sse(monkeypatch):
@@ -496,9 +507,10 @@ def test_bridge_prime_post_reports_failures_as_sse(monkeypatch):
     assert routes._handle_bridge_prime(handler, {"message": "brief"}) is True
     assert handler.status == 200
     events = _events(handler)
-    assert events[0][0] == "error"
-    assert events[0][1]["branch"] == "unknown"
-    assert events[0][1]["detail"] == "provider down"
+    assert events[0][0] == "started"
+    assert events[-1][0] == "error"
+    assert events[-1][1]["branch"] == "unknown"
+    assert events[-1][1]["detail"] == "provider down"
 
 
 def test_bridge_prime_history_persists_successful_turn(monkeypatch, tmp_path):
@@ -603,7 +615,7 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "onResolved: function ()" in source
     assert "done: function (d)" in source
     assert "if (d && d.usage) showUsage(d.usage);" in source
-    assert "if (!settled && reply) finish('\\u2713 risposta ricevuta');" in source
+    assert "if (!settled) fail('Connessione interrotta [transport_cut]." in source
     assert "if (!reply && ph && ph.parentNode)" in source
     assert "api('api/bridge/tasks')" in source
     assert "setInterval(pollTasks, 3000)" in source
@@ -637,7 +649,7 @@ def test_command_bridge_frontend_always_clears_streaming_after_final_render():
     finish_end = source.index("var showToken = function", finish_start)
     finish = source[finish_start:finish_end]
     assert "} finally {" in finish
-    assert "setPrimeStreaming(false, null);" in finish
+    assert "setPrimeStreaming(_cbOwnTurnCount > 0, null);" in finish
     assert "bubble.textContent = reply" in finish
     assert "console.error('[Hermes Prime] Finalizzazione risposta fallita" in finish
 
@@ -647,9 +659,9 @@ def test_command_bridge_frontend_always_clears_streaming_after_final_render():
     assert "Rendering markdown finale fallito" in render
     assert "node.textContent = raw" in render
 
-    # Chiusura del body senza evento `done`: la continuation post-pump deve
-    # finalizzare il parziale invece di lasciare `in corso` appeso.
-    assert "if (!settled && reply) finish('\\u2713 risposta ricevuta');" in source
+    # EOF without done is degraded observation, never proof of completion.
+    assert "if (!settled) fail('Connessione interrotta [transport_cut]." in source
+    assert "if (!settled && reply) finish(" not in source
 
 
 def _run_prime_turn_ui_scenarios():
@@ -765,7 +777,8 @@ def test_command_bridge_frontend_renders_automatic_brief_usage_live_and_from_his
 
     assert "var finish = function (reply, usage)" in bridge
     assert "finish((s && s.reply) || '', s && s.usage)" in bridge
-    assert "_hasBridgeUsage(usage) && window._showTokenUsage === true" in bridge
+    # Live brief delivery now uses the same renderer and usage gate as replay.
+    assert "brief_id: 'brief-' + t.id, task_id: t.id, usage: usage" in bridge
     assert "_hasBridgeUsage(m.usage) && window._showTokenUsage === true" in bridge
     assert "_formatAssistantUsageBadge(m.usage)" in bridge
 

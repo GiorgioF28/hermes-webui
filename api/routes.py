@@ -11533,6 +11533,7 @@ def _estimate_prime_history_tokens(session_id: str = "hermes-prime") -> int:
 
 _PRIME_TURN_LOCKS: dict[str, threading.Lock] = {}
 _PRIME_TURN_LOCKS_GUARD = threading.Lock()
+_PRIME_BRIDGE_TURN_LOCKS: dict[str, threading.Lock] = {}
 _PRIME_ACTIVE_LOCK = threading.RLock()
 _PRIME_ACTIVE_TURNS: dict[str, dict[str, object]] = {}
 
@@ -11540,6 +11541,13 @@ _PRIME_ACTIVE_TURNS: dict[str, dict[str, object]] = {}
 def _prime_turn_lock(session_id: str) -> threading.Lock:
     with _PRIME_TURN_LOCKS_GUARD:
         return _PRIME_TURN_LOCKS.setdefault(session_id, threading.Lock())
+
+
+def _prime_bridge_turn_lock(session_id: str) -> threading.Lock:
+    # Own the durable pending turn from begin through settlement. Provider locks
+    # are acquired later and cannot protect begin_turn against concurrent POSTs.
+    with _PRIME_TURN_LOCKS_GUARD:
+        return _PRIME_BRIDGE_TURN_LOCKS.setdefault(session_id, threading.Lock())
 
 
 def _sync_prime_delegation_records(session_id: str, tasks: list[dict]) -> None:
@@ -12545,62 +12553,82 @@ def _handle_bridge_prime(handler, body):
 
     from api.streaming import _sse
 
-    # live() carries message_count, so the anchor no longer copies the whole
-    # transcript (~2 MB) on every turn start just to count it.
-    try:
-        anchor_message_index = int((store.live() or {}).get("message_count") or 0)
-    except Exception:
-        anchor_message_index = len((store.history() or {}).get("messages") or [])
-    anchor_created_at = time.time()
-    stream_id = store.begin_turn(msg, attachments)
-    try:
-        from api.prime_delegation import set_delegation_anchor_context
-        set_delegation_anchor_context(
-            session_id,
-            message_index=anchor_message_index,
-            created_at=anchor_created_at,
-        )
-    except Exception:
-        logger.debug("bridge prime delegation anchor setup failed", exc_info=True)
+    stream_id = None
     write_lock = threading.Lock()
+    observer_gone = threading.Event()
+    stop_heartbeat = threading.Event()
 
     def emit(event, payload):
         with write_lock:
-            _sse(handler, event, payload)
+            if observer_gone.is_set():
+                return
+            try:
+                if event is None:
+                    handler.wfile.write(b": keepalive\n\n")
+                    handler.wfile.flush()
+                else:
+                    _sse(handler, event, payload)
+            except _CLIENT_DISCONNECT_ERRORS as exc:
+                # SSE observes the turn; losing a browser must not stop the
+                # provider, revoke its tools, or turn the transcript into an error.
+                observer_gone.set()
+                logger.info(
+                    "bridge prime observer disconnected session=%s stream=%s error=%s; turn continues",
+                    session_id, stream_id, type(exc).__name__,
+                )
 
-    def _token(text):
-        store.append_token(stream_id, text)
-        emit("token", {"text": text})
+    def heartbeat():
+        while not stop_heartbeat.wait(_SSE_HEARTBEAT_INTERVAL_SECONDS):
+            emit(None, None)
+            if observer_gone.is_set():
+                break
 
-    def _on_tool_call(tool_name: str, result_summary: str = "") -> None:
-        """Emit SSE tool event and journal the tool call (P2-C)."""
-        try:
-            store.append_tool_event(stream_id, tool_name, result_summary)
-            emit("tool", {"tool": tool_name, "summary": result_summary, "stream_id": stream_id})
-        except Exception:
-            logger.debug("bridge prime tool event emit failed", exc_info=True)
+    heartbeat_thread = threading.Thread(target=heartbeat, name="bridge-prime-heartbeat", daemon=True)
+    heartbeat_thread.start()
 
-    stop_attention_relays = _bridge_prime_start_attention_relays(emit, session_id)
-
+    request_lock = _prime_bridge_turn_lock(session_id)
+    if not request_lock.acquire(blocking=False):
+        emit("status", {"state": "queued"})
+        request_lock.acquire()
     try:
+        # live() carries message_count, so the anchor no longer copies the whole
+        # transcript (~2 MB) on every turn start just to count it.
         try:
-            from api.streaming import _bind_turn_session_identity
+            anchor_message_index = int((store.live() or {}).get("message_count") or 0)
         except Exception:
-            _bind_turn_session_identity = None
-        if _bind_turn_session_identity is None:
-            result = _call_hermes_prime_reply_for_bridge(
-                msg,
-                workspace,
-                attachments=attachments,
-                on_token=_token,
-                on_status=lambda status: emit("status", status),
-                model_state=model_state,
-                stream_id=stream_id,
-                session_id=session_id,
-                user=identity.user,
+            anchor_message_index = len((store.history() or {}).get("messages") or [])
+        anchor_created_at = time.time()
+        stream_id = store.begin_turn(msg, attachments)
+        try:
+            from api.prime_delegation import set_delegation_anchor_context
+            set_delegation_anchor_context(
+                session_id,
+                message_index=anchor_message_index,
+                created_at=anchor_created_at,
             )
-        else:
-            with _bind_turn_session_identity(session_id):
+        except Exception:
+            logger.debug("bridge prime delegation anchor setup failed", exc_info=True)
+        emit("started", {"stream_id": stream_id, "user_message_index": anchor_message_index})
+        def _token(text):
+            store.append_token(stream_id, text)
+            emit("token", {"text": text})
+
+        def _on_tool_call(tool_name: str, result_summary: str = "") -> None:
+            """Emit SSE tool event and journal the tool call (P2-C)."""
+            try:
+                store.append_tool_event(stream_id, tool_name, result_summary)
+                emit("tool", {"tool": tool_name, "summary": result_summary, "stream_id": stream_id})
+            except Exception:
+                logger.debug("bridge prime tool event emit failed", exc_info=True)
+
+        stop_attention_relays = _bridge_prime_start_attention_relays(emit, session_id)
+
+        try:
+            try:
+                from api.streaming import _bind_turn_session_identity
+            except Exception:
+                _bind_turn_session_identity = None
+            if _bind_turn_session_identity is None:
                 result = _call_hermes_prime_reply_for_bridge(
                     msg,
                     workspace,
@@ -12612,93 +12640,116 @@ def _handle_bridge_prime(handler, body):
                     session_id=session_id,
                     user=identity.user,
                 )
-        if result.get("cancelled"):
-            cancelled = store.cancel_turn(stream_id, "cancelled by user")
-            emit("status", {"state": "cancelled", "cancelled": True})
+            else:
+                with _bind_turn_session_identity(session_id):
+                    result = _call_hermes_prime_reply_for_bridge(
+                        msg,
+                        workspace,
+                        attachments=attachments,
+                        on_token=_token,
+                        on_status=lambda status: emit("status", status),
+                        model_state=model_state,
+                        stream_id=stream_id,
+                        session_id=session_id,
+                        user=identity.user,
+                    )
+            if result.get("cancelled"):
+                cancelled = store.cancel_turn(stream_id, "cancelled by user")
+                emit("status", {"state": "cancelled", "cancelled": True})
+                emit(
+                    "done",
+                    {
+                        "reply": cancelled.get("partial_output") or result.get("reply") or "",
+                        "delegations": result.get("delegations", []),
+                        "usage": result.get("usage") or {},
+                        "cancelled": True,
+                    },
+                )
+                return True
+            emit("status", {"state": "done"})
+            usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+            if usage:
+                emit("usage", {"usage": usage})
+            reply = result["reply"] or ("Rozumím." if identity.user == "tom" else "Ricevuto.")
+            reply_index = store.finish_turn(stream_id, reply, usage=usage)
+            # P2-B: try to extract and persist todo state from the standard session
+            try:
+                from api.todo_state import derive_todo_state
+                hist = store.history()
+                snap = derive_todo_state(hist.get("messages") or [])
+                if snap is not None:
+                    store.update_todo_snapshot(snap)
+            except Exception:
+                logger.debug("bridge prime todo snapshot update failed", exc_info=True)
+            # Fase 1: drain pending briefs (fallback no-LLM only; LLM cost already paid)
+            try:
+                from api.prime_brief_queue import get_brief_queue
+                get_brief_queue(workspace).drain_pending(
+                    try_llm=False,
+                    workspace=workspace,
+                    session_id=session_id,
+                )
+            except Exception:
+                logger.debug("bridge prime: brief drain failed", exc_info=True)
             emit(
                 "done",
                 {
-                    "reply": cancelled.get("partial_output") or result.get("reply") or "",
+                    "reply": reply,
+                    "stream_id": stream_id,
+                    "user_message_index": anchor_message_index,
+                    "assistant_message_index": reply_index,
                     "delegations": result.get("delegations", []),
-                    "usage": result.get("usage") or {},
-                    "cancelled": True,
+                    "usage": usage,
                 },
             )
-            return True
-        emit("status", {"state": "done"})
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-        if usage:
-            emit("usage", {"usage": usage})
-        reply = result["reply"] or ("Rozumím." if identity.user == "tom" else "Ricevuto.")
-        store.finish_turn(stream_id, reply, usage=usage)
-        # P2-B: try to extract and persist todo state from the standard session
-        try:
-            from api.todo_state import derive_todo_state
-            hist = store.history()
-            snap = derive_todo_state(hist.get("messages") or [])
-            if snap is not None:
-                store.update_todo_snapshot(snap)
-        except Exception:
-            logger.debug("bridge prime todo snapshot update failed", exc_info=True)
-        # Fase 1: drain pending briefs (fallback no-LLM only; LLM cost already paid)
-        try:
-            from api.prime_brief_queue import get_brief_queue
-            get_brief_queue(workspace).drain_pending(
-                try_llm=False,
-                workspace=workspace,
-                session_id=session_id,
-            )
-        except Exception:
-            logger.debug("bridge prime: brief drain failed", exc_info=True)
-        emit(
-            "done",
-            {
-                "reply": reply,
-                "delegations": result.get("delegations", []),
-                "usage": usage,
-            },
-        )
-    except _CLIENT_DISCONNECT_ERRORS:
-        store.mark_error(stream_id, "client disconnected", keep_pending=True)
-        try:
-            emit("error", {
-                "error": "La sessione di Hermes Prime si e interrotta. Riprova tra poco.",
-                "branch": bridge_errors.TRANSPORT_CUT,
-                "hint": bridge_errors.classify(bridge_errors.TRANSPORT_CUT)["hint"],
-            })
         except _CLIENT_DISCONNECT_ERRORS:
-            pass
-    except Exception as exc:
-        store.mark_error(stream_id, _sanitize_error(exc), keep_pending=True)
-        logger.exception("hermes prime reply failed")
-        info = bridge_errors.classify(exc)
-        err_payload = {
-            "error": info["message"],
-            "branch": info["branch"],
-            "hint": info["hint"],
-            "detail": _sanitize_error(exc),
-        }
-        if info["branch"] == bridge_errors.CLAUDE_QUOTA:
-            # Timer quota nel Command Bridge: estrai (best-effort) QUANDO la
-            # finestra si resetta e persisti lo stato, cosi' il countdown
-            # sopravvive a reload/riaperture. quota_reset_at puo' essere None:
-            # la UI mostra allora il badge senza countdown.
+            store.mark_error(stream_id, "client disconnected", keep_pending=True)
             try:
-                from api import lead_brain as _lb
-                reset_at = bridge_errors.quota_reset_epoch(err_payload["detail"])
-                err_payload["quota_reset_at"] = reset_at
-                _lb.record_claude_quota(
-                    workspace, reason=err_payload["detail"][:200], reset_at=reset_at,
-                )
-            except Exception:
-                logger.debug("claude quota state record failed", exc_info=True)
-        try:
-            emit("error", err_payload)
-        except _CLIENT_DISCONNECT_ERRORS:
-            pass
+                emit("error", {
+                    "error": "La sessione di Hermes Prime si e interrotta. Riprova tra poco.",
+                    "branch": bridge_errors.TRANSPORT_CUT,
+                    "hint": bridge_errors.classify(bridge_errors.TRANSPORT_CUT)["hint"],
+                })
+            except _CLIENT_DISCONNECT_ERRORS:
+                pass
+        except Exception as exc:
+            store.mark_error(stream_id, _sanitize_error(exc), keep_pending=True)
+            logger.exception("hermes prime reply failed")
+            info = bridge_errors.classify(exc)
+            err_payload = {
+                "error": info["message"],
+                "branch": info["branch"],
+                "hint": info["hint"],
+                "detail": _sanitize_error(exc),
+            }
+            if info["branch"] == bridge_errors.CLAUDE_QUOTA:
+                # Timer quota nel Command Bridge: estrai (best-effort) QUANDO la
+                # finestra si resetta e persisti lo stato, cosi' il countdown
+                # sopravvive a reload/riaperture. quota_reset_at puo' essere None:
+                # la UI mostra allora il badge senza countdown.
+                try:
+                    from api import lead_brain as _lb
+                    reset_at = bridge_errors.quota_reset_epoch(err_payload["detail"])
+                    err_payload["quota_reset_at"] = reset_at
+                    _lb.record_claude_quota(
+                        workspace, reason=err_payload["detail"][:200], reset_at=reset_at,
+                    )
+                except Exception:
+                    logger.debug("claude quota state record failed", exc_info=True)
+            try:
+                emit("error", err_payload)
+            except _CLIENT_DISCONNECT_ERRORS:
+                pass
+        finally:
+            stop_heartbeat.set()
+            heartbeat_thread.join(timeout=1.0)
+            stop_attention_relays()
+        return True
+
     finally:
-        stop_attention_relays()
-    return True
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=1.0)
+        request_lock.release()
 
 
 def _prime_lead_model_id(lead: str) -> str:
@@ -12938,6 +12989,13 @@ def _handle_bridge_prime_brief(handler, body):
 
 
 def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace, session_id="hermes-prime", user="giorgio"):
+    # Keep background replies outside a user's durable begin/finish boundary.
+    # Provider-only locking ends before persistence and leaves a replay race.
+    with _prime_bridge_turn_lock(session_id):
+        return _run_prime_brief_job_owned(task_id, brief_id, brief_msg, workspace, session_id, user)
+
+
+def _run_prime_brief_job_owned(task_id, brief_id, brief_msg, workspace, session_id="hermes-prime", user="giorgio"):
     """Turno LLM del brief + persistenza. Gira in un thread, mai dentro la POST."""
     reply = ""
     usage = {}

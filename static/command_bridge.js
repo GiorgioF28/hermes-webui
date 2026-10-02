@@ -1396,9 +1396,8 @@
       // light up the matching planet in the star system
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
-    if (prev && taskIsRunning(prev.status) && !taskIsRunning(t.status) && !(opts && opts.replay)) {
-      sysNote('⚡ ' + (t.agent || 'sotto-agente') + ' ha ' + (t.result_partial ? 'concluso con esito parziale' : ((t.status === 'ok' || t.status === 'done') ? 'finito' : 'fallito')) + ' il task.');
-    }
+    // The delegation card already shows its outcome; a separate system row
+    // would interrupt an unrelated active reply.
     _cbTasks[t.id].status = t.status;
     // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
     // Le card idratate dallo storico non rilanciano MAI il brief: il testo e'
@@ -1410,30 +1409,24 @@
     }
   }
   function requestBrief(t) {
-    setOrb('thinking', 0);
-    var ph = pendingBubble(); // riusa la bolla "sto ragionando…" di Hermes Prime
-    var turnUi = createPrimeTurnUi(ph);
+    // Brief generation is background activity, not another user reply.
+    // Render only its durable result, after active local turns have settled.
+    var turnUi = createPrimeTurnUi(null);
     var cfg = window.__HERMES_CONFIG__ || {};
     var finish = function (reply, usage) {
       if (turnUi.isClosed()) return;
+      if (_cbOwnTurnCount > 0) { setTimeout(function () { finish(reply, usage); }, 500); return; }
       reply = String(reply || '').trim();
       try {
-        if (ph && ph.parentNode) {
-          if (reply) {
-            var bub = ph.querySelector('.cb-bubble');
-            if (bub) { bub.removeAttribute('style'); renderRich(bub, reply); }
-            if (_hasBridgeUsage(usage) && window._showTokenUsage === true) {
-              var badge = _formatAssistantUsageBadge(usage);
-              var foot = ph.querySelector('.cb-msg-foot');
-              if (badge && foot) { foot.textContent = badge; foot.title = _bridgeUsageTitle(usage); foot.hidden = false; }
-            }
-            if (userEngaged) speak(reply);
-          } else { ph.parentNode.removeChild(ph); }
+        if (reply) {
+          renderPrimeHistoryMessage({role: 'assistant', content: reply,
+            brief_id: 'brief-' + t.id, task_id: t.id, usage: usage}, null);
+          if (userEngaged) speak(reply);
         }
       } finally {
         turnUi.close();
-        alignRenderedCountAfterOwnTurn();
-        setOrb('idle', 0);
+        // The next history poll adopts this result by brief_id without skipping
+        // any other transcript entries or changing the active turn's state.
       }
     };
     // Il brief gira in background lato server: qui si fa solo polling leggero,
@@ -1844,6 +1837,7 @@
   var _cbSyncBusy = false;
   var _cbRemoteTurnNode = null;
   var _cbOwnTurnEndedAt = 0;
+  var _cbOwnTurnCount = 0;
   var CB_HISTORY_RETRY_DELAYS = [1000, 3000, 8000];
   function normalizeAttentionPending(payload) {
     if (!payload) return null;
@@ -2163,9 +2157,35 @@
   // sync incrementale sa cosa e' gia' a video e le card delega hanno l'ancora.
   function renderPrimeHistoryMessage(m, idx, pendingClarifyId) {
     var log = $('cbLog'); if (!log || !m) return null;
-    var hasIdx = Number.isFinite(Number(idx));
+    var hasIdx = idx != null && Number.isFinite(Number(idx));
     if (hasIdx && log.querySelector('[data-cb-msg-index="' + Number(idx) + '"]')) return null;
     var node = null;
+    if (m.stream_id) {
+      var streamNodes = log.querySelectorAll('[data-cb-stream-id]');
+      for (var s = 0; s < streamNodes.length; s++) {
+        if (streamNodes[s].getAttribute('data-cb-stream-id') === String(m.stream_id) &&
+            streamNodes[s].getAttribute('data-cb-role') === m.role) {
+          node = streamNodes[s];
+          var ownedBubble = node.querySelector('.cb-bubble');
+          if (ownedBubble && m.role === 'assistant') renderRich(ownedBubble, m.content || '');
+          break;
+        }
+      }
+    }
+    var briefId = m.role === 'assistant' && String(m.brief_id || '');
+    if (briefId) {
+      // Compare attribute values rather than interpolating IDs into selectors.
+      var briefNodes = log.querySelectorAll('[data-cb-brief-id]');
+      for (var b = 0; b < briefNodes.length; b++) {
+        if (briefNodes[b].getAttribute('data-cb-brief-id') === briefId) {
+          node = briefNodes[b];
+          if (node.hasAttribute('data-cb-msg-index')) return null;
+          var briefBubble = node.querySelector('.cb-bubble');
+          if (briefBubble) { briefBubble.removeAttribute('style'); renderRich(briefBubble, m.content || ''); }
+          break;
+        }
+      }
+    }
     if (
       m._bridge_clarify_event === 'request' &&
       m._bridge_clarify_payload &&
@@ -2182,8 +2202,17 @@
       if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
       return node;
     }
-    node = primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '', null, true);
+    node = node || primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '', null, true);
+    if (node && briefId) node.setAttribute('data-cb-brief-id', briefId);
     if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
+    if (node && m.stream_id) {
+      node.setAttribute('data-cb-stream-id', String(m.stream_id));
+      node.setAttribute('data-cb-role', m.role);
+    }
+    if (node && briefId && m.task_id) {
+      var briefWho = node.querySelector('.cb-who');
+      if (briefWho) briefWho.textContent = 'hermes prime · esito ' + m.task_id;
+    }
     // Show usage badge on injected brief messages (e.g. brief delega LLM).
     // Reuses the same gate and helpers as normal chat turns.
     if (node && m.role !== 'user' && _hasBridgeUsage(m.usage) && window._showTokenUsage === true) {
@@ -2289,7 +2318,7 @@
   // Nessun socket nuovo: il poller /api/bridge/tasks (3 s) porta prime_live e
   // questa scheda scarica solo la coda mancante del transcript.
   function ownPrimeTurnInFlight() {
-    return !!_primeStreaming && !_cbRemoteTurnNode;
+    return _cbOwnTurnCount > 0 || (!!_primeStreaming && !_cbRemoteTurnNode);
   }
   function noteOwnPrimeTurnEnded() {
     _cbOwnTurnEndedAt = Date.now();
@@ -2300,7 +2329,8 @@
   function alignRenderedCountAfterOwnTurn() {
     api('/api/bridge/prime/live').then(function (d) {
       var n = Number(d && d.message_count);
-      if (Number.isFinite(n) && n > _cbRenderedCount) _cbRenderedCount = n;
+      // Fetch and adopt identified rows; never jump over unseen brief/user rows.
+      syncPrimeTranscriptFromServer(n, d && d.delegations_rev);
     }).catch(function () {});
   }
   function showRemotePrimeTurn() {
@@ -2346,7 +2376,8 @@
     _cbSyncBusy = true;
     var since = _cbRenderedCount;
     fetchPrimeHistory(since).then(function (data) {
-      if (!data) return;
+      // A local send can start while this request is awaiting the server.
+      if (!data || ownPrimeTurnInFlight()) return;
       var offset = Number(data.since_index);
       // Backend vecchio: nessuno slice -> non appendiamo nulla (zero duplicati).
       if (!Number.isFinite(offset) || offset !== since) return;
@@ -2492,7 +2523,8 @@
     var thumbs = ready.map(function (a) { return a.url; }).filter(Boolean);
     pendingAttachments = [];
     renderAttachments();
-    primeSay('user', v, thumbs);
+    var userNode = primeSay('user', v, thumbs);
+    _cbOwnTurnCount += 1;
     stopSpeak(); // un nuovo turno interrompe la voce precedente
     setOrb('thinking', 0);
     var ph = pendingBubble();
@@ -2545,7 +2577,8 @@
       } finally {
         turnUi.close();
         if (liveUsage) liveUsage.hidden = true;
-        setPrimeStreaming(false, null);
+        _cbOwnTurnCount = Math.max(0, _cbOwnTurnCount - 1);
+        setPrimeStreaming(_cbOwnTurnCount > 0, null);
         noteOwnPrimeTurnEnded();
         if (!_ttsActive) setOrb('idle', 0);
       }
@@ -2573,7 +2606,8 @@
         sysNote(text);
       } finally {
         if (liveUsage) liveUsage.hidden = true;
-        setPrimeStreaming(false, null);
+        _cbOwnTurnCount = Math.max(0, _cbOwnTurnCount - 1);
+        setPrimeStreaming(_cbOwnTurnCount > 0, null);
         noteOwnPrimeTurnEnded();
         setOrb('idle', 0);
       }
@@ -2585,6 +2619,12 @@
       body: JSON.stringify({ message: v, attachments: attachments })
     }).then(function (r) {
       return streamPrimeResponse(r, {
+        started: function (d) {
+          if (!d || !d.stream_id) return;
+          if (userNode) { userNode.setAttribute('data-cb-stream-id', d.stream_id); userNode.setAttribute('data-cb-role', 'user'); }
+          if (ph) { ph.setAttribute('data-cb-stream-id', d.stream_id); ph.setAttribute('data-cb-role', 'assistant'); }
+          if (userNode && d.user_message_index != null) userNode.setAttribute('data-cb-msg-index', String(d.user_message_index));
+        },
         status: function (d) { showStatus(d && d.state, d && d.tool); },
         token: function (d) { showToken(d && d.text); },
         usage: function (d) { showUsage(d && d.usage); },
@@ -2610,7 +2650,9 @@
         tool: function (d) { if (d && d.tool) renderToolCard(d.tool, d.summary || ''); },
         done: function (d) {
           if (d && d.usage) showUsage(d.usage);
-          if (!reply && d && d.reply) showToken(d.reply);
+          // The canonical final answer replaces interim process text.
+          if (d && typeof d.reply === 'string') reply = d.reply;
+          if (ph && d && d.assistant_message_index != null) ph.setAttribute('data-cb-msg-index', String(d.assistant_message_index));
           if (d && d.cancelled) {
             finish('interrotto');
             if (bubble) bubble.classList.add('cb-recovered');
@@ -2634,19 +2676,15 @@
         }
       });
     }).then(function () {
-      // EOF e' un terminale valido anche senza evento `done`: proxy/browser e
-      // rami backend eccezionali possono chiudere il body dopo gli ultimi token.
-      if (!settled && reply) finish('\u2713 risposta ricevuta');
-      else if (!settled) fail('La risposta di Hermes Prime si è interrotta prima del completamento.');
+      // EOF without `done` proves only that the observer lost its stream.
+      // The server may still be working; partial tokens are not a final answer.
+      if (!settled) fail('Connessione interrotta [transport_cut]. Il lavoro sul server può continuare: ricarica la chat per recuperarne lo stato.');
     })
       .catch(function (e) {
         // Ramo trasporto: la fetch/stream SSE e' caduta a livello di rete. Diamo
         // comunque il motivo (perche') invece del generico "non riesco a contattare".
-        var partial = reply && reply.length;
         var why = (e && e.message) ? (' (' + e.message + ')') : '';
-        fail(partial
-          ? 'Connessione con Hermes Prime interrotta a meta risposta [transport_cut]' + why + '. Riprova.'
-          : 'Non riesco a contattare Hermes Prime (bridge) [transport_cut]' + why + '. Riprova tra poco.');
+        fail('Connessione con Hermes Prime interrotta [transport_cut]' + why + '. Il lavoro sul server può continuare: ricarica la chat per recuperarne lo stato.');
       });
   }
 

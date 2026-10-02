@@ -16,6 +16,9 @@
 ## [Unreleased]
 
 ### Fixed
+- Command Bridge keeps each user reply linked to its durable stream and serializes background briefs outside user turns; final answers replace interim Codex messages instead of concatenating them.
+- Prime keeps quiet SSE connections alive and completes/persists its turn after a browser disconnect; losing the observer no longer aborts the provider or its tools. EOF without a final event no longer reports a partial response as completed.
+- Command Bridge renders each delegation brief once when status polling races with history sync, preserves concurrent messages, and makes durable brief injection idempotent by brief ID.
 - Prime uses the explicit GPT-6.1 Sol/high profile, including its displayed model; worker profiles remain unchanged. Codex cache statistics render from both stored CLI usage and new responses, with turn totals distinguished from uncached input.
 - Prime's automatic history packet omits token/UI telemetry and bounds long history entries with indices for lossless on-demand retrieval. Stored conversation history is unchanged.
 - Command Bridge repository status now forces a fresh Git check on manual refresh and window return, shows pending file details, and keeps unrelated local branches separate from the current checkout's commit/push state. Temporary delegation prompts are ignored by Git.

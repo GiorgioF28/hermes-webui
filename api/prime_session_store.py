@@ -223,6 +223,7 @@ class PrimeSessionStore:
                 {
                     "role": "user",
                     "content": clean_message,
+                    "stream_id": stream_id,
                     "created_at": time.time(),
                     "attachments": attachments or [],
                 }
@@ -304,7 +305,7 @@ class PrimeSessionStore:
         with self._lock:
             return bool(self._buf_dirty and self._buf_stream_id)
 
-    def finish_turn(self, stream_id: str, reply: str, usage: dict | None = None) -> None:
+    def finish_turn(self, stream_id: str, reply: str, usage: dict | None = None) -> int | None:
         with self._lock:
             data = self._read_locked()
             pending = data.get("pending_turn")
@@ -312,11 +313,16 @@ class PrimeSessionStore:
             if pending and pending.get("stream_id") == stream_id:
                 final_reply = final_reply or str(pending.get("partial_output") or "")
                 data["pending_turn"] = None
+            reply_index = len(data["messages"]) if final_reply else None
+            owner_index = next((i for i, msg in enumerate(data["messages"])
+                                if msg.get("role") == "user" and msg.get("stream_id") == stream_id), None)
             if final_reply:
                 data["messages"].append(
                     {
                         "role": "assistant",
                         "content": final_reply,
+                        "stream_id": stream_id,
+                        "reply_to_index": owner_index,
                         "created_at": time.time(),
                         "usage": usage or {},
                     }
@@ -325,6 +331,7 @@ class PrimeSessionStore:
             self._write_locked(data)
             if self._buf_stream_id == stream_id:
                 self._reset_buffer_locked(None)
+            return reply_index
 
     def append_clarify_request(self, clarify_id: str, payload: dict[str, Any]) -> None:
         """Persist a Prime AskUserQuestion/clarify card in the visible transcript."""
@@ -454,6 +461,9 @@ class PrimeSessionStore:
                         {
                             "role": "assistant",
                             "content": partial,
+                            "stream_id": stream_id,
+                            "reply_to_index": next((i for i, msg in enumerate(data["messages"])
+                                                    if msg.get("role") == "user" and msg.get("stream_id") == stream_id), None),
                             "created_at": time.time(),
                             "interrupted": True,
                             "cancelled": True,
@@ -743,6 +753,13 @@ class PrimeSessionStore:
         """
         with self._lock:
             data = self._read_locked()
+            # A retry/replayed delivery owns the same durable brief. Keep its
+            # original index so delegation anchors and history cursors stay valid.
+            brief_id = (meta or {}).get("brief_id")
+            if brief_id:
+                for index, existing in enumerate(data["messages"]):
+                    if existing.get("role") == "assistant" and existing.get("brief_id") == brief_id:
+                        return index
             msg: dict = {
                 "role": "assistant",
                 "content": str(content or ""),

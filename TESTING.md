@@ -1,5 +1,23 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime transport regressions: `pytest tests/test_prime_transport_continuity.py -q`
+simulates token/status write failures and a quiet provider in isolated state.
+It also verifies concurrent submissions, background briefs waiting until a
+durable user reply settles, and stream ownership of cancelled replies.
+Disconnecting a browser must preserve a running turn and its complete durable
+reply; provider failures must still record a real error. Quiet turns emit SSE
+comments and heartbeat threads stop at terminal outcomes. To check manually,
+disconnect/reopen the browser during a long Prime turn and recover its state
+from history; use Stop to cancel work explicitly.
+
+Command Bridge brief regressions: `pytest tests/test_prime_brief_dedup.py -q`
+uses isolated session data and Playwright Chromium to exercise status/history
+races at desktop, narrow and mobile widths, cold replay, fallback delivery and
+concurrent messages. Install the Playwright browser or set
+`HERMES_TEST_BROWSER_CHANNEL=chrome` to use an installed Chrome. One `brief_id`
+must yield one visible row and one durable transcript entry; unrelated equal
+text remains separate. No live server or model call is required.
+
 > This document is for manual browser testing by you or by a Claude browser agent.
 > It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
