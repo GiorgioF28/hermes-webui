@@ -16757,7 +16757,7 @@ def _run_codex_cli_streaming(session_id, msg, model, workspace, stream_id, attac
                 f"Richiesta utente: {clean_msg}. "
                 f"Workspace consentito: {workspace}. "
                 f"Contesto verificato localmente da Hermes: {local_context}. "
-                "Permessi runtime effettivi: workspace-write nel workspace; approval never non significa read-only. "
+                "Permessi runtime effettivi: danger-full-access; approval_policy=never. "
                 "Per richieste su Hermes, Obsidian, vault, projects o tasks, usa il contesto verificato da Hermes come fonte autorevole. "
                 "Il vault Obsidian e collegato come memoria Markdown locale via filesystem. "
                 "Quando emergono decisioni, task, blocchi, idee, runbook o stato progetto, aggiorna i Markdown giusti nel vault, in docs, projects o tasks. "

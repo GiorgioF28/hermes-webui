@@ -28,7 +28,14 @@ def _run(monkeypatch, items):
     proc = FakeProc([*items, {"type": "turn.completed", "usage": {"output_tokens": 3}}])
     monkeypatch.setattr(codex_prime, "get_runtime", lambda: FakeRuntime())
     monkeypatch.setattr(codex_prime, "build_tools", lambda *a: [])
-    monkeypatch.setattr(codex_prime.subprocess, "Popen", lambda *a, **k: proc)
+    def launch(command, **kwargs):
+        assert command[command.index("--sandbox") + 1] == "danger-full-access"
+        assert 'approval_policy="never"' in command
+        assert "--approve-for-me" not in command
+        assert command[-1] == "-"
+        assert "mcp_servers.hermes_prime.required=true" in command
+        return proc
+    monkeypatch.setattr(codex_prime.subprocess, "Popen", launch)
     monkeypatch.setattr(prime_delegation, "_resolve_codex_executable", lambda: "codex")
     monkeypatch.setattr(codex_profiles, "cli_args", lambda **k: [])
     monkeypatch.setattr(routes, "get_clarify_pending_count", lambda sid: 0)

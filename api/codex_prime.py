@@ -196,7 +196,9 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
     env = os.environ.copy()
     env["HERMES_PRIME_TOOL_TOKEN"] = token
     from api.codex_profiles import cli_args
-    command = [_resolve_codex_executable(), "exec", *cli_args(chief=True), "--json", "--approve-for-me", "--skip-git-repo-check", "-C", str(workspace),
+    command = [_resolve_codex_executable(), "exec", *cli_args(chief=True), "--json",
+               "--sandbox", "danger-full-access", "-c", 'approval_policy="never"',
+               "--skip-git-repo-check", "-C", str(workspace),
                "-c", "mcp_servers.hermes_prime.url=" + json.dumps(runtime.url),
                "-c", 'mcp_servers.hermes_prime.bearer_token_env_var="HERMES_PRIME_TOOL_TOKEN"',
                "-c", "mcp_servers.hermes_prime.required=true",

@@ -1,5 +1,17 @@
 # Hermes Web UI: Browser Testing Plan
 
+Codex Full Access regression: `pytest tests/test_prime_codex_item_phases.py
+tests/test_codex_prompt_stdin.py tests/test_codex_session_resume.py -q` checks
+the actual Prime process launch and both ordinary CLI modes. Prime must use
+`--sandbox danger-full-access` and `approval_policy="never"`, without
+`--approve-for-me`, while retaining stdin prompts and the required Hermes MCP.
+The optional `HERMES_CODEX_TOOL_SMOKE=1` test in `test_codex_prime_tools.py`
+launches a real CLI turn against a temporary read-only probe tool.
+
+Delegation timeline regression: `pytest tests/test_prime_delegation_timeline.py -q`
+checks persisted stream/prose anchors and announcement/card/final ordering at
+desktop, narrow and mobile widths using isolated browser fixtures.
+
 Command Bridge mobile layout: `pytest tests/test_command_bridge_mobile_layout.py -q`
 uses an isolated browser fixture, without a server or real user state. Set
 `HERMES_TEST_BROWSER_CHANNEL=chrome` for installed Chrome and

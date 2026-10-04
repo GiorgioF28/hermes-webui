@@ -30,6 +30,8 @@ does not await the intentionally rejected function itself.
 | Draft | | [Expanded](draft-expanded.png), [collapsed](draft-collapsed.png) |
 | Fullscreen | | [Native](fullscreen-native.png), [fallback](fullscreen-fallback.png) |
 
-This is an isolated branch commit, not a live deployment or integration into the
-operational checkout. A physical smartphone check with the real keyboard and
-navigation remains necessary before claiming live validation.
+The original verification was performed on an isolated branch. The operator
+requested integration and live activation on 2026-10-04; see
+[integration notes](../../deploy-20261004.md) and the deployment receipt for
+the actual activation outcome. A physical smartphone check with the real
+keyboard and navigation remains necessary before claiming device validation.
