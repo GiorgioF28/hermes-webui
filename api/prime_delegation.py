@@ -1416,7 +1416,8 @@ def _codex_exec_blocking(task: str, workspace: str, timeout: float | None = None
     exe = _resolve_codex_executable()
     cmd = [
         exe, "exec", *cli_args(),
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--sandbox", "danger-full-access",
+        "-c", 'approval_policy="never"',
         "-C", str(workspace),
         "-",  # prompt da stdin: nessun parsing di cmd.exe sul testo del task
     ]

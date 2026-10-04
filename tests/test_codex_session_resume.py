@@ -20,7 +20,8 @@ def test_build_codex_cmd_first_turn_full_agent():
     cmd = routes._build_codex_cmd(workspace="/ws", full_agent=True, resume_id=None, output_path="/o.txt")
     assert cmd[:2] == ["codex.cmd", "exec"]
     assert "resume" not in cmd
-    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
+    assert cmd[cmd.index("-c") + 1] == 'approval_policy="never"'
     assert "--json" in cmd
     assert cmd[-2:] == ["-o", "/o.txt"]
 
@@ -28,11 +29,13 @@ def test_build_codex_cmd_first_turn_full_agent():
 def test_build_codex_cmd_resume_turn_full_agent():
     cmd = routes._build_codex_cmd(workspace="/ws", full_agent=True, resume_id="abc-123", output_path="/o.txt")
     assert "resume" in cmd and "abc-123" in cmd
-    # resume subcommand comes right after exec
-    assert cmd[1:4] == ["exec", "resume", "abc-123"]
+    # Full Access options precede the resume subcommand
+    assert cmd[cmd.index("resume") + 1] == "abc-123"
+    assert cmd.index("--sandbox") < cmd.index("resume")
 
 
-def test_build_codex_cmd_non_full_agent_uses_workspace_write():
+def test_build_codex_cmd_non_full_agent_uses_full_access():
     cmd = routes._build_codex_cmd(workspace="/ws", full_agent=False, resume_id=None, output_path="/o.txt")
-    assert "-s" in cmd and "workspace-write" in cmd
-    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert "-s" not in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
+    assert cmd[cmd.index("-c") + 1] == 'approval_policy="never"'
