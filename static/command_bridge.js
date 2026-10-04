@@ -676,6 +676,52 @@
 '.cb-brief-why{display:block;margin-top:1px;color:var(--cb-muted);font-style:italic;}',
 '.cb-brief-when{font-family:var(--cb-mono);font-size:8px;color:var(--cb-faint);white-space:nowrap;}',
 '.cb-brief-empty,.cb-brief-more{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);padding:3px 0;}',
+/* Conversation-first mobile layout and fullscreen; the scene renderer is unchanged. */
+'.cb-chat-input{flex:0 0 auto;flex-wrap:wrap;gap:6px;padding:8px 12px;}',
+'.cb-chat-input textarea{flex-basis:100%;font-size:16px;max-height:none;}',
+'.cb-chat-input .cb-actions{position:static;display:flex;flex-direction:row;width:100%;gap:4px;}',
+'.cb-actions .cb-send{margin-left:auto;}',
+'.cb-chat-input .cb-live-usage{margin:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;}',
+'.cb-fullscreen{background:transparent;border:0;color:var(--cb-text);min-width:44px;height:44px;cursor:pointer;flex:0 0 auto;}',
+'.cb-fullscreen:focus-visible,.cb-conversation-peek:focus-visible{outline:2px solid var(--cb-accent);outline-offset:-2px;}',
+'.cb-conversation-peek{flex:0 0 44px;min-height:44px;text-align:left;padding:8px 12px;border:0;border-top:1px solid var(--cb-line);background:var(--cb-bg2);color:var(--cb-text);font:12px var(--cb-sans);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;}',
+'.cb-conversation-peek[hidden],.cb-todos[hidden]{display:none;}',
+'.cb-chat[data-draft="collapsed"] textarea{white-space:nowrap;overflow:hidden;}',
+'.cb-root.cb-chat-fullscreen{position:fixed;inset:0;top:var(--cb-viewport-top,0px);height:var(--cb-viewport-height,100dvh);z-index:1000;}',
+'.cb-root.cb-chat-fullscreen .cb-chat{inset:0;width:100%;height:100%;border:0;border-radius:0;box-shadow:none;backdrop-filter:none;background:rgba(6,7,11,.65);}',
+'.cb-root.cb-chat-fullscreen .cb-hero{height:100%;min-height:100%;}',
+'.cb-root.cb-chat-fullscreen .cb-right,.cb-root.cb-chat-fullscreen .cb-projects,.cb-root.cb-chat-fullscreen .cb-stage-toggle,.cb-root.cb-chat-fullscreen .cb-petal-label{display:none;}',
+'.cb-root.cb-chat-fullscreen .cb-petals{inset:0;}',
+'.cb-root.cb-chat-fullscreen .cb-stage,.cb-root.cb-chat-fullscreen .cb-petals,.cb-root.cb-chat-fullscreen .cb-petals *{pointer-events:none!important;}',
+'.cb-root.cb-chat-fullscreen .cb-chat-log{min-height:56px;}',
+'.cb-root.cb-chat-fullscreen .cb-chat-input{padding-bottom:max(8px,env(safe-area-inset-bottom));}',
+'@media(max-width:680px){',
+'  .cb-root{height:var(--cb-viewport-height,100%);}',
+'  .cb-hero{height:100%;min-height:100%;}',
+'  .cb-hero .cb-chat{inset:0;width:100%;height:100%;border:0;border-radius:0;box-shadow:none;backdrop-filter:none;background:rgba(6,7,11,.65);}',
+'  .cb-chat-head{padding:4px 8px;gap:6px;flex:0 0 auto;}',
+'  .cb-chat-name{font-size:11px;letter-spacing:.06em;}',
+'  .cb-chat-role{font-size:9px;}',
+'  .cb-brainctl{border:0;max-width:40%;}',
+'  .cb-brainsel{font-size:10px;min-height:44px;max-width:100%;letter-spacing:0;}',
+'  .cb-voicetoggle{width:44px;height:44px;border:0;}',
+'  .cb-chat-log{padding:12px;gap:16px;min-height:56px;overscroll-behavior:contain;}',
+'  .cb-msg{font-size:13px;line-height:1.5;max-width:100%;}',
+'  .cb-msg.cb-from-user{max-width:90%;text-align:left;}',
+'  .cb-msg.cb-from-user .cb-bubble{background:rgba(255,255,255,.06);padding:8px 10px;border-radius:8px;}',
+'  .cb-msg.cb-from-prime{align-self:stretch;}',
+'  .cb-deleg,.cb-tool-card{max-width:100%;border:0;border-left:2px solid var(--cb-accent);border-radius:0;box-shadow:none;background:transparent;padding:6px 8px;}',
+'  .cb-mic,.cb-attach,.cb-send,.cb-stop{width:44px;height:44px;border:0;box-shadow:none;backdrop-filter:none;background:transparent;}',
+'  .cb-send{background:var(--cb-accent);}',
+'  .cb-todos{max-height:56px;flex:0 0 auto;padding:4px 12px;}',
+'  .cb-attbar{max-height:64px;overflow:auto;flex:0 0 auto;}',
+'  .cb-chat-input{padding-bottom:max(8px,env(safe-area-inset-bottom));}',
+'  .cb-chat-input textarea{border:0;background:transparent;border-radius:0;padding:10px 2px;}',
+'  .cb-chat-input textarea:focus{box-shadow:none;}',
+'  .cb-hero .cb-petals{inset:0;}',
+'  .cb-stage,.cb-petals,.cb-petals *{pointer-events:none!important;}',
+'  .cb-stage-toggle,.cb-petal-label{display:none;}',
+'}',
 ''
     ].join('\n');
     var s = el('style'); s.id = 'cb-styles'; s.textContent = css;
@@ -758,6 +804,124 @@
     head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   }
 
+  // Local presentation state only: never replace the draft or mutate the transcript.
+  function wireChatLayout(root) {
+    var chat = $('cbChat'), input = $('cbInput'), form = $('cbForm');
+    var log = $('cbLog'), peek = $('cbConversationPeek'), fullscreen = $('cbFullscreen');
+    var actions = $('cbActions'), petals = $('cbPetals');
+    if (!chat || !input || !form || !log || !peek || !fullscreen) return;
+    if (actions) form.appendChild(actions);
+    var mobile = window.matchMedia('(max-width:680px)');
+    var collapsed = false, savedSelection = null, nativeActive = false;
+    var viewport = window.visualViewport;
+
+    function backgroundMode() {
+      if (petals) petals.inert = mobile.matches || root.classList.contains('cb-chat-fullscreen');
+    }
+    function autoGrow() {
+      var atBottom = nearBottom(log);
+      if (!input.value) { collapsed = false; savedSelection = null; }
+      chat.dataset.draft = collapsed ? 'collapsed' : 'expanded';
+      input.style.height = '44px';
+      // Measure wrapped content, including when the saved draft is folded.
+      if (collapsed) chat.dataset.draft = 'expanded';
+      var contentHeight = input.scrollHeight;
+      peek.hidden = contentHeight <= 44;
+      var messages = log.querySelectorAll('.cb-bubble');
+      var last = messages.length ? messages[messages.length - 1].textContent : '';
+      peek.textContent = 'Torna alla chat' + (last ? ' · ' + last.replace(/\s+/g, ' ').slice(0, 160) : '');
+      chat.dataset.draft = collapsed ? 'collapsed' : 'expanded';
+      // Leave the transcript and its one-line shortcut visible even with the keyboard open.
+      var occupied = 0;
+      Array.prototype.forEach.call(chat.children, function (node) {
+        if (node !== form && node !== log) occupied += node.getBoundingClientRect().height;
+      });
+      var chrome = form.getBoundingClientRect().height - 44;
+      var limit = Math.max(44, chat.clientHeight - occupied - chrome - 56);
+      input.style.height = (collapsed ? 44 : Math.min(contentHeight, limit)) + 'px';
+      if (collapsed) { input.scrollTop = 0; input.scrollLeft = 0; }
+      if (atBottom) log.scrollTop = log.scrollHeight;
+    }
+    function collapseDraft() {
+      if (peek.hidden || collapsed) return;
+      savedSelection = [input.selectionStart, input.selectionEnd, input.selectionDirection];
+      collapsed = true;
+      input.blur();
+      autoGrow();
+    }
+    function expandDraft() {
+      if (!collapsed) return;
+      collapsed = false;
+      autoGrow();
+      if (savedSelection) input.setSelectionRange(savedSelection[0], savedSelection[1], savedSelection[2]);
+    }
+    function resizeLayout() {
+      var height = viewport ? viewport.height : window.innerHeight;
+      var top = viewport ? viewport.offsetTop : 0;
+      if (!root.classList.contains('cb-chat-fullscreen')) {
+        var host = $('mainBridge');
+        height -= Math.max(0, (host ? host.getBoundingClientRect().top : 0) - top);
+        top = 0;
+      }
+      root.style.setProperty('--cb-viewport-height', Math.max(180, height) + 'px');
+      root.style.setProperty('--cb-viewport-top', top + 'px');
+      backgroundMode();
+      autoGrow();
+    }
+    function setFullscreen(on) {
+      root.classList.toggle('cb-chat-fullscreen', on);
+      if (on) $('cbHero').classList.remove('cb-collapsed');
+      fullscreen.setAttribute('aria-pressed', on ? 'true' : 'false');
+      var label = on ? 'Esci dallo schermo intero' : 'Espandi chat a schermo intero';
+      fullscreen.setAttribute('aria-label', label);
+      fullscreen.title = label;
+      resizeLayout();
+    }
+    fullscreen.addEventListener('click', function () {
+      var on = !root.classList.contains('cb-chat-fullscreen');
+      setFullscreen(on);
+      if (on && root.requestFullscreen) {
+        try {
+          Promise.resolve(root.requestFullscreen()).then(function () {
+            if (!root.classList.contains('cb-chat-fullscreen') && document.fullscreenElement === root) {
+              return document.exitFullscreen();
+            }
+          }).catch(function () { /* CSS fullscreen remains available on mobile. */ });
+        } catch (e) { /* Browser denied native fullscreen: keep the internal view. */ }
+      } else if (!on && document.fullscreenElement === root && document.exitFullscreen) {
+        Promise.resolve(document.exitFullscreen()).catch(function () {});
+      }
+    });
+    document.addEventListener('fullscreenchange', function () {
+      if (document.fullscreenElement === root) nativeActive = true;
+      else if (nativeActive) { nativeActive = false; setFullscreen(false); }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && root.classList.contains('cb-chat-fullscreen')) {
+        setFullscreen(false);
+        if (document.fullscreenElement === root && document.exitFullscreen) {
+          Promise.resolve(document.exitFullscreen()).catch(function () {});
+        }
+      }
+    });
+    peek.addEventListener('click', function () { collapseDraft(); log.focus({ preventScroll: true }); });
+    log.tabIndex = -1;
+    log.addEventListener('pointerdown', collapseDraft);
+    input.addEventListener('focus', expandDraft);
+    input.addEventListener('input', function () { collapsed = false; autoGrow(); });
+    window.addEventListener('resize', resizeLayout);
+    if (mobile.addEventListener) mobile.addEventListener('change', resizeLayout);
+    if (viewport) {
+      viewport.addEventListener('resize', resizeLayout);
+      viewport.addEventListener('scroll', resizeLayout);
+    }
+    new ResizeObserver(autoGrow).observe(chat);
+    // The shortcut follows incoming text while typing, without changing scroll ownership.
+    new MutationObserver(function () { if (!peek.hidden) autoGrow(); }).observe(log, { childList: true, subtree: true, characterData: true });
+    window.__cbAutoGrow = autoGrow;
+    resizeLayout();
+  }
+
   function build() {
     var host = $('mainBridge');
     if (!host) return false;
@@ -799,6 +963,7 @@
             '</div>' +
             '<button type="button" class="cb-voicetoggle cb-on" id="cbVoice" aria-label="Voce on/off" title="Voce on/off">' +
               '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg></button>' +
+            '<button type="button" class="cb-fullscreen" id="cbFullscreen" aria-label="Espandi chat a schermo intero" aria-pressed="false" title="Espandi chat a schermo intero">⛶</button>' +
           '</div>' +
           '<div class="cb-chat-log" id="cbLog"></div>' +
           '<div class="cb-todos" id="cbTodos" hidden>' +
@@ -806,6 +971,7 @@
             '<div id="cbTodoList"></div>' +
           '</div>' +
           '<div class="cb-attbar" id="cbAtt"></div>' +
+          '<button type="button" class="cb-conversation-peek" id="cbConversationPeek" aria-controls="cbLog" hidden>Torna alla chat</button>' +
           '<form class="cb-chat-input" id="cbForm" autocomplete="off">' +
             '<textarea id="cbInput" rows="1" placeholder="Parla con Hermes Prime…" aria-label="Messaggio a Hermes Prime"></textarea>' +
             '<span class="cb-live-usage" id="cbLiveUsage" hidden></span>' +
@@ -896,19 +1062,14 @@
     if (dailyAdd) dailyAdd.addEventListener('submit', addDailyAdhoc);
     var form = $('cbForm');
     if (form) form.addEventListener('submit', onPrimeSubmit);
+    wireChatLayout(root);
     // Textarea che cresce mentre scrivi e torna piccola all'invio; Invio manda,
     // Shift+Invio va a capo. Risolve anche il cursore che tornava all'inizio.
     var ta = $('cbInput');
     if (ta) {
-      var autoGrow = function () {
-        ta.style.height = 'auto';
-        ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.46)) + 'px';
-      };
-      ta.addEventListener('input', autoGrow);
       ta.addEventListener('keydown', function (ev) {
         if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); onPrimeSubmit(ev); }
       });
-      window.__cbAutoGrow = autoGrow;
     }
     var mic = $('cbMic');
     if (mic) mic.addEventListener('click', toggleListen);
