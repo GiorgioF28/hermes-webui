@@ -34,6 +34,8 @@ _DELEGATION_FIELDS = (
     "started_at",
     "finished_at",
     "anchor_message_index",
+    "anchor_stream_id",
+    "anchor_reply_prefix",
     "brief_status",
     "brief_message_index",
 )

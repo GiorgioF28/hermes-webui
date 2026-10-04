@@ -323,6 +323,8 @@ def bg_task_to_canonical(t: dict) -> dict[str, Any]:
         ui={
             "anchor_session_id": str(t.get("anchor_session_id") or t.get("session_id") or "hermes-prime"),
             "anchor_message_index": t.get("anchor_message_index"),
+            "anchor_stream_id": t.get("anchor_stream_id"),
+            "anchor_reply_prefix": t.get("anchor_reply_prefix"),
             "anchor_created_at": t.get("anchor_created_at"),
             "summary": str(t.get("summary") or _ui_summary_from_legacy_task(t)),
         },
