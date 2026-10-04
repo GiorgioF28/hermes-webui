@@ -1,5 +1,14 @@
 # Hermes Web UI: Browser Testing Plan
 
+Command Bridge mobile layout: `pytest tests/test_command_bridge_mobile_layout.py -q`
+uses an isolated browser fixture, without a server or real user state. Set
+`HERMES_TEST_BROWSER_CHANNEL=chrome` for installed Chrome and
+`HERMES_CAPTURE_BRIDGE_UI=1` to capture before/after and interaction evidence
+under `docs/ui-ux/bridge-mobile-chat/`. Verify fullscreen fallback, draft value
+and selection after folding, footer controls and a visible conversation strip
+at keyboard-sized viewports. Physical smartphone keyboard/navigation QA remains
+separate from these browser fixtures.
+
 Prime transport regressions: `pytest tests/test_prime_transport_continuity.py -q`
 simulates token/status write failures and a quiet provider in isolated state.
 It also verifies concurrent submissions, background briefs waiting until a
