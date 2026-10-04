@@ -11147,6 +11147,8 @@ def _handle_bridge_tasks(handler, parsed):
                 "started": rec.get("started_at") or rec.get("created_at"),
                 "finished": rec.get("finished_at"),
                 "anchor_message_index": (rec.get("ui") or {}).get("anchor_message_index"),
+                "anchor_stream_id": (rec.get("ui") or {}).get("anchor_stream_id"),
+                "anchor_reply_prefix": (rec.get("ui") or {}).get("anchor_reply_prefix"),
                 "brief_status": brief_status,
             })
             if brief_status == "delivered":
@@ -11167,6 +11169,8 @@ def _handle_bridge_tasks(handler, parsed):
                 "finished": rec.get("finished_at"),
                 "anchor_session_id": (rec.get("ui") or {}).get("anchor_session_id") or rec.get("session_id") or "hermes-prime",
                 "anchor_message_index": (rec.get("ui") or {}).get("anchor_message_index"),
+                "anchor_stream_id": (rec.get("ui") or {}).get("anchor_stream_id"),
+                "anchor_reply_prefix": (rec.get("ui") or {}).get("anchor_reply_prefix"),
                 "anchor_created_at": (rec.get("ui") or {}).get("anchor_created_at"),
                 "summary": (rec.get("ui") or {}).get("summary") or "",
                 "librarian_status": lib.get("status", ""),
@@ -11577,6 +11581,8 @@ def _sync_prime_delegation_records(session_id: str, tasks: list[dict]) -> None:
                 "started_at": task.get("started") or task.get("started_at"),
                 "finished_at": task.get("finished") or task.get("finished_at"),
                 "anchor_message_index": task.get("anchor_message_index"),
+                "anchor_stream_id": task.get("anchor_stream_id"),
+                "anchor_reply_prefix": task.get("anchor_reply_prefix"),
                 "brief_status": str(task.get("brief_status") or ""),
             }))
         # One read + at most one write for the whole batch: per-record upserts

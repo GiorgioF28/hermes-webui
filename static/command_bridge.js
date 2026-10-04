@@ -938,7 +938,7 @@
   var voiceOn = true, userEngaged = false, _ctx = null, _an = null, _raf = null, _cur = null, _rec = null, _ttsActive = false;
   var _listening = false, _micTimer = null;
   var _micStream = null, _micRec = null, _micVadRaf = null, _micChunks = [], _micBusy = false;
-  var _primeStreaming = false, _primeStreamId = null, _primeLiveTimer = null;
+  var _primeStreaming = false, _primeStreamId = null, _primeLiveTimer = null, _primeLiveGeneration = 0;
 
   // Id modello -> nome umano per l'header (es. claude-fable-5-1 -> "Fable 5.1").
   // I pattern sono prefissi: la voce piu' specifica deve precedere quella
@@ -1077,9 +1077,11 @@
 
   function startPrimeLivePolling(node) {
     if (_primeLiveTimer) clearInterval(_primeLiveTimer);
+    var generation = ++_primeLiveGeneration;
     var lastText = node ? (node.textContent || '') : '';
     var tick = function () {
       api('/api/bridge/prime/live').then(function (data) {
+        if (generation !== _primeLiveGeneration) return;
         var pending = data && data.pending_turn;
         if (!data || !data.active || !pending) {
           if (_primeLiveTimer) clearInterval(_primeLiveTimer);
@@ -1089,11 +1091,19 @@
         }
         setPrimeStreaming(true, pending.stream_id || data.stream_id || null);
         var partial = String(pending.partial_output || '');
+        var replyNode = node && node.closest ? node.closest('.cb-msg') : null;
+        if (replyNode && replyNode.getAttribute('data-prime-settled') === 'true') return;
+        if (replyNode) {
+          replyNode.setAttribute('data-cb-stream-id', pending.stream_id || '');
+          replyNode.setAttribute('data-cb-role', 'assistant');
+        }
         if (node && partial && partial !== lastText) {
           lastText = partial;
-          node.textContent = partial;
+          if (replyNode) updatePrimeLiveText(replyNode, partial);
+          else node.textContent = partial;
           node.classList.add('cb-recovered');
         }
+        repositionPrimeTaskCards();
       }).catch(function () {});
     };
     tick();
@@ -1335,15 +1345,80 @@
   try { setInterval(tickTaskTimers, 1000); } catch (_e) {}
   function placeTaskCard(card, t) {
     var log = $('cbLog'); if (!log || !card) return;
-    var anchorIdx = Number(t && t.anchor_message_index);
+    var rawIndex = t && t.anchor_message_index;
+    var anchorIdx = rawIndex == null ? NaN : Number(rawIndex);
     var anchor = Number.isFinite(anchorIdx) ? log.querySelector('[data-cb-msg-index="' + anchorIdx + '"]') : null;
     if (anchor && anchor.parentNode === log) {
-      var next = anchor.nextSibling;
-      while (next && next.classList && next.classList.contains('cb-deleg') && next.getAttribute('data-anchor-index') === String(anchorIdx)) next = next.nextSibling;
-      log.insertBefore(card, next);
+      var streamId = String(t.anchor_stream_id || anchor.getAttribute('data-cb-stream-id') || '');
+      var replies = log.querySelectorAll('[data-cb-role="assistant"]');
+      var replyNode = null;
+      for (var i = 0; i < replies.length; i++) {
+        if ((streamId && replies[i].getAttribute('data-cb-stream-id') === streamId) ||
+            replies[i].getAttribute('data-cb-reply-to-index') === String(anchorIdx)) {
+          replyNode = replies[i]; break;
+        }
+      }
+      if (replyNode) {
+        card.hidden = false;
+        card._cbStarted = Number(t.started || 0);
+        var prefix = String(t.anchor_reply_prefix || '');
+        var progress = card._cbProgress;
+        if (prefix) {
+          if (!progress) {
+            progress = el('div', 'cb-msg cb-from-prime cb-deleg-progress');
+            progress.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble"></div>';
+            progress.setAttribute('data-progress-task-id', t.id);
+            card._cbProgress = progress;
+          }
+          // Prefixes are cumulative. Only the new prose belongs before this card.
+          var previous = '';
+          var siblings = log.querySelectorAll('.cb-deleg[data-anchor-index]');
+          for (var j = 0; j < siblings.length; j++) {
+            var p = String(siblings[j]._cbPrefix || '');
+            if (siblings[j] !== card && siblings[j].getAttribute('data-anchor-index') === String(anchorIdx) &&
+                (p.length < prefix.length || (p === prefix &&
+                  (siblings[j]._cbStarted < card._cbStarted ||
+                   (siblings[j]._cbStarted === card._cbStarted && String(siblings[j].getAttribute('data-task-id')).localeCompare(String(t.id), undefined, {numeric:true}) < 0)))) &&
+                prefix.indexOf(p) === 0 && p.length > previous.length) previous = p;
+          }
+          progress.hidden = prefix === previous;
+          renderRich(progress.querySelector('.cb-bubble'), prefix.slice(previous.length));
+          log.insertBefore(progress, replyNode);
+          card._cbPrefix = prefix;
+          var oldPrefix = replyNode.getAttribute('data-cb-delegated-prefix') || '';
+          if (prefix.length >= oldPrefix.length) replyNode.setAttribute('data-cb-delegated-prefix', prefix);
+          log.insertBefore(card, replyNode);
+          updatePrimeLiveText(replyNode, replyNode.getAttribute('data-cb-live-text'));
+        } else {
+          // Older cards have no prose boundary: keep them after their reply.
+          var next = replyNode.nextSibling;
+          while (next && next.classList && next.classList.contains('cb-deleg') && next.getAttribute('data-anchor-index') === String(anchorIdx)) next = next.nextSibling;
+          log.insertBefore(card, next);
+        }
+      } else {
+        // The owner reply may arrive on the next poll. Never show the card above it.
+        card.hidden = true;
+        if (card.parentNode !== log) log.appendChild(card);
+      }
     } else if (card.parentNode !== log) {
       log.appendChild(card);
     }
+  }
+  function updatePrimeLiveText(node, text) {
+    if (!node || text == null || node.getAttribute('data-prime-settled') === 'true') return;
+    text = String(text);
+    node.setAttribute('data-cb-live-text', text);
+    var prefix = node.getAttribute('data-cb-delegated-prefix') || '';
+    var bubble = node.querySelector('.cb-bubble');
+    if (bubble) bubble.textContent = prefix && text.indexOf(prefix) === 0 ? text.slice(prefix.length) : text;
+  }
+  function repositionPrimeTaskCards() {
+    Object.keys(_cbTasks).sort(function (a, b) {
+      return Number((_cbTasks[a].task || {}).started || 0) - Number((_cbTasks[b].task || {}).started || 0) || a.localeCompare(b, undefined, {numeric:true});
+    }).forEach(function (id) {
+      var entry = _cbTasks[id];
+      if (entry && entry.el && entry.task) placeTaskCard(entry.el, entry.task);
+    });
   }
   // freccetta: espande/riduce il testo della delega dentro la card
   function wireDelegArrow(card) {
@@ -1384,6 +1459,8 @@
       prev.el.innerHTML = html;
       prev.el.className = 'cb-deleg ' + taskStateClass(t.status) + (prev.open ? ' cb-deleg-open' : '');
       wireDelegArrow(prev.el);
+      if (t.anchor_message_index != null) prev.el.setAttribute('data-anchor-index', String(t.anchor_message_index));
+      prev.task = t;
       placeTaskCard(prev.el, t);
     }
     else {
@@ -1392,13 +1469,14 @@
       wireDelegArrow(c);
       if (t.anchor_message_index != null) c.setAttribute('data-anchor-index', String(t.anchor_message_index));
       var _sb = nearBottom(log); placeTaskCard(c, t); if (_sb) log.scrollTop = log.scrollHeight;
-      _cbTasks[t.id] = { el: c, status: t.status, briefed: !!(opts && opts.briefed) };
+      _cbTasks[t.id] = { el: c, task: t, status: t.status, briefed: !!(opts && opts.briefed) };
       // light up the matching planet in the star system
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
     // The delegation card already shows its outcome; a separate system row
     // would interrupt an unrelated active reply.
     _cbTasks[t.id].status = t.status;
+    repositionPrimeTaskCards();
     // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
     // Le card idratate dallo storico non rilanciano MAI il brief: il testo e'
     // gia' nel transcript (zero regressione su iss-prime-brief-replay-dopo-riavvio).
@@ -2209,6 +2287,10 @@
       node.setAttribute('data-cb-stream-id', String(m.stream_id));
       node.setAttribute('data-cb-role', m.role);
     }
+    if (node && m.role === 'assistant') {
+      node.setAttribute('data-prime-settled', 'true');
+      if (m.reply_to_index != null) node.setAttribute('data-cb-reply-to-index', String(m.reply_to_index));
+    }
     if (node && briefId && m.task_id) {
       var briefWho = node.querySelector('.cb-who');
       if (briefWho) briefWho.textContent = 'hermes prime · esito ' + m.task_id;
@@ -2253,7 +2335,9 @@
       summary: d.summary || '',
       started: d.started_at,
       finished: d.finished_at,
-      anchor_message_index: d.anchor_message_index
+      anchor_message_index: d.anchor_message_index,
+      anchor_stream_id: d.anchor_stream_id,
+      anchor_reply_prefix: d.anchor_reply_prefix
     };
   }
   // Card delega durevoli (Bug A): dopo un reload le card non esistono piu' in
@@ -2291,18 +2375,23 @@
     if (!Number.isFinite(total)) total = offset + messages.length;
     if (total > _cbRenderedCount) _cbRenderedCount = total;
     hydrateDelegationCards(data.delegations);
+    repositionPrimeTaskCards();
     var rev = Number(data.delegations_rev);
     if (Number.isFinite(rev)) _cbDelegationsRev = rev;
     if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
     pollTasks();
     var pending = data.pending_turn;
-    if (pending && pending.partial_output) {
+    if (pending && pending.stream_id) {
       var node = primeSay('prime', pending.partial_output || '', null, true);
       if (node) node.classList.add('cb-recovered');
       if (node) {
         // Il turno recuperato non e' di questa scheda: trattalo come remoto,
         // cosi' a fine turno viene sostituito dal messaggio definitivo.
         _cbRemoteTurnNode = node;
+        node.setAttribute('data-cb-stream-id', pending.stream_id);
+        node.setAttribute('data-cb-role', 'assistant');
+        updatePrimeLiveText(node, pending.partial_output || '');
+        repositionPrimeTaskCards();
         startPrimeLivePolling(node.querySelector('.cb-bubble') || node);
       }
     }
@@ -2350,8 +2439,9 @@
   }
   function clearRemotePrimeTurn() {
     if (!_cbRemoteTurnNode) return;
-    if (_cbRemoteTurnNode.parentNode) _cbRemoteTurnNode.parentNode.removeChild(_cbRemoteTurnNode);
+    if (!_cbRemoteTurnNode.hasAttribute('data-cb-msg-index') && _cbRemoteTurnNode.parentNode) _cbRemoteTurnNode.parentNode.removeChild(_cbRemoteTurnNode);
     _cbRemoteTurnNode = null;
+    _primeLiveGeneration += 1;
     // Il poller live puntava al nodo appena rimosso: fermalo subito invece di
     // lasciarlo battere su un nodo staccato fino al suo prossimo tick.
     if (_primeLiveTimer) { clearInterval(_primeLiveTimer); _primeLiveTimer = null; }
@@ -2362,7 +2452,7 @@
     if (!live || typeof live !== 'object') return;
     var justFinishedOwn = (Date.now() - _cbOwnTurnEndedAt) < 5000;
     if (live.streaming && !ownPrimeTurnInFlight() && !justFinishedOwn) showRemotePrimeTurn();
-    else if (!live.streaming) clearRemotePrimeTurn();
+    else if (!live.streaming && _cbRemoteTurnNode && _cbRemoteTurnNode.hasAttribute('data-cb-msg-index')) clearRemotePrimeTurn();
     syncPrimeTranscriptFromServer(live.message_count, live.delegations_rev);
   }
   function syncPrimeTranscriptFromServer(serverCount, serverRev) {
@@ -2389,10 +2479,13 @@
       if (!Number.isFinite(total)) total = offset + (data.messages || []).length;
       if (total > _cbRenderedCount) _cbRenderedCount = total;
       hydrateDelegationCards(data.delegations);
+      repositionPrimeTaskCards();
       var newRev = Number(data.delegations_rev);
       if (Number.isFinite(newRev)) _cbDelegationsRev = newRev;
       // La bolla del turno remoto resta in fondo, sotto i messaggi appena arrivati.
-      if (_cbRemoteTurnNode && _cbRemoteTurnNode.parentNode && log) log.appendChild(_cbRemoteTurnNode);
+      if (_cbRemoteTurnNode && _cbRemoteTurnNode.hasAttribute('data-cb-msg-index')) clearRemotePrimeTurn();
+      else if (_cbRemoteTurnNode && _cbRemoteTurnNode.parentNode && log) log.appendChild(_cbRemoteTurnNode);
+      repositionPrimeTaskCards();
       if (sb && log) log.scrollTop = log.scrollHeight;
     }).catch(function () {}).then(function () { _cbSyncBusy = false; });
   }
@@ -2590,7 +2683,7 @@
       reply += text;
       if (bubble) {
         bubble.removeAttribute('style');
-        bubble.textContent = reply;
+        updatePrimeLiveText(ph, reply);
       }
       turnUi.updateStatus('sta scrivendo\u2026', true);
       flushSpokenSentences(reply, speech, false); // legge le frasi gia' complete
@@ -2624,6 +2717,8 @@
           if (userNode) { userNode.setAttribute('data-cb-stream-id', d.stream_id); userNode.setAttribute('data-cb-role', 'user'); }
           if (ph) { ph.setAttribute('data-cb-stream-id', d.stream_id); ph.setAttribute('data-cb-role', 'assistant'); }
           if (userNode && d.user_message_index != null) userNode.setAttribute('data-cb-msg-index', String(d.user_message_index));
+          if (ph && d.user_message_index != null) ph.setAttribute('data-cb-reply-to-index', String(d.user_message_index));
+          repositionPrimeTaskCards();
         },
         status: function (d) { showStatus(d && d.state, d && d.tool); },
         token: function (d) { showToken(d && d.text); },

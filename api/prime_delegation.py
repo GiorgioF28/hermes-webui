@@ -247,6 +247,7 @@ _PERSIST_FIELDS = (
     "librarian_model", "librarian_provider",
     "failure_reason", "error_category", "error_code", "result_partial", "diagnostic_log",
     "anchor_session_id", "anchor_message_index", "anchor_created_at", "summary",
+    "anchor_stream_id", "anchor_reply_prefix",
 )
 
 
@@ -274,11 +275,24 @@ def set_delegation_anchor_context(
 
 
 def _delegation_anchor(session_id: str) -> dict[str, Any]:
-    return dict(_DELEGATION_ANCHORS.get(str(session_id or "hermes-prime")) or {
+    anchor = dict(_DELEGATION_ANCHORS.get(str(session_id or "hermes-prime")) or {
         "anchor_session_id": str(session_id or "hermes-prime"),
         "anchor_message_index": None,
         "anchor_created_at": None,
     })
+    # Capture already-emitted prose at creation, never when the poller sees us.
+    # This is display metadata; it does not change execution or model context.
+    try:
+        from api.prime_session_store import get_prime_session_store
+        store = get_prime_session_store(anchor["anchor_session_id"])
+        live = store.live()
+        pending = live.get("pending_turn") or {}
+        if pending.get("stream_id"):
+            anchor["anchor_stream_id"] = pending["stream_id"]
+            anchor["anchor_reply_prefix"] = str(pending.get("partial_output") or "")
+    except Exception:
+        logger.debug("delegation display anchor unavailable", exc_info=True)
+    return anchor
 
 
 def _brief_summary(t: dict) -> str:
@@ -342,6 +356,9 @@ def _canonical_to_legacy(rec: dict) -> dict:
     if not rec.get("finished") and rec.get("finished_at"):
         rec["finished"] = rec["finished_at"]
     ui = rec.get("ui") or {}
+    for key in ("anchor_stream_id", "anchor_reply_prefix"):
+        if key not in rec and key in ui:
+            rec[key] = ui[key]
     if not rec.get("anchor_session_id"):
         rec["anchor_session_id"] = ui.get("anchor_session_id") or rec.get("session_id")
     if rec.get("anchor_message_index") is None and ui.get("anchor_message_index") is not None:
@@ -695,6 +712,8 @@ def get_background_tasks(max_age: float = 600.0, *, session_id: str | None = Non
             "finished": finished,
             "anchor_session_id": t.get("anchor_session_id") or t.get("session_id") or "hermes-prime",
             "anchor_message_index": t.get("anchor_message_index"),
+            "anchor_stream_id": t.get("anchor_stream_id"),
+            "anchor_reply_prefix": t.get("anchor_reply_prefix"),
             "anchor_created_at": t.get("anchor_created_at"),
             "summary": t.get("summary") or _brief_summary(view),
             "librarian_status": t.get("librarian_status"),
@@ -726,6 +745,8 @@ def get_background_task(task_id: str) -> dict | None:
         "finished": t.get("finished"),
         "anchor_session_id": t.get("anchor_session_id") or t.get("session_id") or "hermes-prime",
         "anchor_message_index": t.get("anchor_message_index"),
+        "anchor_stream_id": t.get("anchor_stream_id"),
+        "anchor_reply_prefix": t.get("anchor_reply_prefix"),
         "anchor_created_at": t.get("anchor_created_at"),
         "summary": t.get("summary") or _brief_summary(t),
         "librarian_status": t.get("librarian_status"),
