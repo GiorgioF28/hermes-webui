@@ -65,7 +65,8 @@ class CodexPromptStdinTests(unittest.TestCase):
         cmd, kw = self.calls[-1]
         self.assertEqual(cmd[0], "codex.cmd")
         self.assertEqual(cmd[1], "exec")
-        self.assertIn("--dangerously-bypass-approvals-and-sandbox", cmd)
+        self.assertEqual(cmd[cmd.index("--sandbox") + 1], "danger-full-access")
+        self.assertIn('approval_policy="never"', cmd)
         self.assertEqual(cmd[cmd.index("-C") + 1], "C:\\ws")
 
     def test_cmd_wrapper_really_mangles_argv(self):

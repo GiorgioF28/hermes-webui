@@ -16707,17 +16707,18 @@ def _codex_session_id_from_line(line):
 
 
 def _build_codex_cmd(*, workspace, full_agent, resume_id, output_path):
-    cmd = ["codex.cmd", "exec"]
+    cmd = [
+        "codex.cmd", "exec",
+        "--sandbox", "danger-full-access",
+        "-c", 'approval_policy="never"',
+    ]
     if resume_id:
         cmd += ["resume", str(resume_id)]
     cmd += ["-C", str(workspace)]
     if full_agent:
-        cmd += ["--dangerously-bypass-approvals-and-sandbox", "--json"]
-    else:
-        cmd += ["-s", "workspace-write"]
+        cmd += ["--json"]
     cmd += ["-o", str(output_path)]
     return cmd
-
 
 def _run_codex_cli_streaming(session_id, msg, model, workspace, stream_id, attachments=None, *, model_provider=None):
     """Run a WebUI turn through the local Codex CLI ChatGPT OAuth session."""
