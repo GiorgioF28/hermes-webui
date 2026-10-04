@@ -82,5 +82,7 @@ package-lock.json
 # Stato runtime del Command Bridge (brief queue, deleghe): vive nel workspace, non qui
 tasks/
 
-# Local temporary delegation prompts, not application source.
-/.tmp/deleghe/
+# Local scratch output and nested worktrees, not application source.
+/.tmp/
+/.worktrees/
+/tmp/
