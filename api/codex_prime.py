@@ -15,6 +15,14 @@ _RUNTIME = None
 _LOCK = threading.Lock()
 
 
+class PrimeIdleTimeout(TimeoutError):
+    """The provider stopped producing activity, not an HTTP socket timeout."""
+
+
+class PrimeHardCapError(TimeoutError):
+    """The provider exceeded the absolute turn budget despite activity."""
+
+
 def build_tools(session_id, workspace):
     from claude_agent_sdk import tool
     from api.ask_user_tool import _ask_user_handler_for
@@ -208,7 +216,16 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
     parts, errors, usage = [], [], {}
     turn_errors = []
     final_reply = None
+    # Keep the worker exec budget unchanged. Prime uses it as an inactivity
+    # budget so a healthy interactive turn can continue past one worker exec.
+    try:
+        hard_cap = float(os.getenv("HERMES_CODEX_PRIME_HARD_CAP", "3600"))
+        if not 0 < hard_cap < float("inf"):
+            hard_cap = 3600.0
+    except (TypeError, ValueError):
+        hard_cap = 3600.0
     elapsed, last = 0.0, time.monotonic()
+    idle_started = last
     try:
         proc = subprocess.Popen(command, cwd=str(workspace), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -230,9 +247,15 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             now = time.monotonic()
             if not get_clarify_pending_count(session_id):
                 elapsed += now - last
+            else:
+                # Human decision time belongs to the clarify tool, not to the
+                # provider watchdog. Resume with a fresh inactivity budget.
+                idle_started = now
             last = now
-            if elapsed > _CODEX_TIMEOUT:
-                raise TimeoutError("Codex Prime ha superato il tempo massimo del turno")
+            if elapsed > hard_cap:
+                raise PrimeHardCapError(f"Codex Prime ha superato il tetto del turno ({hard_cap:g}s)")
+            if now - idle_started > _CODEX_TIMEOUT:
+                raise PrimeIdleTimeout(f"Codex Prime senza progresso per {_CODEX_TIMEOUT:g}s")
             try:
                 line = events.get(timeout=0.25)
             except queue.Empty:
@@ -244,6 +267,8 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             except ValueError:
                 continue
             kind, item = event.get("type"), event.get("item") or {}
+            if kind in {"thread.started", "turn.started", "turn.completed", "item.started", "item.updated", "item.completed"}:
+                idle_started = time.monotonic()
             if kind == "item.completed" and item.get("type") == "agent_message":
                 text = item.get("text") or ""
                 # CLI messages are whole assistant items, not token fragments.

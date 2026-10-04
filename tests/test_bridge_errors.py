@@ -7,6 +7,8 @@ contattare Hermes Bridge". Questi test bloccano quel contratto.
 import io
 import subprocess
 
+import pytest
+
 from api import bridge_errors as be
 from api import routes
 
@@ -141,6 +143,35 @@ def test_codex_quota_wins_over_shutdown_noise():
         "OAuth credentials missing for chatcut; thread 123 not found"))
     assert info["branch"] == be.CODEX_QUOTA
     assert "Codex" in info["message"]
+
+
+@pytest.mark.parametrize("kind,branch", [
+    (TimeoutError, be.CODEX_TIMEOUT),
+    (BrokenPipeError, be.TRANSPORT_CUT),
+])
+def test_provider_error_keeps_original_cause_and_partial(monkeypatch, tmp_path, caplog, kind, branch):
+    from api import prime_session_store
+
+    store = prime_session_store.PrimeSessionStore(tmp_path / "prime.json")
+    monkeypatch.setattr(prime_session_store, "get_prime_session_store", lambda sid: store)
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda handler: None)
+    detail = "Codex Prime ha superato il tempo massimo del turno" if kind is TimeoutError else "provider broken pipe"
+
+    def fail(*args, on_token=None, **kwargs):
+        on_token("Partial progress")
+        raise kind(detail)
+
+    monkeypatch.setattr(routes, "_hermes_prime_reply", fail)
+    handler = _Handler()
+    routes._handle_bridge_prime(handler, {"message": "Work"})
+    error = [data for event, data in _events(handler) if event == "error"][-1]
+    assert error["branch"] == branch
+    assert "client disconnected" not in error.get("detail", "")
+    import json
+    journal = json.loads(store.path.read_text(encoding="utf-8"))["journal"]
+    assert [row for row in journal if row["event"] == "turn_error"][-1]["error"] == detail
+    assert store.live()["pending_turn"]["partial_output"] == "Partial progress"
+    assert "hermes prime reply failed" in caplog.text
 
 
 def test_missing_thread_is_not_missing_cli():

@@ -12708,17 +12708,10 @@ def _handle_bridge_prime(handler, body):
                     "usage": usage,
                 },
             )
-        except _CLIENT_DISCONNECT_ERRORS:
-            store.mark_error(stream_id, "client disconnected", keep_pending=True)
-            try:
-                emit("error", {
-                    "error": "La sessione di Hermes Prime si e interrotta. Riprova tra poco.",
-                    "branch": bridge_errors.TRANSPORT_CUT,
-                    "hint": bridge_errors.classify(bridge_errors.TRANSPORT_CUT)["hint"],
-                })
-            except _CLIENT_DISCONNECT_ERRORS:
-                pass
         except Exception as exc:
+            # emit() already isolates HTTP writer failures. Exceptions here
+            # belong to the provider/persistence path, including TimeoutError;
+            # preserve and log their cause rather than inventing a disconnect.
             store.mark_error(stream_id, _sanitize_error(exc), keep_pending=True)
             logger.exception("hermes prime reply failed")
             info = bridge_errors.classify(exc)

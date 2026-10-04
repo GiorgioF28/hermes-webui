@@ -16,6 +16,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Codex Prime continues while provider activity arrives instead of stopping at the worker's fixed execution timeout. Idle and absolute watchdog failures preserve partial output and their actual cause; they no longer masquerade as a browser `transport_cut`.
 - Command Bridge mobile conversation fills the available width, uses the planet scene as a noninteractive background, and keeps draft controls below the text. Fullscreen and reversible long-draft folding preserve the draft.
 - Command Bridge keeps each user reply linked to its durable stream and serializes background briefs outside user turns; final answers replace interim Codex messages instead of concatenating them.
 - Prime keeps quiet SSE connections alive and completes/persists its turn after a browser disconnect; losing the observer no longer aborts the provider or its tools. EOF without a final event no longer reports a partial response as completed.

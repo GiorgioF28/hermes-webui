@@ -101,6 +101,12 @@ def classify_branch(exc) -> str:
     name = "" if isinstance(exc, (str, type(None))) else type(exc).__name__
     text = _text_of(exc).lower()
 
+    # Provider watchdogs are distinct from transport/socket timeouts.
+    if name == "PrimeIdleTimeout":
+        return PRIME_IDLE_TIMEOUT
+    if name == "PrimeHardCapError":
+        return PRIME_HARDCAP
+
     # 1) Trasporto / disconnessioni socket (prima di tutto: sono inequivocabili).
     if name in {"BrokenPipeError", "ConnectionResetError", "ConnectionAbortedError"} \
        or "broken pipe" in text or "connection reset" in text \

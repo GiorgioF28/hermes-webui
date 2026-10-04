@@ -122,6 +122,35 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ## Other troubleshooting
 
+### Prime reports `transport_cut` around the Codex execution timeout
+
+Older Prime routes caught provider `TimeoutError` as an HTTP disconnect and
+stored `client disconnected`, hiding the cause and omitting its failure log.
+Codex Prime also applied the worker's fixed wall-clock budget to active chat
+turns. A failure near that budget is consistent with this bug; historical
+`client disconnected` rows alone cannot prove every incident had that cause.
+
+Prime now catches browser write failures inside the SSE emitter and lets the
+provider error reach the classifier and `hermes prime reply failed` log.
+The pending-turn journal retains the sanitized error and partial output.
+No failed request is automatically replayed, so completed tools are not run twice.
+
+For Codex Prime, `HERMES_CODEX_TIMEOUT` is the inactivity budget (default 1000
+seconds); provider item, reasoning, command, and message activity rearm it.
+`HERMES_CODEX_PRIME_HARD_CAP` limits total active turn time (default 3600
+seconds). Human clarification waits consume neither budget. Delegated worker
+execution limits are unchanged. True stalls and absolute caps still stop the
+process and revoke its turn-scoped tools, with `prime_idle_timeout` and
+`prime_hardcap` respectively. Browser disconnects keep the provider running.
+
+For diagnosis, compare `turn_started` and `turn_error` timestamps for the same
+stream in the Prime journal and inspect only the matching, sanitized error log
+window. Keep session content, credentials and full environment files private.
+After the updated backend is loaded, verify an active turn spanning the previous
+budget, a stalled provider, and a disconnected observer using isolated state.
+Automated regressions: `tests/test_prime_codex_watchdog.py`,
+`tests/test_bridge_errors.py`, and `tests/test_command_bridge_prime_streaming.py`.
+
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
 
 Related references:

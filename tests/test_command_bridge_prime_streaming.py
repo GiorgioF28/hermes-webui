@@ -134,7 +134,9 @@ def test_prime_reply_emits_sdk_deltas_and_keeps_async_delegations(monkeypatch):
     }
 
 
-def test_bridge_prime_post_streams_tokens_then_done(monkeypatch):
+def test_bridge_prime_post_streams_tokens_then_done(monkeypatch, tmp_path):
+    from api import prime_session_store
+    monkeypatch.setattr(prime_session_store, "_STORE", prime_session_store.PrimeSessionStore(tmp_path / "prime.json"))
     handler = _Handler()
     monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
 
