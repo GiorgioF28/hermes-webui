@@ -201,6 +201,17 @@ def test_tasks_endpoint_reports_streaming_while_a_turn_is_open(tasks_endpoint):
     assert captured[-1]["prime_live"]["streaming"] is True
 
 
+@pytest.mark.parametrize("stream_id", [None, "user-stream"])
+def test_provider_activity_without_user_stream_is_background(tasks_endpoint, monkeypatch, stream_id):
+    _BACKGROUND[0] = []
+    store, captured = tasks_endpoint
+    monkeypatch.setattr(routes, "_prime_active_snapshot", lambda sid: {"stream_id": stream_id})
+    _call_tasks()
+    live = captured[-1]["prime_live"]
+    assert live["streaming"] is bool(stream_id)
+    assert live["background_activity"] is (not bool(stream_id))
+
+
 def test_tasks_endpoint_persists_delegation_records_for_the_reload_replay(tasks_endpoint):
     """Il poll a 3 s alimenta le card durevoli usate dopo un reload."""
     store, captured = tasks_endpoint

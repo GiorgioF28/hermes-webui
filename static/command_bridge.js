@@ -1673,11 +1673,16 @@
     var BRIEF_POLL_MS = 3000;
     var BRIEF_MAX_MS = 15 * 60 * 1000;
     var t0 = Date.now();
+    var retryNotice = function () {
+      finish('');
+      sysNoteRetry('Recap ' + t.id + ' non consegnato - clicca per riprovare', function () { requestBrief(t); });
+    };
     var pollStatus = function () {
-      if (Date.now() - t0 > BRIEF_MAX_MS) { finish(''); return; }
+      if (Date.now() - t0 > BRIEF_MAX_MS) { retryNotice(); return; }
       api('api/bridge/prime/brief/status?task_id=' + encodeURIComponent(t.id))
         .then(function (s) {
           if (s && s.pending) { setTimeout(pollStatus, BRIEF_POLL_MS); return; }
+          if (s && (s.state === 'failed_retryable' || s.state === 'unknown')) { retryNotice(); return; }
           finish((s && s.reply) || '', s && s.usage);
         })
         .catch(function () { setTimeout(pollStatus, BRIEF_POLL_MS); });
@@ -1691,7 +1696,7 @@
         if (d && d.pending) { setTimeout(pollStatus, BRIEF_POLL_MS); return; }
         finish((d && d.reply) || '');
       })
-      .catch(function () { finish(''); });
+      .catch(function () { retryNotice(); });
   }
   var _cbPollTimer = null;
   function syncStarActiveAgents(tasks) {
@@ -2589,10 +2594,10 @@
     if (!node) return;
     node.classList.add('cb-remote-turn');
     var who = node.querySelector('.cb-who');
-    if (who) who.textContent = 'hermes prime \u00b7 altro dispositivo';
+    if (who) who.textContent = 'hermes prime \u00b7 turno in corso';
     var bubble = node.querySelector('.cb-bubble');
     if (bubble) {
-      bubble.textContent = 'Prime sta rispondendo (altro dispositivo)\u2026';
+      bubble.textContent = 'Prime sta rispondendo\u2026';
       bubble.classList.add('cb-recovered');
     }
     _cbRemoteTurnNode = node;
@@ -2606,14 +2611,14 @@
     // Il poller live puntava al nodo appena rimosso: fermalo subito invece di
     // lasciarlo battere su un nodo staccato fino al suo prossimo tick.
     if (_primeLiveTimer) { clearInterval(_primeLiveTimer); _primeLiveTimer = null; }
-    setPrimeStreaming(false, null);
+    if (_cbOwnTurnCount === 0) setPrimeStreaming(false, null);
   }
   function applyPrimeLiveSnapshot(live) {
     // Backend vecchio: campo assente -> comportamento attuale, nessun errore.
     if (!live || typeof live !== 'object') return;
     var justFinishedOwn = (Date.now() - _cbOwnTurnEndedAt) < 5000;
     if (live.streaming && !ownPrimeTurnInFlight() && !justFinishedOwn) showRemotePrimeTurn();
-    else if (!live.streaming && _cbRemoteTurnNode && _cbRemoteTurnNode.hasAttribute('data-cb-msg-index')) clearRemotePrimeTurn();
+    else if (!live.streaming && _cbRemoteTurnNode) clearRemotePrimeTurn();
     syncPrimeTranscriptFromServer(live.message_count, live.delegations_rev);
   }
   function syncPrimeTranscriptFromServer(serverCount, serverRev) {

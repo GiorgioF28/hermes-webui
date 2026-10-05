@@ -11204,11 +11204,14 @@ def _handle_bridge_tasks(handler, parsed):
         from api.prime_session_store import get_prime_session_store
 
         live = get_prime_session_store(session_id).live()
+        active = _prime_active_snapshot(session_id)
         payload["prime_live"] = {
             "message_count": int(live.get("message_count") or 0),
             "updated_at": live.get("updated_at"),
             "delegations_rev": int(live.get("delegations_rev") or 0),
-            "streaming": bool(live.get("active")) or bool(_prime_active_snapshot(session_id)),
+            # Automatic briefs use the provider too, but have no user stream.
+            "streaming": bool(live.get("active")) or bool(active.get("stream_id")),
+            "background_activity": bool(active) and not bool(active.get("stream_id")),
         }
     except Exception:
         logger.debug("bridge tasks: prime_live snapshot failed", exc_info=True)
@@ -13010,6 +13013,7 @@ def _run_prime_brief_job_owned(task_id, brief_id, brief_msg, workspace, session_
     """Turno LLM del brief + persistenza. Gira in un thread, mai dentro la POST."""
     reply = ""
     usage = {}
+    delivered = False
     try:
         import inspect
         kwargs = {}
@@ -13045,25 +13049,21 @@ def _run_prime_brief_job_owned(task_id, brief_id, brief_msg, workspace, session_
                 },
             )
             _queue.mark_delivered(brief_id)
+            delivered = True
         else:
-            # LLM failed: persist fallback text, still mark delivered
-            pending_briefs = _queue.get_pending()
-            brief_rec = next(
-                (b for b in pending_briefs if b.get("brief_id") == brief_id), None
-            )
-            fb_text = (brief_rec or {}).get("fallback_text") or ""
-            if fb_text:
-                _store.inject_assistant_message(
-                    fb_text,
-                    meta={
-                        "brief_id": brief_id,
-                        "task_id": task_id,
-                        "brief_type": "fallback_no_llm",
-                    },
-                )
-            _queue.mark_delivered(brief_id)
-    except Exception:
+            # Look up this exact brief, including when it is beyond the first
+            # pending page. The queue acknowledges only a successful write.
+            delivered = _queue.attempt_delivery(brief_id, try_llm=False)
+    except Exception as exc:
         logger.debug("bridge prime brief: persist failed for %s", task_id, exc_info=True)
+        try:
+            _queue.mark_failed(brief_id, "brief persistence failed: " + type(exc).__name__)
+        except Exception:
+            logger.debug("bridge prime brief: retry marker failed", exc_info=True)
+    if not delivered:
+        _brief_job_set(task_id, state="failed_retryable", reply="", brief_id=brief_id,
+                       finished_at=time.time())
+        return ""
     # Punto 3 fix d153: aggiorna anche il canonical store (delegations-state.json)
     # cosi' la prossima augmentation di /api/bridge/tasks non ri-espone la card
     # come "undelivered" dopo un riavvio.

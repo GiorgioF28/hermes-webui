@@ -39,6 +39,24 @@ concurrent messages. Install the Playwright browser or set
 must yield one visible row and one durable transcript entry; unrelated equal
 text remains separate. No live server or model call is required.
 
+Recap delivery regressions: `pytest tests/test_prime_recap_delivery.py
+tests/test_command_bridge_reload_sync.py tests/test_prime_brief_dedup.py -q`
+checks that provider activity without a user stream is background activity,
+completed placeholders disappear, and concurrent local turns retain their
+controls and separate recap rows. It simulates failed transcript writes and a
+fallback beyond the first pending queue page: neither queue nor delegation may
+be marked delivered until the recap is persisted. Browser delivery failures
+must offer a visible retry. Set `HERMES_CAPTURE_RECAP_UI` to an output directory
+to capture isolated browser evidence at desktop, narrow and mobile widths.
+
+Manual check after activating a complete backend/frontend update: finish two
+delegations while sending another message. Each recap must appear once and
+remain in history after refresh; no automatic recap may announce another
+device. A recovered user turn displays a neutral running indicator which
+disappears when the final reply arrives. The mutated layers are the existing
+brief acknowledgement and browser scene; the durable transcript remains the
+source of truth. These tests require no live server or model calls.
+
 > This document is for manual browser testing by you or by a Claude browser agent.
 > It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
