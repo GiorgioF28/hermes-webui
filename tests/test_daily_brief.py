@@ -58,6 +58,73 @@ def test_payload_uses_new_contract_and_never_contains_delegations(tmp_path: Path
     assert "outcome" not in json.dumps(payload)
 
 
+def test_ig_replies_are_limited_to_last_24_hours_and_reject_invalid_or_future_dates(tmp_path: Path):
+    replies = tmp_path / "replies.json"
+    _write(replies, {"replies": [
+        {"handle": "recent", "text": "ok", "timestamp": (NOW - timedelta(hours=23)).isoformat()},
+        {"handle": "old", "text": "old", "timestamp": (NOW - timedelta(hours=24, seconds=1)).isoformat()},
+        {"handle": "future", "text": "future", "timestamp": (NOW + timedelta(minutes=1)).isoformat()},
+        {"handle": "invalid", "text": "bad", "timestamp": "not-a-date"},
+    ]})
+
+    payload = build_daily_brief_payload(tmp_path, replies_file=replies, now=NOW)
+
+    assert payload["ig"]["count"] == 1
+    assert payload["ig"]["items"][0]["handle"] == "recent"
+
+
+def test_ig_reply_deduplication_keeps_latest_timestamp_inside_window(tmp_path: Path):
+    replies = tmp_path / "replies.json"
+    _write(replies, {"replies": [
+        {"handle": "same", "text": "older", "timestamp": (NOW - timedelta(hours=12)).isoformat()},
+        {"handle": "same", "text": "newer", "timestamp": (NOW - timedelta(hours=1)).isoformat()},
+    ]})
+
+    payload = build_daily_brief_payload(tmp_path, replies_file=replies, now=NOW)
+
+    assert payload["ig"]["count"] == 1
+    assert payload["ig"]["items"][0]["text"] == "newer"
+
+
+def test_empty_digest_is_written_and_keeps_account_error_separate_from_zero_messages(tmp_path: Path):
+    result = ingest_email_digest(tmp_path, {
+        "accounts": [{"label": "gmail-personale", "error": "source unavailable"}],
+        "emails": [],
+    }, now=NOW)
+
+    digest = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
+    payload = build_daily_brief_payload(tmp_path, replies_file=tmp_path / "missing.json", now=NOW)
+
+    assert result["stored"] == 0
+    assert digest["generatedAt"] == NOW.isoformat().replace("+00:00", "Z")
+    assert payload["email"]["count"] == 0
+    assert payload["email"]["accounts"] == [{"label": "gmail-personale", "count": 0, "error": "source unavailable"}]
+
+
+def test_dm_success_does_not_clear_email_source_error(tmp_path: Path):
+    from api.daily_brief import update_run_status
+
+    update_run_status(tmp_path, now=NOW, source="digest", last_error="payload email non valido")
+    update_run_status(tmp_path, now=NOW + timedelta(minutes=1), source="dm", last_error=None)
+
+    payload = build_daily_brief_payload(tmp_path, replies_file=tmp_path / "missing.json", now=NOW + timedelta(minutes=2))
+
+    assert payload["email"]["sourceStatus"] == "error"
+    assert payload["email"]["lastError"] == "payload email non valido"
+
+
+def test_accumulator_error_is_separate_from_digest_status(tmp_path: Path):
+    from api.daily_brief import update_run_status
+
+    ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+    update_run_status(tmp_path, now=NOW + timedelta(minutes=1), source="accumulate", last_error="payload email non valido")
+
+    payload = build_daily_brief_payload(tmp_path, replies_file=tmp_path / "missing.json", now=NOW + timedelta(minutes=2))
+
+    assert payload["email"]["sourceStatus"] == "current"
+    assert payload["email"]["accumulatorStatus"] == "error"
+
+
 def test_ingest_filters_out_email_outside_current_rome_day(tmp_path: Path):
     result = ingest_email_digest(tmp_path, {
         "accounts": [{"label": "gmail-personale"}],

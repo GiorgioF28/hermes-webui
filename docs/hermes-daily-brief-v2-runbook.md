@@ -56,6 +56,20 @@ batch. A successful digest is version 2 and adds `summary`, `why`, and
 `importance` without removing v1 fields. It then flushes consumed accumulator
 rows while preserving rows newer than the cutoff.
 
+Instagram replies in the Daily Brief are read from the original reply
+`timestamp` (not the scanner's `detectedAt`) and limited to the preceding 24
+hours. Invalid and future timestamps are excluded before the latest reply per
+handle is selected. Empty subjects are retained as empty strings; missing
+subject fields, senders, or invalid/missing receive dates remain source data
+errors and must not be replaced with fabricated values.
+
+The brief API adds `email.sourceStatus` (`current`, `stale`, or `error`),
+`email.generatedAt`, and separate `email.accumulatorStatus` metadata. The
+`daily-brief-run.json` source records for digest, IMAP accumulation, and DM
+checks are independent; success in one source does not clear another source's
+error. A missing or prior-day digest is reported as stale even when a newer DM
+check succeeds.
+
 If the Anthropic credential is missing, the request times out, the call raises,
 or strict JSON parsing fails, Hermes writes the digest anyway with deterministic
 `classify_importance` results, empty `summary`/`why`, `analysisEngine: rules`,

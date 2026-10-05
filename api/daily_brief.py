@@ -43,6 +43,7 @@ _WRITE_LOCK = threading.RLock()
 ACCUMULATOR_FILENAME = "email-inbox-accumulator.json"
 ACCUMULATOR_MAX_ITEMS = 400
 ACCUMULATOR_MAX_AGE = timedelta(hours=48)
+IG_REPLY_WINDOW = timedelta(hours=24)
 BODY_EXCERPT_MAX_CHARS = 2000
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
@@ -106,7 +107,11 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         os.replace(temporary, path)
 
 
-def read_ig_replies(file_path: Path | str) -> tuple[list[dict[str, Any]], bool, bool]:
+def read_ig_replies(
+    file_path: Path | str,
+    *,
+    now: float | datetime | None = None,
+) -> tuple[list[dict[str, Any]], bool, bool]:
     """Read the existing outreach-ig reply artifact without changing its schema."""
     payload, missing, malformed = _read_json(Path(file_path))
     if missing or malformed:
@@ -115,6 +120,8 @@ def read_ig_replies(file_path: Path | str) -> tuple[list[dict[str, Any]], bool, 
         raw_rows = payload.get("replies") if isinstance(payload, dict) else payload
         if not isinstance(raw_rows, list):
             raise ValueError("replies must be a list")
+        current = _now(now)
+        cutoff = current - IG_REPLY_WINDOW
         replies = []
         for raw in raw_rows:
             if not isinstance(raw, dict):
@@ -122,7 +129,8 @@ def read_ig_replies(file_path: Path | str) -> tuple[list[dict[str, Any]], bool, 
             handle = str(raw.get("handle") or "").strip().lstrip("@").lower()
             text = str(raw.get("text") or "").strip()[:500]
             timestamp = str(raw.get("timestamp") or "").strip()
-            if not handle or not timestamp:
+            parsed_timestamp = _parse_datetime(timestamp)
+            if not handle or parsed_timestamp is None or parsed_timestamp < cutoff or parsed_timestamp > current:
                 continue
             replies.append({
                 "handle": handle,
@@ -131,7 +139,7 @@ def read_ig_replies(file_path: Path | str) -> tuple[list[dict[str, Any]], bool, 
                 "detectedAt": str(raw.get("detectedAt") or ""),
                 "notionPageId": str(raw.get("notionPageId") or ""),
             })
-        replies.sort(key=lambda row: row["timestamp"], reverse=True)
+        replies.sort(key=lambda row: _parse_datetime(row["timestamp"]), reverse=True)
         latest_by_handle = []
         seen_handles: set[str] = set()
         for row in replies:
@@ -215,6 +223,19 @@ def read_last_run(data_dir: Path | str) -> tuple[str | None, bool]:
     return (_iso(parsed), False) if parsed else (None, True)
 
 
+def _read_source_status(data_dir: Path | str, source: str) -> dict[str, Any]:
+    payload, _missing, malformed = _read_json(Path(data_dir) / "daily-brief-run.json")
+    sources = payload.get("sources") if isinstance(payload, dict) else None
+    value = sources.get(source) if isinstance(sources, dict) else None
+    if malformed or not isinstance(value, dict):
+        return {"lastSuccessAt": None, "lastErrorAt": None, "lastError": None}
+    return {
+        "lastSuccessAt": value.get("lastSuccessAt"),
+        "lastErrorAt": value.get("lastErrorAt"),
+        "lastError": str(value["lastError"])[:240] if value.get("lastError") else None,
+    }
+
+
 def build_daily_brief_payload(
     data_dir: Path | str = DEFAULT_DATA_DIR,
     *,
@@ -223,11 +244,37 @@ def build_daily_brief_payload(
 ) -> dict[str, Any]:
     current = _now(now)
     configured = replies_file or os.getenv(CHECK_DM_REPLIES_ENV) or DEFAULT_CHECK_DM_REPLIES_FILE
-    replies, not_initialized, ig_malformed = read_ig_replies(configured)
+    replies, not_initialized, ig_malformed = read_ig_replies(configured, now=current)
     email, _email_malformed = read_email_digest(data_dir, now=current)
     last_run, _run_malformed = read_last_run(data_dir)
     last_dt = _parse_datetime(last_run)
     stale = last_dt is None or current - last_dt > STALE_AFTER
+    email_status = _read_source_status(data_dir, "digest")
+    accumulator_status = _read_source_status(data_dir, "accumulate")
+    email_generated_at, _missing_digest, _bad_digest = _read_json(Path(data_dir) / "daily-email-digest.json")
+    email_generated = _parse_datetime(email_generated_at.get("generatedAt")) if isinstance(email_generated_at, dict) else None
+    email_stale = email_generated is None or _today_local(email_generated) != _today_local(current)
+    email_status_value = "error" if email_status["lastErrorAt"] and (
+        not email_status["lastSuccessAt"]
+        or (_parse_datetime(email_status["lastErrorAt"]) or current) > (_parse_datetime(email_status["lastSuccessAt"]) or current)
+    ) else "stale" if email_stale else "current"
+    accumulator_success = _parse_datetime(accumulator_status["lastSuccessAt"])
+    accumulator_error_at = _parse_datetime(accumulator_status["lastErrorAt"])
+    accumulator_error_is_newer = accumulator_error_at is not None and (
+        accumulator_success is None or accumulator_error_at > accumulator_success
+    )
+    accumulator_state = (
+        "error" if accumulator_error_is_newer
+        else "stale" if accumulator_success is None or current - accumulator_success > STALE_AFTER
+        else "current"
+    )
+    email.update({
+        "sourceStatus": email_status_value,
+        "generatedAt": _iso(email_generated) if email_generated else None,
+        "lastError": email_status["lastError"] if email_status_value == "error" else None,
+        "accumulatorStatus": accumulator_state,
+        "accumulatorError": accumulator_status["lastError"],
+    })
     return {
         "ok": True,
         "generatedAt": _iso(current),
@@ -376,9 +423,11 @@ def _normalize_email_row(raw: Any, index: int) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise DailyBriefValidationError(f"emails[{index}] must be an object")
     missing = [
-        field for field in ("account", "from", "subject", "receivedAt")
+        field for field in ("account", "from", "receivedAt")
         if not isinstance(raw.get(field), str) or not raw[field].strip()
     ]
+    if "subject" not in raw or not isinstance(raw.get("subject"), str):
+        missing.append("subject")
     if missing:
         raise DailyBriefValidationError(f"emails[{index}] missing: {', '.join(missing)}")
     received = _parse_datetime(raw["receivedAt"])
@@ -468,6 +517,7 @@ def accumulate_email_inbox(
         items = [row for row, _is_new in ordered]
         added = sum(1 for _row, is_new in ordered if is_new)
         _write_accumulator(Path(data_dir), items, now=current)
+    update_run_status(data_dir, now=current, source="accumulate", last_error=None)
     return {"ok": True, "added": added, "total": len(items), "skipped": skipped}
 
 
@@ -546,7 +596,7 @@ def ingest_email_digest(
             or _email_key(row) not in consumed_keys
         ]
         _write_accumulator(base_dir, kept, now=current)
-    update_run_status(base_dir, now=current, last_error=None)
+    update_run_status(base_dir, now=current, source="digest", last_error=None)
     logger.info(
         "daily_brief_email_ingest stored=%d noiseSkipped=%d duplicates=%d engine=%s",
         len(digest_rows), input_noise + noise_dropped, duplicate_dropped, analysis_engine,
@@ -563,13 +613,28 @@ def update_run_status(
     data_dir: Path | str,
     *,
     now: float | datetime | None = None,
+    source: str = "email",
     last_error: str | None,
 ) -> None:
-    _atomic_write_json(Path(data_dir) / "daily-brief-run.json", {
-        "lastRun": _iso(_now(now)),
-        "lastError": str(last_error)[:240] if last_error else None,
-        "source": "n8n",
-    })
+    current = _now(now)
+    target = Path(data_dir) / "daily-brief-run.json"
+    with _WRITE_LOCK:
+        payload, _missing, malformed = _read_json(target)
+        if malformed or not isinstance(payload, dict):
+            payload = {}
+        sources = payload.get("sources")
+        if not isinstance(sources, dict):
+            sources = {}
+        status = sources.get(source)
+        if not isinstance(status, dict):
+            status = {"lastSuccessAt": None, "lastErrorAt": None, "lastError": None}
+        if last_error:
+            status.update({"lastErrorAt": _iso(current), "lastError": str(last_error)[:240]})
+        else:
+            status.update({"lastSuccessAt": _iso(current), "lastErrorAt": None, "lastError": None})
+        sources[source] = status
+        payload.update({"lastRun": _iso(current), "lastError": str(last_error)[:240] if last_error else None, "source": "n8n", "sources": sources})
+        _atomic_write_json(target, payload)
 
 
 def run_check_dm(
@@ -597,7 +662,7 @@ def run_check_dm(
         exit_code, replies_found, ok, reason = -1, None, False, "check-dm timeout"
     except (OSError, ValueError):
         exit_code, replies_found, ok, reason = -1, None, False, "check-dm non avviabile"
-    update_run_status(data_dir, now=now, last_error=reason)
+    update_run_status(data_dir, now=now, source="dm", last_error=reason)
     result = {"ok": ok, "exitCode": exit_code, "repliesFound": replies_found}
     if reason:
         result["reason"] = reason
@@ -648,10 +713,14 @@ def handle_cron_daily_brief(handler: Any, path: str, *, data_dir: Path | str = D
         else:
             return False
     except DailyBriefValidationError as exc:
+        if path in {"/api/cron/daily-brief/email", "/api/cron/daily-brief/email-accumulate"}:
+            update_run_status(data_dir, source="digest" if path.endswith("/email") else "accumulate", last_error="payload email non valido")
         j(handler, {"ok": False, "error": str(exc)}, status=422)
         return True
     except Exception:
         logger.exception("daily brief cron endpoint failed path=%s", path)
+        if path in {"/api/cron/daily-brief/email", "/api/cron/daily-brief/email-accumulate"}:
+            update_run_status(data_dir, source="digest" if path.endswith("/email") else "accumulate", last_error="errore ingest email")
         j(handler, {"ok": False, "error": "daily_brief_internal_error"}, status=500)
         return True
     j(handler, result, status=200)

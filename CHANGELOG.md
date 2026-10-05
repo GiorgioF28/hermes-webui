@@ -16,6 +16,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Daily Brief now shows only Instagram replies whose original message timestamps are valid and within the last 24 hours; future and invalid timestamps are discarded before per-handle deduplication. Email ingest accepts a genuinely empty subject while still rejecting a missing subject field. Digest and accumulator health are reported separately from DM checks, so a successful DM poll cannot hide an email failure.
 - Codex Prime continues while provider activity arrives instead of stopping at the worker's fixed execution timeout. Idle and absolute watchdog failures preserve partial output and their actual cause; they no longer masquerade as a browser `transport_cut`.
 - Command Bridge mobile conversation fills the available width, uses the planet scene as a noninteractive background, and keeps draft controls below the text. Fullscreen and reversible long-draft folding preserve the draft.
 - Command Bridge keeps each user reply linked to its durable stream and serializes background briefs outside user turns; final answers replace interim Codex messages instead of concatenating them.
