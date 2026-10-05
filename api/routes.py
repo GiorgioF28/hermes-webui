@@ -12953,16 +12953,28 @@ def _handle_bridge_prime_brief(handler, body):
             {"reply": "", "already_delivered": True, "brief_id": brief_id},
             extra_headers={"Cache-Control": "no-store"},
         )
-    esito = "completato" if t.get("status") == "ok" else "fallito"
+    esito = (
+        "consegnato un risultato parziale"
+        if t.get("result_partial") or t.get("status") == "parziale"
+        else "consegnato un risultato da verificare"
+        if t.get("status") == "ok"
+        else "terminato con errore, con artefatti da verificare"
+    )
     brief_msg = (
         "[BRIEF AUTOMATICO] Il sotto-agente " + str(t.get("agent") or "operativo") +
-        " ha " + esito + " un task che gli avevi delegato.\n"
+        " ha " + esito + " per un task che gli avevi delegato.\n"
         "Task: " + str(t.get("task") or "")[:_BRIEF_TASK_MAX_CHARS] + "\n"
         "Esito (" + str(t.get("status") or "") + "): "
         + _brief_output_excerpt(t.get("output")) + "\n\n"
-        "Fai un brief all'utente in 1-2 frasi: cosa e' stato prodotto e l'eventuale "
-        "prossimo passo. NON delegare di nuovo, NON usare il tool delega: rispondi solo "
-        "all'utente a parole."
+        "Verifica gli artefatti: il report e lo stato non provano completamento o "
+        "fallimento. Se il mandato era un fix e resta incompleto, controlla le deleghe "
+        "in corso e recupera subito il residuo: completa direttamente oppure usa delega "
+        "con un obiettivo concreto, senza duplicare lavoro attivo. Commit, push e "
+        "pubblicazione gia autorizzati non devono aspettare una prova end-to-end "
+        "mancante; revisiona diff e staging e dichiara le prove mancanti. Rispetta il "
+        "perimetro originale, le priorita attuali, pause e cancellazioni: una diagnosi "
+        "richiesta da sola non autorizza un fix. Non riavviare Hermes. Poi fai un brief "
+        "all'utente in 1-2 frasi su risultato verificato e recupero realmente avviato."
     )
     _brief_job_set(
         task_id,

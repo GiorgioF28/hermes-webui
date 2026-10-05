@@ -101,6 +101,34 @@ class BriefAsyncTests(unittest.TestCase):
         self.assertFalse(self.captured[-1].get("pending"))
         self.assertEqual(self.captured[-1].get("reply"), "ecco il brief")
 
+    def test_brief_handoff_preserves_uncertainty_and_partial_results(self):
+        """Il modello non riceve 'completato' da un semplice status ok."""
+        import api.prime_delegation as pd
+
+        cases = [
+            ("ok", False, "risultato da verificare"),
+            ("ok", True, "risultato parziale"),
+            ("parziale", False, "risultato parziale"),
+            ("errore", False, "terminato con errore"),
+        ]
+        for index, (status, partial, expected) in enumerate(cases):
+            with self.subTest(status=status, partial=partial):
+                task_id = f"handoff-{index}"
+                self._install_task(task_id, status=status)
+                pd._BG_TASKS[task_id].update(
+                    result_partial=partial,
+                    task="Implementa il fix dell'indice",
+                    output="Patch in worktree; compilazione reale non eseguita",
+                )
+                with patch.object(routes.threading, "Thread") as worker:
+                    routes._handle_bridge_prime_brief(object(), {"task_id": task_id})
+                handoff = worker.call_args.kwargs["args"][2]
+                self.assertIn(expected, handoff)
+                self.assertIn("Implementa il fix dell'indice", handoff)
+                self.assertIn("Patch in worktree", handoff)
+                self.assertTrue(self.captured[-1]["pending"])
+                worker.return_value.start.assert_called_once()
+
     def test_status_unknown_task_is_not_pending(self):
         """Un task_id sconosciuto non deve lasciare il frontend in polling eterno."""
         class _Parsed:
