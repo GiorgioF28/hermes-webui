@@ -127,6 +127,16 @@ also part of the maintainer pre-release pre-gate.
 
 ## Automated browser smoke (runtime brick-class gate)
 
+For Prime history archiving, run `pytest tests/test_prime_history_archive.py
+tests/test_prime_archive_activation.py -q` with isolated state. See
+`docs/prime-history-archive-contract.md` for the staged cold-start request.
+Verify at desktop, narrow and mobile widths that the collapsed archive summary
+is readable, retained rows use original absolute indexes, a repeated history
+payload does not duplicate rows, and a new reply still links to its user turn.
+Explicit retrieval must return original archived contents; routine history and
+model context must exclude them. A failed commit must retain the original state
+and request. Restore must preserve messages added after the archive.
+
 The ESLint guard above catches `const`-reassign / import-assign statically. The
 **browser smoke** catches the same brick class *dynamically* — plus anything else
 that throws only when a real browser executes the page (e.g. a `function X(){}` /

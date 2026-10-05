@@ -1,6 +1,6 @@
 """Reversible, opt-in archival primitives for Prime transcript history.
 
-This module is deliberately not wired into the Command Bridge.  It keeps the
+Cold-start activation is owned by prime_archive_activation. This module keeps the
 stored message slots stable: archived entries become tombstones at the same
 absolute indexes, so history cursors and delegation anchors do not shift.
 Callers must hold the Prime store lock and use ``apply_archive_atomically``;

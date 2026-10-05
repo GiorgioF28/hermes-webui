@@ -1,9 +1,10 @@
 # Prime history archive module contract
 
-**Status: prepared and tested; not integrated or active.** The module in
-`api/prime_history_archive.py` is a pure planning/retrieval layer plus an
-atomic guarded apply helper. No existing route, store, prompt, or browser code
-calls it.
+**Status: integrated; activated only by an operator-staged cold-start request.**
+`api/prime_history_archive.py` supplies planning/retrieval and guarded apply;
+`api/prime_archive_activation.py` persists the checked archive and original
+backup before replacing the active state. The running process is never changed
+by staging a request.
 
 ## State model
 
@@ -26,17 +27,43 @@ calls it.
 - Preserve `pending_turn`, `journal`/tool events, `settings` (including pending
   todo snapshot), delegation records/revisions, and all non-message state as-is.
 
-## Exact Prime integration points
+## Cold-start integration
 
-These are the current `feat/prime-context-unlocked` source locations, not
-changes made by this package:
+`PrimeSessionStore` checks for `<session-stem>.archive-request.json` after
+recovering a stale pending turn, before accepting any new turns. The request is
+private state beside the session file, never tracked in Git. Its fields are
+`schema: 1`, the matching `session_id`, a timezone-aware `cutoff`, and a short
+non-secret `summary` (at most 6,000 characters). No request means no archive.
 
-1. **Apply and active-turn gate:** `api/routes.py::_prime_turn_lock` (around
-   line 11548), `_prime_active_snapshot` (around 11616), and the turn entry
-   paths around 11798/11992. The archive operation must acquire the existing
-   per-session turn lock and `PrimeSessionStore._lock`, check both in-memory
-   activity and persisted `pending_turn`, then persist bundle before replacing
-   the store. Never run it during a Prime turn.
+The operation runs under the store lock during cold construction. It builds
+from the current disk state, so messages written after a dry run are preserved;
+the hash guard rejects a source changed during application. It writes a full
+byte-exact original backup, archive bundle and checksum manifest in
+`sessions/_prime_archives/<source-sha256>/`, then commits the candidate state.
+`updated_at` is preserved: maintenance is not conversation activity. On failure
+the request remains available for retry; after success it becomes
+`<session-stem>.archive-request.applied.json`. Repeated identical requests check
+the existing bundle and never archive the session twice.
+
+The active slots contain small tombstones. `history()` filters those slots and
+includes each visible message's absolute `message_index`; `message_count` and
+`since_index` still count all slots. The browser consumes the absolute index and
+shows a collapsed archive summary. Polling never retrieves archived contents;
+settled delegation cards anchored entirely to the archive are hidden, while
+active/pending records and their durable anchors remain intact.
+
+Codex receives the retained messages and the summary. A fresh Claude client
+receives the same bounded recovery context; its new SDK session does not resume
+the archived conversation. `prime_history` uses `retrieve_history()` to recover
+full originals only when explicitly requested. Retrieval checks the bundle hash
+and identity. An archived brief retry reuses its original message index.
+
+## Integration surfaces
+
+1. **Apply and active-turn gate:** `PrimeSessionStore._activate_archive_request`
+   runs at cold construction, before route/provider workers exist, under
+   `PrimeSessionStore._lock`; active/pending turns and buffered tokens are rejected
+   by `activate_request`. There is no live archive mutation endpoint.
 2. **Durable slots/cursors:** `api/prime_session_store.py::history` (line 523)
    and `history_with_tool_events` (line 798). Keep the original slot list and
    `total`/`message_count` semantics. Do not compact the list or shift offsets.
@@ -44,7 +71,8 @@ changes made by this package:
 3. **Visible transcript:** `api/routes.py::_handle_bridge_prime_history` (line
    12147) and `static/command_bridge.js::syncPrimeTranscriptFromServer` (line
    2624), plus the history renderer it calls. Send/consume the same slot count;
-   skip rendering tombstone rows while advancing the cursor for every slot.
+   return only visible rows with absolute indexes while advancing the cursor
+   for every slot.
    Do not fetch archive contents in initial load, delta polls, or task polls.
 4. **AI context:** `api/codex_prime.py::prompt_history` (line 305) and
    `build_prompt` (line 340). Filter tombstones from model context while keeping
@@ -76,3 +104,13 @@ changes made by this package:
 `build_archive_bundle` can plan from an active snapshot, but the apply helper
 cannot apply it while a turn is active. Planning is not evidence that the
 archive is active.
+
+## Rollback
+
+With the server stopped, verify the bundle checksum recorded in session
+`_prime_archive`, call `restore_archived_messages(current_state, bundle)`, and
+persist the returned state atomically. This restores original slots while
+preserving all newer messages, journals and delegation records. Keep the
+original backup and bundle; remove any unapplied request before starting again.
+Copying `original.json` directly would discard newer turns and is only appropriate
+when no activity has occurred since archiving.

@@ -16,6 +16,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Prime supports reversible history archiving at cold start: old messages leave the visible chat and automatic AI context, with a summary and checked on-demand retrieval. Absolute history cursors, pending delegation state and newer turns are preserved; ordinary polling never reloads the archive.
 - Prime's automatic delegation briefs now verify reported artifacts and continue unfinished authorized fixes instead of forbidding follow-up work. The persona requires scoped recovery, commits and authorized publication even when an end-to-end check is unavailable, with explicit verification limits and no duplicate active delegation.
 - Command Bridge no longer treats automatic delegation recaps as replies from another device. Finished live placeholders are removed without changing a concurrent local turn; recaps are acknowledged only after transcript persistence succeeds, and failed delivery offers a visible retry.
 - Daily Brief now shows only Instagram replies whose original message timestamps are valid and within the last 24 hours; future and invalid timestamps are discarded before per-handle deduplication. Email ingest accepts a genuinely empty subject while still rejecting a missing subject field. Digest and accumulator health are reported separately from DM checks, so a successful DM poll cannot hide an email failure.

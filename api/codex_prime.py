@@ -33,11 +33,9 @@ def build_tools(session_id, workspace):
     @tool("prime_history", "Leggi la cronologia reale di questa sessione Prime per indice; offset negativo conta dalla fine.",
           {"type": "object", "properties": {"offset": {"type": "integer"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}})
     async def history(args):
-        messages = get_prime_session_store(session_id).history().get("messages") or []
         offset = int(args.get("offset", -30))
-        offset = max(0, len(messages) + offset) if offset < 0 else min(offset, len(messages))
         limit = max(1, min(50, int(args.get("limit", 30))))
-        return result({"total": len(messages), "offset": offset, "messages": messages[offset:offset + limit]})
+        return result(get_prime_session_store(session_id).retrieve_history(offset, limit))
     @tool("team_status", "Stato sintetico delle deleghe recenti. Con task_id leggi il risultato a pagine di 6000 caratteri; offset prosegue la lettura.",
           {"type": "object", "properties": {"task_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}}})
     async def status(args):
@@ -302,7 +300,7 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             stop_process(proc)
 
 
-def prompt_history(messages, *, max_chars=48000, max_message_chars=8000):
+def prompt_history(messages, *, max_chars=48000, max_message_chars=8000, total_messages=None):
     """Bound the automatic history packet; canonical history stays lossless.
 
     Message indices allow Prime to retrieve an omitted/truncated message through
@@ -312,7 +310,7 @@ def prompt_history(messages, *, max_chars=48000, max_message_chars=8000):
     for index in range(len(messages) - 1, max(-1, len(messages) - 41), -1):
         message = messages[index]
         text = str(message.get("content") or "")
-        row = {"index": index, "role": message.get("role", ""), "content": text[:max_message_chars]}
+        row = {"index": message.get("message_index", index), "role": message.get("role", ""), "content": text[:max_message_chars]}
         if len(text) > max_message_chars:
             row["content_truncated"] = True
             row["content_chars"] = len(text)
@@ -330,8 +328,9 @@ def prompt_history(messages, *, max_chars=48000, max_message_chars=8000):
         if len(json.dumps(candidate, ensure_ascii=False)) > max_chars:
             break
         rows = candidate
-    return {"total_messages": len(messages), "messages": rows,
-            "older_messages_omitted": rows[0]["index"] if rows else len(messages),
+    total = len(messages) if total_messages is None else total_messages
+    return {"total_messages": total, "messages": rows,
+            "older_messages_omitted": rows[0]["index"] if rows else total,
             "retrieval": "prime_history(offset=index, limit=1) restituisce il messaggio originale completo."}
 
 
@@ -343,7 +342,10 @@ def build_prompt(message, workspace, *, session_id, user, partial=""):
     system = routes._prime_system_prompt_for_user(control, user)
     system = system.replace("mcp__team__", "mcp__hermes_prime__").replace("mcp__hermes__ask_user", "mcp__hermes_prime__ask_user")
     history = get_prime_session_store(session_id).history()
-    context = json.dumps(prompt_history(history.get("messages", [])), ensure_ascii=False)
+    packet = prompt_history(history.get("messages", []), total_messages=history.get("message_count"))
+    if history.get("archive"):
+        packet["archive_summary"] = history["archive"]
+    context = json.dumps(packet, ensure_ascii=False)
     scope = memory_retrieval.classify_task_scope(str(message or ""))
     if prime_context_profile() == "unlocked" or user == "tom":
         memory = memory_retrieval.build_prime_unlocked_memory_detail(str(message or ""), control, task_scope=scope, max_chars=12000)

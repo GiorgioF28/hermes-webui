@@ -2479,7 +2479,8 @@
     _cbHistoryBatch += 1;
     try {
       (messages || []).forEach(function (m, i) {
-        if (renderPrimeHistoryMessage(m, start + i, pendingClarifyId)) rendered += 1;
+        var messageIndex = m.message_index != null ? Number(m.message_index) : start + i;
+        if (renderPrimeHistoryMessage(m, messageIndex, pendingClarifyId)) rendered += 1;
       });
     } finally { _cbHistoryBatch -= 1; }
     return rendered;
@@ -2532,6 +2533,19 @@
     var pendingClarify = data.pending_clarify || null;
     var pendingClarifyId = pendingClarify && pendingClarify.clarify_id;
     var messages = data.messages || [];
+    if (data.archive && !log.querySelector('[data-cb-archive-note]')) {
+      var archiveNote = document.createElement('details');
+      archiveNote.setAttribute('data-cb-archive-note', String(data.archive.id || 'archive'));
+      archiveNote.className = 'cb-sys';
+      var archiveTitle = document.createElement('summary');
+      archiveTitle.textContent = 'Storico archiviato: ' + data.archive.archived_count + ' messaggi · riepilogo';
+      var archiveSummary = document.createElement('div');
+      archiveSummary.textContent = data.archive.summary || '';
+      archiveSummary.style.whiteSpace = 'pre-wrap';
+      archiveNote.appendChild(archiveTitle);
+      archiveNote.appendChild(archiveSummary);
+      log.appendChild(archiveNote);
+    }
     var offset = Number(data.since_index);
     if (!Number.isFinite(offset) || offset < 0) offset = 0;
     renderPrimeHistoryMessages(messages, offset, pendingClarifyId);

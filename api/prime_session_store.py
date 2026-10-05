@@ -57,6 +57,57 @@ class PrimeSessionStore:
         self._buf_last_flush: float = 0.0
         self._cleanup_orphan_tmp_files()
         self.recover_stale_pending_turn("interrupted by WebUI restart")
+        self._activate_archive_request()
+
+    def _activate_archive_request(self) -> None:
+        """Apply an operator-staged archive only during cold construction."""
+        request_path = self.path.with_suffix(".archive-request.json")
+        if not request_path.exists():
+            return
+        try:
+            from api.prime_archive_activation import activate_request
+            with self._lock:
+                data = self._read_locked()
+                if data.get("pending_turn") or self.has_buffered_partial():
+                    return
+                activate_request(self, data, request_path)
+        except Exception:
+            # Keep both current state and the request available for recovery.
+            logger.exception("prime archive activation failed; request retained")
+
+    @staticmethod
+    def _archive_metadata(data: dict) -> dict | None:
+        archive = data.get("_prime_archive")
+        if not archive:
+            return None
+        return {"id": archive["archive_id"], "cutoff": archive["cutoff"],
+                "summary": archive.get("summary", ""),
+                "archived_count": len(archive.get("archived_indexes") or [])}
+
+    def _visible_delegations(self, data: dict) -> list[dict]:
+        records = self._public_delegations(data)
+        if not data.get("_prime_archive"):
+            return records
+        visible = {i for i, m in enumerate(data["messages"]) if "_prime_archive" not in m}
+        return [r for r in records if r.get("anchor_message_index") in visible
+                or r.get("brief_message_index") in visible
+                or r.get("status") in ("in_corso", "running", "pending")
+                or r.get("brief_status") not in ("delivered", "", None)]
+
+    def retrieve_history(self, offset: int = -30, limit: int = 30) -> dict:
+        """Explicit retrieval of full originals; never used by UI/model polling."""
+        with self._lock:
+            data = self._read_locked()
+            messages = data["messages"]
+            total = len(messages)
+            offset = max(0, total + offset) if offset < 0 else min(offset, total)
+            limit = max(1, min(50, limit))
+            rows = messages[offset:offset + limit]
+            if any("_prime_archive" in m for m in rows):
+                from api.prime_archive_activation import archived_messages
+                archived = archived_messages(data["_prime_archive"], offset, limit)
+                rows = [archived[offset + i] if "_prime_archive" in m else m for i, m in enumerate(rows)]
+            return {"total": total, "offset": offset, "messages": rows}
 
     def _cleanup_orphan_tmp_files(self) -> None:
         """Drop empty ``*.tmp.*`` leftovers from a crashed write (best effort)."""
@@ -537,17 +588,22 @@ class PrimeSessionStore:
             messages = list(data.get("messages") or [])
             total = len(messages)
             start = self._clamp_since_index(since_index, total)
+            archive = data.get("_prime_archive")
+            if archive:
+                messages = [dict(m, message_index=i) for i, m in enumerate(messages)
+                            if i >= start and "_prime_archive" not in m]
             return {
                 "session_id": self.session_id,
-                "messages": messages[start:] if start else messages,
+                "messages": messages if archive else (messages[start:] if start else messages),
                 "pending_turn": pending,
                 "settings": dict(data.get("settings") or {}),
                 "updated_at": data.get("updated_at"),
                 "since_index": start,
                 "total": total,
                 "message_count": total,
-                "delegations": self._public_delegations(data),
+                "delegations": self._visible_delegations(data),
                 "delegations_rev": int(data.get("delegations_rev") or 0),
+                "archive": self._archive_metadata(data),
             }
 
     def live(self) -> dict[str, Any]:
@@ -759,6 +815,9 @@ class PrimeSessionStore:
             # original index so delegation anchors and history cursors stay valid.
             brief_id = (meta or {}).get("brief_id")
             if brief_id:
+                archived_index = (data.get("_prime_archive") or {}).get("brief_indexes", {}).get(str(brief_id))
+                if archived_index is not None:
+                    return int(archived_index)
                 for index, existing in enumerate(data["messages"]):
                     if existing.get("role") == "assistant" and existing.get("brief_id") == brief_id:
                         return index
@@ -817,6 +876,12 @@ class PrimeSessionStore:
             tool_events = [e for e in tool_events if e.get("stream_id") == sid]
         else:
             tool_events = tool_events[-20:]  # last 20 if no stream_id
+        if data.get("_prime_archive"):
+            visible_streams = {m.get("stream_id") for m in data["messages"]
+                               if "_prime_archive" not in m and m.get("stream_id")}
+            if pending:
+                visible_streams.add(pending.get("stream_id"))
+            tool_events = [e for e in tool_events if e.get("stream_id") in visible_streams]
         payload["tool_events"] = tool_events
         return payload
 

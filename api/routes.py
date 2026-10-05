@@ -12005,6 +12005,17 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         # sessione esistente ignora system_prompt; la chiamata precedente lo
         # leggiccava a vuoto ogni turno (costo I/O a vuoto).
         _prime_session_exists = reg.get(session_id) is not None
+        if not _prime_session_exists:
+            from api.prime_session_store import get_prime_session_store
+            from api.codex_prime import prompt_history
+            archive_history = get_prime_session_store(session_id).history()
+            if archive_history.get("archive"):
+                archive_context = prompt_history(
+                    archive_history.get("messages") or [],
+                    total_messages=archive_history.get("message_count"),
+                )
+                archive_context["archive_summary"] = archive_history["archive"]
+                prompt_text += "\n\n## Contesto storico di recupero (non una nuova richiesta)\n" + json.dumps(archive_context, ensure_ascii=False)
         reg.get_or_create(
             session_id, cwd=workspace, add_dir=workspace,
             system_prompt=(
