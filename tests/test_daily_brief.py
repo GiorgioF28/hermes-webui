@@ -148,10 +148,11 @@ def test_noise_list_filters_sender_after_three_hits(tmp_path: Path):
     assert noise["senders"][0]["hits"] == 3
     assert matches_noise(_email(), noise) is True
     result = ingest_email_digest(tmp_path, {"accounts": [], "emails": [_email()]}, now=NOW + timedelta(days=2))
-    assert result == {"ok": True, "stored": 0, "skipped": 1, "analysed": 0}
+    assert result["stored"] == 1
+    assert result["analysed"] == 1
 
 
-def test_accumulator_dedupes_prunes_caps_and_cleans_body(tmp_path: Path):
+def test_accumulator_dedupes_without_cap_or_age_pruning_and_archives(tmp_path: Path):
     rows = []
     for index in range(405):
         rows.append(_email(
@@ -165,14 +166,32 @@ def test_accumulator_dedupes_prunes_caps_and_cleans_body(tmp_path: Path):
     duplicate = accumulate_email_inbox(tmp_path, {"emails": [rows[0]]}, now=NOW)
     stored = json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
 
-    assert result == {"ok": True, "added": 400, "total": 400, "skipped": 6}
-    assert duplicate == {"ok": True, "added": 0, "total": 400, "skipped": 1}
-    assert len(stored["items"]) == 400
+    assert result == {"ok": True, "added": 406, "total": 406, "skipped": 0}
+    assert duplicate == {"ok": True, "added": 0, "total": 406, "skipped": 1}
+    assert len(stored["items"]) == 406
+    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
+    assert len(archive["items"]) == 406
+    assert any(row["messageId"] == "expired" for row in archive["items"])
     assert stored["items"][0]["messageId"] == "message-0"
     assert "\x00" not in stored["items"][0]["bodyExcerpt"]
     assert "\n" not in stored["items"][0]["bodyExcerpt"]
     assert len(stored["items"][0]["bodyExcerpt"]) <= 2000
     assert stored["items"][0]["bodyExcerpt"].startswith("A body")
+
+
+def test_ingestion_archives_durably_without_calling_model(tmp_path: Path):
+    from unittest.mock import patch
+
+    rows = [_email(messageId=f"arrival-{index}") for index in range(3)]
+    with patch("api.email_analysis.analyse_emails", side_effect=AssertionError("model called during ingest")):
+        accumulate_email_inbox(tmp_path, {"emails": rows}, now=NOW)
+    archive_path = tmp_path / "email-archive.json"
+    before_restart = json.loads(archive_path.read_text(encoding="utf-8"))
+    # A fresh read models process restart; replaying the same provider items is idempotent.
+    replay = accumulate_email_inbox(tmp_path, {"emails": rows}, now=NOW + timedelta(days=3))
+    after_restart = json.loads(archive_path.read_text(encoding="utf-8"))
+    assert replay["added"] == 0
+    assert len(before_restart["items"]) == len(after_restart["items"]) == 3
 
 
 def test_digest_merges_accumulator_and_flushes_only_consumed_items(tmp_path: Path):
@@ -206,6 +225,8 @@ def test_digest_merges_accumulator_and_flushes_only_consumed_items(tmp_path: Pat
     assert digest["emails"][0]["why"] == "richiede risposta"
     assert "bodyExcerpt" not in json.dumps(digest)
     assert [row["messageId"] for row in accumulator["items"]] == ["future"]
+    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
+    assert {row["messageId"] for row in archive["items"]} == {"consumed", "future"}
 
 
 def test_analysis_failure_uses_rules_writes_digest_and_flushes(tmp_path: Path):
@@ -232,7 +253,7 @@ def test_analysis_failure_uses_rules_writes_digest_and_flushes(tmp_path: Path):
     assert digest["emails"][0]["importance"] == "alta"
     assert digest["emails"][0]["summary"] == ""
     assert digest["emails"][0]["why"] == ""
-    assert accumulator["items"] == []
+    assert [item["messageId"] for item in accumulator["items"]] == ["fallback"]
 
 
 def test_noise_merge_is_incremental_atomic_and_prunes_old_entries(tmp_path: Path):

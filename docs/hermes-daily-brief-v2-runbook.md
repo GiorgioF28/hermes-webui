@@ -3,14 +3,19 @@
 ## Runtime files
 
 Hermes stores local state in `data/`: `daily-email-digest.json`,
-`email-inbox-accumulator.json`, `email-noise-list.json`, `daily-brief-run.json`,
+`email-inbox-accumulator.json` (pending analysis), `email-archive.json`
+(persistent unique messages), `email-noise-list.json`, `daily-brief-run.json`,
 and optional `email-vip.json`. All are git-ignored. Writes use a sibling `.tmp`
 followed by `os.replace`.
 
-The accumulator keeps at most 400 messages and prunes rows older than 48 hours.
-It stores only the first 2000 normalized characters of the body. The body is
-used for the 07:00 analysis and is deleted when that message is flushed. It is
-never written to `daily-email-digest.json`.
+The pending queue has no age or item-count pruning. The archive is independent
+of the queue and is never flushed when a digest succeeds. Both deduplicate by
+account and stable message ID (fallback: account, sender, subject and receive
+time). A model error or partial/invalid response writes only a fallback digest
+and leaves pending rows queued; successful model classification runs in batches
+of 80 and clears only the cutoff rows after the digest write succeeds. Verify
+the local deployment's request and storage limits before relying on large
+message bodies; the cron JSON request limit is 1 MiB.
 
 ## Required configuration
 

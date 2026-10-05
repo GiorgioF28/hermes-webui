@@ -102,48 +102,55 @@ def analyse_emails(
     if not emails:
         return fallback, "rules", None
 
-    batch = emails[:MAX_ANALYSIS_EMAILS]
-    prompt_rows = [
-        {
-            "index": index,
-            "account": row.get("account", ""),
-            "from": row.get("from", ""),
-            "fromName": row.get("fromName", ""),
-            "subject": row.get("subject", ""),
-            "receivedAt": row.get("receivedAt", ""),
-            "bodyExcerpt": row.get("bodyExcerpt", ""),
-        }
-        for index, row in enumerate(batch)
-    ]
+    classified: list[dict[str, str]] = []
     try:
         active_client = client if client is not None else client_factory()
-        response = active_client.messages.create(
-            model=model,
-            max_tokens=8192,
-            temperature=0,
-            timeout=120,
-            system=_SYSTEM_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": "Analizza queste email:\n" + json.dumps(prompt_rows, ensure_ascii=False),
-            }],
-        )
-        parsed = _parse_json_array(_response_text(response))
-        by_index: dict[int, dict[str, Any]] = {}
-        for item in parsed:
-            if not isinstance(item, dict) or not isinstance(item.get("index"), int):
-                continue
-            index = item["index"]
-            if 0 <= index < len(batch) and index not in by_index:
-                by_index[index] = item
-        for index in range(len(batch)):
-            item = by_index.get(index, {})
-            importance = str(item.get("importance") or "").strip().lower()
-            if importance in {"alta", "media", "bassa"}:
-                fallback[index]["importance"] = importance
-            fallback[index]["summary"] = _clean_model_text(item.get("summary"), MAX_SUMMARY_CHARS)
-            fallback[index]["why"] = _clean_model_text(item.get("why"), MAX_WHY_CHARS)
-        return fallback, "prime", None
+        for offset in range(0, len(emails), MAX_ANALYSIS_EMAILS):
+            batch = emails[offset:offset + MAX_ANALYSIS_EMAILS]
+            prompt_rows = [
+                {
+                    "index": index,
+                    "account": row.get("account", ""),
+                    "from": row.get("from", ""),
+                    "fromName": row.get("fromName", ""),
+                    "subject": row.get("subject", ""),
+                    "receivedAt": row.get("receivedAt", ""),
+                    "bodyExcerpt": row.get("bodyExcerpt", ""),
+                }
+                for index, row in enumerate(batch)
+            ]
+            response = active_client.messages.create(
+                model=model,
+                max_tokens=8192,
+                temperature=0,
+                timeout=120,
+                system=_SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": "Analizza queste email:\n" + json.dumps(prompt_rows, ensure_ascii=False),
+                }],
+            )
+            parsed = _parse_json_array(_response_text(response))
+            by_index: dict[int, dict[str, Any]] = {}
+            for item in parsed:
+                if not isinstance(item, dict) or not isinstance(item.get("index"), int):
+                    continue
+                index = item["index"]
+                if 0 <= index < len(batch) and index not in by_index:
+                    by_index[index] = item
+            if len(by_index) != len(batch):
+                raise ValueError("analysis response is partial")
+            for index in range(len(batch)):
+                item = by_index[index]
+                importance = str(item.get("importance") or "").strip().lower()
+                if importance not in {"alta", "media", "bassa"}:
+                    raise ValueError("analysis importance missing")
+                classified.append({
+                    "importance": importance,
+                    "summary": _clean_model_text(item.get("summary"), MAX_SUMMARY_CHARS),
+                    "why": _clean_model_text(item.get("why"), MAX_WHY_CHARS),
+                })
+        return classified, "prime", None
     except Exception as exc:
         reason = f"analisi Prime non disponibile ({type(exc).__name__})"[:200]
         logger.warning("daily brief email analysis fallback: %s", reason)
