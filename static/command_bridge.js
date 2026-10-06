@@ -1438,6 +1438,7 @@
 
   // ── Tool cards (P2-C) ──────────────────────────────────────────────────
   function renderToolCard(toolName, summary) {
+    if (/delega|team_status|task_done/.test(String(toolName || ''))) return;
     var log = $('cbLog'); if (!log) return;
     var card = el('div', 'cb-tool-card');
     card.innerHTML = '<span class="cb-tool-name">' + esc(toolName || 'tool') + '</span>' +
@@ -1446,7 +1447,7 @@
     return card;
   }
 
-  // delegation cards: update-in-place by id (in_corso -> ok/errore), background-aware
+  // Delegation control metadata; only final Prime briefs enter the chat.
   var _cbTasks = {};
   var _cbActiveAgents = {};
   function taskStateClass(status) {
@@ -1574,12 +1575,7 @@
     if (bubble) bubble.textContent = prefix && text.indexOf(prefix) === 0 ? text.slice(prefix.length) : text;
   }
   function repositionPrimeTaskCards() {
-    Object.keys(_cbTasks).sort(function (a, b) {
-      return Number((_cbTasks[a].task || {}).started || 0) - Number((_cbTasks[b].task || {}).started || 0) || a.localeCompare(b, undefined, {numeric:true});
-    }).forEach(function (id) {
-      var entry = _cbTasks[id];
-      if (entry && entry.el && entry.task) placeTaskCard(entry.el, entry.task);
-    });
+    // Delegations are summarized as ordinary persisted Prime messages.
   }
   // freccetta: espande/riduce il testo della delega dentro la card
   function wireDelegArrow(card) {
@@ -1598,50 +1594,18 @@
   function renderTask(t, opts) {
     if (!t || !t.id) return;
     opts = (opts && typeof opts === 'object') ? opts : null;
-    var log = $('cbLog'); if (!log) return;
+    // Keep only control metadata in RAM. Worker task/result/log text never
+    // becomes a chat card; requestBrief renders the durable Prime summary.
     var prev = _cbTasks[t.id];
-    var sl = taskIsRunning(t.status) ? '&#8230;' : (t.status === 'ok' || t.status === 'parziale' || t.status === 'done' ? '&#10003;' : '&#10007;');
-    var full = String(t.output || '').trim();
-    var detail = full ? '<details class="cb-deleg-details"><summary>Risultato dell’agente</summary><div class="cb-deleg-full">' + esc(full) + '</div></details>' : '';
-    var failure = String((t && t.failure_reason) || '').trim().slice(0, 500);
-    var diagnostic = String(t.diagnostic_log || '').slice(0, 12000);
-    var diagnosticHtml = diagnostic ? '<details class="cb-deleg-details cb-deleg-diagnostic"><summary>Log tecnico (estratto)</summary><pre>' + esc(diagnostic) + '</pre></details>' : '';
-    var partialHtml = t.result_partial ? '<div class="cb-deleg-partial">Esito parziale: verificare report, file e commit prima di riprendere il lavoro.</div>' : '';
-    var failureHtml = failure ? '<div class="cb-deleg-failure"><b>Fallita:</b> ' + esc(failure) + '</div>' : '';
-    var fullTask = String((t && t.task) || '').trim();
-    var taskFull = fullTask ? '<div class="cb-deleg-taskfull">' + esc(fullTask) + '</div>' : '';
-    var html = '<b>&#9883; ' + esc(t.agent || 'agente') + '</b> &middot; ' + esc(t.task_type || '') +
-      ' <span style="float:right">' + sl + '</span>' + taskTimerHtml(t) +
-      '<div class="cb-deleg-sumrow">' +
-        '<button type="button" class="cb-deleg-arrow" aria-label="Espandi o riduci il testo della delega" title="Espandi / riduci">&#9656;</button>' +
-        '<div class="cb-deleg-sumtext"><div class="cb-deleg-summary">' + esc(taskSummary(t)) + '</div>' + taskFull + '</div>' +
-      '</div>' + failureHtml + partialHtml + detail + diagnosticHtml;
-    if (prev && prev.el) {
-      prev.el.innerHTML = html;
-      prev.el.className = 'cb-deleg ' + taskStateClass(t.status) + (prev.open ? ' cb-deleg-open' : '');
-      wireDelegArrow(prev.el);
-      if (t.anchor_message_index != null) prev.el.setAttribute('data-anchor-index', String(t.anchor_message_index));
-      prev.task = t;
-      placeTaskCard(prev.el, t);
-    }
-    else {
-      var c = el('div', 'cb-deleg ' + taskStateClass(t.status)); c.innerHTML = html;
-      c.setAttribute('data-task-id', t.id);
-      wireDelegArrow(c);
-      if (t.anchor_message_index != null) c.setAttribute('data-anchor-index', String(t.anchor_message_index));
-      var _sb = nearBottom(log); placeTaskCard(c, t); if (_sb) log.scrollTop = log.scrollHeight;
-      _cbTasks[t.id] = { el: c, task: t, status: t.status, briefed: !!(opts && opts.briefed) };
-      // light up the matching planet in the star system
+    if (!prev) {
+      prev = _cbTasks[t.id] = { briefed: !!(opts && opts.briefed) };
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
-    // The delegation card already shows its outcome; a separate system row
-    // would interrupt an unrelated active reply.
-    _cbTasks[t.id].status = t.status;
-    repositionPrimeTaskCards();
+    prev.status = t.status;
     // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
     // Le card idratate dallo storico non rilanciano MAI il brief: il testo e'
     // gia' nel transcript (zero regressione su iss-prime-brief-replay-dopo-riavvio).
-    if ((t.status === 'ok' || t.status === 'errore' || t.status === 'done' || t.status === 'failed') &&
+    if ((t.status === 'ok' || t.status === 'errore' || t.status === 'done' || t.status === 'failed' || t.status === 'parziale' || t.status === 'interrotta') &&
         !_cbTasks[t.id].briefed && !(opts && opts.replay)) {
       _cbTasks[t.id].briefed = true;
       requestBrief(t);
@@ -1730,7 +1694,7 @@
   function pollTasks() {
     if (document.hidden || _cbTasksInFlight || (typeof _currentPanel !== "undefined" && _currentPanel !== "bridge")) return;
     _cbTasksInFlight = true;
-    api('api/bridge/tasks').then(function (d) {
+    api('api/bridge/tasks?compact=1').then(function (d) {
       var tasks = d && d.tasks ? d.tasks : [];
       if (tasks.length) tasks.forEach(function (t) { renderTask(t); });
       syncStarActiveAgents(tasks);
@@ -2528,6 +2492,30 @@
     } finally { _cbHistoryBatch -= 1; }
     return made;
   }
+  function applyPrimeHistoryWindow(data) {
+    var log = $('cbLog'); if (!log || !data || !data.history_window) return;
+    var floor = Number(data.history_window.start_index);
+    if (!Number.isFinite(floor)) return;
+    var visible = data.history_window.visible_indexes;
+    var sb = nearBottom(log), oldHeight = log.scrollHeight, oldTop = log.scrollTop;
+    log.querySelectorAll('[data-cb-msg-index]').forEach(function (node) {
+      var index = Number(node.getAttribute('data-cb-msg-index'));
+      if (Array.isArray(visible) ? visible.indexOf(index) === -1 : index < floor) node.remove();
+    });
+    // Remove obsolete card/debug DOM from an already-open browser as well.
+    log.querySelectorAll('.cb-deleg, .cb-deleg-progress, .cb-tool-card').forEach(function (node) { node.remove(); });
+    var count = Number(data.history_window.archived_count) || 0;
+    var note = log.querySelector('[data-cb-window-note]');
+    if (count) {
+      if (!note) {
+        note = el('div', 'cb-sys'); note.setAttribute('data-cb-window-note', 'true');
+        log.insertBefore(note, log.firstChild);
+      }
+      note.textContent = 'Ultimi 50 messaggi · ' + count + ' nello storico recuperabile';
+    } else if (note) note.remove();
+    if (sb) log.scrollTop = log.scrollHeight;
+    else log.scrollTop = oldTop - (oldHeight - log.scrollHeight);
+  }
   function renderPrimeHistoryPayload(data) {
     var log = $('cbLog'); if (!log || !data) return;
     var pendingClarify = data.pending_clarify || null;
@@ -2549,6 +2537,7 @@
     var offset = Number(data.since_index);
     if (!Number.isFinite(offset) || offset < 0) offset = 0;
     renderPrimeHistoryMessages(messages, offset, pendingClarifyId);
+    applyPrimeHistoryWindow(data);
     // Backend vecchio (nessun message_count): ripiega sul conteggio locale.
     var total = Number(data.message_count);
     if (!Number.isFinite(total)) total = Number(data.total);
@@ -2639,10 +2628,9 @@
     if (!_cbHistoryLoaded || _cbSyncBusy) return;
     if (ownPrimeTurnInFlight()) return;
     var count = Number(serverCount);
-    var rev = Number(serverRev);
     var needMessages = Number.isFinite(count) && count > _cbRenderedCount;
-    var needDelegations = Number.isFinite(rev) && _cbDelegationsRev !== null && rev !== _cbDelegationsRev;
-    if (!needMessages && !needDelegations) return;
+    // Summary delivery changes message_count; delegation revisions need no DOM work.
+    if (!needMessages) return;
     _cbSyncBusy = true;
     var since = _cbRenderedCount;
     fetchPrimeHistory(since).then(function (data) {
@@ -2655,6 +2643,7 @@
       var sb = nearBottom(log);
       var clarifyId = (data.pending_clarify || {}).clarify_id;
       renderPrimeHistoryMessages(data.messages || [], offset, clarifyId);
+      applyPrimeHistoryWindow(data);
       var total = Number(data.message_count);
       if (!Number.isFinite(total)) total = offset + (data.messages || []).length;
       if (total > _cbRenderedCount) _cbRenderedCount = total;

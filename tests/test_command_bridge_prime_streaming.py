@@ -619,7 +619,7 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "if (d && d.usage) showUsage(d.usage);" in source
     assert "if (!settled) fail('Connessione interrotta [transport_cut]." in source
     assert "if (!reply && ph && ph.parentNode)" in source
-    assert "api('api/bridge/tasks')" in source
+    assert "api('api/bridge/tasks?compact=1')" in source
     assert "setInterval(pollTasks, 3000)" in source
     # Selettore unico modello+brain (2026-08-01): la tendina ha sostituito i tre
     # bottoni CLOUD/AUTO/CODEX, ma Codex e AUTO devono restare raggiungibili --
@@ -741,7 +741,7 @@ def test_command_bridge_frontend_loads_history_and_renders_attention_cards():
     assert "cb-recovered" in source
 
 
-def test_command_bridge_frontend_anchors_delegation_cards_and_collapses_details():
+def test_command_bridge_frontend_preserves_indices_and_renders_only_briefs():
     source = Path("static/command_bridge.js").read_text(encoding="utf-8")
 
     assert "data-cb-msg-index" in source
@@ -750,8 +750,9 @@ def test_command_bridge_frontend_anchors_delegation_cards_and_collapses_details(
     assert "log.querySelector('[data-cb-msg-index=\"" in source
     assert "cb-deleg-done" in source
     assert "cb-deleg-error" in source
-    assert "cb-deleg-summary" in source
-    assert "<details class=\"cb-deleg-details\">" in source
+    renderer = source[source.index("  function renderTask(t, opts)"):source.index("  function requestBrief(t)")]
+    assert "cb-deleg-details" not in renderer
+    assert "requestBrief(t)" in renderer
 
 
 def test_command_bridge_frontend_renders_usage_quota_and_default_view():

@@ -3,9 +3,8 @@
 Spec: docs/specs/fix-command-bridge-reload-sync-timeout.md
 
 - GET /api/bridge/prime/history onora `?since_index=N`, usa
-  `history_with_tool_events()` (cosi' il replay delle tool card ha davvero i
-  dati) e porta `delegations` + `message_count` per ricostruire le card delega
-  dopo un reload (Bug A/B).
+  `history_with_tool_events(compact=True)` e restituisce la finestra da 50
+  messaggi, senza card deleghe o log. Gli originali restano recuperabili.
 - GET /api/bridge/tasks resta invariato nella lista `tasks` (solo running /
   brief non consegnati) ma porta in piu' `prime_live` per il sync
   telefono<->PC senza aprire nuovi socket (Bug D).
@@ -49,7 +48,7 @@ def _get_history(query: str = ""):
 
 # ── GET /api/bridge/prime/history ───────────────────────────────────────────
 
-def test_history_endpoint_returns_message_count_and_delegations(bridge):
+def test_history_endpoint_returns_count_without_delegation_cards(bridge):
     store, captured = bridge
     sid = store.begin_turn("delega a librarian")
     store.finish_turn(sid, "ok, delegato")
@@ -64,8 +63,8 @@ def test_history_endpoint_returns_message_count_and_delegations(bridge):
     assert payload["total"] == 2
     assert payload["since_index"] == 0
     assert len(payload["messages"]) == 2
-    assert [d["id"] for d in payload["delegations"]] == ["d16"]
-    assert payload["delegations"][0]["brief_status"] == "delivered"
+    assert payload["delegations"] == []
+    assert store.get_delegations()[0]["id"] == "d16"
     assert payload["delegations_rev"] > 0
 
 
@@ -109,7 +108,7 @@ def test_history_endpoint_without_parsed_still_works(bridge):
     assert len(captured[-1]["messages"]) == 2
 
 
-def test_history_endpoint_includes_tool_events(bridge):
+def test_history_endpoint_keeps_debug_events_out_of_settled_chat(bridge):
     """Prima chiamava history(): data.tool_events era sempre undefined."""
     store, captured = bridge
     sid = store.begin_turn("leggi il file")
@@ -118,7 +117,8 @@ def test_history_endpoint_includes_tool_events(bridge):
 
     _get_history()
 
-    assert [e["tool"] for e in captured[-1]["tool_events"]] == ["Read"]
+    assert captured[-1]["tool_events"] == []
+    assert store.get_tool_events()[0]["tool"] == "Read"
 
 
 def test_history_endpoint_keeps_pending_briefs_count(bridge):

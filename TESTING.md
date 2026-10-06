@@ -1,5 +1,17 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime rolling-window regression: `pytest tests/test_prime_history_window.py
+ tests/test_prime_delegation_timeline.py tests/test_command_bridge_reload_sync.py
+ tests/test_prime_brief_dedup.py tests/test_prime_archive_activation.py -q`
+checks the 49/50/51/52-message boundaries, sparse archive slots, full original
+retrieval, brief retry identity, pending ownership, bounded provider recovery,
+compact worker payloads and multi-device delta gaps at 1200/650/360 pixels.
+These use isolated state and stubbed provider/browser fixtures. In actual use,
+finish a delegation, confirm only its summary remains, then exceed 50 messages
+and reload on a second device: both views must retain the latest 50 persisted
+rows, pending controls and access to historical originals. Freeze elimination
+requires measurement in the real browser after activation.
+
 Codex Full Access regression: `pytest tests/test_prime_codex_item_phases.py
 tests/test_codex_prompt_stdin.py tests/test_codex_session_resume.py -q` checks
 the actual Prime process launch and both ordinary CLI modes. Prime must use
@@ -9,7 +21,7 @@ The optional `HERMES_CODEX_TOOL_SMOKE=1` test in `test_codex_prime_tools.py`
 launches a real CLI turn against a temporary read-only probe tool.
 
 Delegation timeline regression: `pytest tests/test_prime_delegation_timeline.py -q`
-checks persisted stream/prose anchors and announcement/card/final ordering at
+checks persisted stream/prose anchors and announcement/final ordering without worker cards at
 desktop, narrow and mobile widths using isolated browser fixtures.
 
 Command Bridge mobile layout: `pytest tests/test_command_bridge_mobile_layout.py -q`

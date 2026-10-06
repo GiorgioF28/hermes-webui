@@ -341,8 +341,10 @@ def build_prompt(message, workspace, *, session_id, user, partial=""):
     control = routes.DEFAULT_WORKSPACE
     system = routes._prime_system_prompt_for_user(control, user)
     system = system.replace("mcp__team__", "mcp__hermes_prime__").replace("mcp__hermes__ask_user", "mcp__hermes_prime__ask_user")
-    history = get_prime_session_store(session_id).history()
+    history = get_prime_session_store(session_id).history(windowed=True)
     packet = prompt_history(history.get("messages", []), total_messages=history.get("message_count"))
+    if history.get("history_window"):
+        packet["history_window"] = history["history_window"]
     if history.get("archive"):
         packet["archive_summary"] = history["archive"]
     context = json.dumps(packet, ensure_ascii=False)

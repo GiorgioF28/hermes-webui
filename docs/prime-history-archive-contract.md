@@ -1,10 +1,51 @@
 # Prime history archive module contract
 
-**Status: integrated; activated only by an operator-staged cold-start request.**
+**Status: integrated; cold-start archive plus an automatic 50-message active window.**
 `api/prime_history_archive.py` supplies planning/retrieval and guarded apply;
 `api/prime_archive_activation.py` persists the checked archive and original
 backup before replacing the active state. The running process is never changed
 by staging a request.
+
+## Active window and delegation summaries
+
+The Command Bridge uses `history_with_tool_events(compact=True)`; automatic
+model recovery uses `history(windowed=True)`. Both select the latest 50
+non-tombstone messages, preserving absolute `message_index`, `total`,
+`message_count` and the requested `since_index`. At message 51 the oldest leaves
+the active view; this continues after every append and survives a reload.
+`history_window` reports the retained indexes, total excluded count and a short
+retrieval reminder. If background entries push an active turn's owning user
+message out of the tail, retain that owner plus the latest 49 entries. Pending
+clarification/approval and live reply controls remain independently visible.
+
+This rolling archive is a read-only projection of the durable transcript. It
+never deletes or rewrites originals, pending state, journal, delegation anchors,
+or timestamps. `retrieve_history()` / `prime_history` can still retrieve full
+messages outside the window, including the older checked cold-start bundles.
+The existing historical summary remains available. The rolling reminder does
+not invent decisions or task outcomes; consult the canonical memory sources.
+The full on-disk transcript is still read by the store: this change bounds browser
+payload and rendering, not all backend disk I/O.
+
+The chat contains Prime's persisted final delegation briefs only. Worker task
+text, results and technical logs remain in the operational delegation store;
+they are not replayed as transcript cards or settled tool traces. The Bridge
+requests `/api/bridge/tasks?compact=1` for IDs, status and active-agent signals;
+brief generation/acknowledgement, pending work, planet activity and voice remain
+on their existing paths. A delegation revision alone no longer triggers history
+hydration. Raw diagnostic retrieval through team tools remains available.
+
+Codex receives the bounded window and the retrieval reminder. When old rows
+have left the window, Claude rotates its SDK client under the existing turn lock
+and seeds the new client with bounded recovery context; it cannot resume hidden
+history from an older SDK session. This costs a fresh SDK initialization for
+these turns. The current user request and instructions remain explicit.
+
+**Layers changed:** browser scene/cache, browser history projection and automatic
+model context. **Layers preserved:** append-only durable transcript, run journal,
+pending ownership, delegation/brief identity and absolute retrieval cursors.
+Disabling the window projection restores the original transcript view; the
+previous cold-start archive rollback below remains a separate operation.
 
 ## State model
 
@@ -49,7 +90,7 @@ The active slots contain small tombstones. `history()` filters those slots and
 includes each visible message's absolute `message_index`; `message_count` and
 `since_index` still count all slots. The browser consumes the absolute index and
 shows a collapsed archive summary. Polling never retrieves archived contents;
-settled delegation cards anchored entirely to the archive are hidden, while
+settled delegation cards are omitted from the compact chat payload, while
 active/pending records and their durable anchors remain intact.
 
 Codex receives the retained messages and the summary. A fresh Claude client

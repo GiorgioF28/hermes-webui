@@ -1,4 +1,4 @@
-"""One shared Prime turn, ordered prose/card/final replay without a live server."""
+"""One shared Prime turn, prose/final replay without worker cards or a live model."""
 import os
 from pathlib import Path
 
@@ -71,23 +71,23 @@ function rows(){return Array.from($('cbLog').children).filter(n=>!n.hidden).map(
 
 
 @pytest.mark.parametrize('width', [1200, 650, 360])
-def test_announcement_card_continuation_and_final_replay(browser, width):
+def test_announcement_continuation_and_final_without_worker_cards(browser, width):
     page = browser.new_page(viewport={'width': width, 'height': 900})
     try:
         page.set_content('<div id="cbLog"></div>')
         page.add_script_tag(content=HARNESS + renderer_source())
         page.evaluate("makeTurn(); renderTask(task('d1','Passo il lavoro.')); updatePrimeLiveText(reply,'Passo il lavoro. Continuo qui.');")
-        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro.', 'd1', ' Continuo qui.']
+        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro. Continuo qui.']
         page.evaluate("renderPrimeHistoryMessage({role:'assistant',content:'Risposta finale.',stream_id:'s1',reply_to_index:0},1); repositionPrimeTaskCards();")
-        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro.', 'd1', 'Risposta finale.']
+        assert page.evaluate('rows()') == ['La mia domanda', 'Risposta finale.']
         # Cold mobile/desktop replay produces exactly the same order.
         page.evaluate("$('cbLog').innerHTML='';_cbTasks={};renderPrimeHistoryMessage({role:'user',content:'La mia domanda',stream_id:'s1'},0);renderPrimeHistoryMessage({role:'assistant',content:'Risposta finale.',stream_id:'s1',reply_to_index:0},1);renderTask(task('d1','Passo il lavoro.'));repositionPrimeTaskCards();")
-        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro.', 'd1', 'Risposta finale.']
+        assert page.evaluate('rows()') == ['La mia domanda', 'Risposta finale.']
     finally:
         page.close()
 
 
-def test_card_waits_for_owner_and_legacy_card_is_after_reply(browser):
+def test_worker_cards_never_enter_chat_even_without_owner(browser):
     page = browser.new_page()
     try:
         page.set_content('<div id="cbLog"></div>')
@@ -95,9 +95,9 @@ def test_card_waits_for_owner_and_legacy_card_is_after_reply(browser):
         page.evaluate("renderPrimeHistoryMessage({role:'user',content:'domanda',stream_id:'s1'},0);renderTask(task('d1','')); ")
         assert page.evaluate('rows()') == ['domanda']
         page.evaluate("renderPrimeHistoryMessage({role:'assistant',content:'risposta',stream_id:'s1',reply_to_index:0},1);repositionPrimeTaskCards();")
-        assert page.evaluate('rows()') == ['domanda', 'risposta', 'd1']
+        assert page.evaluate('rows()') == ['domanda', 'risposta']
         page.evaluate("renderTask({...task('unowned',''),anchor_message_index:null,anchor_stream_id:null});")
-        assert page.evaluate('rows()') == ['domanda', 'risposta', 'd1', 'unowned']
+        assert page.evaluate('rows()') == ['domanda', 'risposta']
     finally:
         page.close()
 
@@ -108,9 +108,9 @@ def test_multiple_delegations_do_not_repeat_cumulative_prose(browser):
         page.set_content('<div id="cbLog"></div>')
         page.add_script_tag(content=HARNESS + renderer_source())
         page.evaluate("makeTurn();renderTask(task('d2','Passo il lavoro. Poi delego ancora.',2));renderTask(task('d1','Passo il lavoro.',1));renderTask(task('d3','Passo il lavoro. Poi delego ancora.',3));updatePrimeLiveText(reply,'Passo il lavoro. Poi delego ancora. Attendo.');")
-        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro.', 'd1', ' Poi delego ancora.', 'd2', 'd3', ' Attendo.']
+        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro. Poi delego ancora. Attendo.']
         page.evaluate("renderTask(task('d1','Passo il lavoro.',1));repositionPrimeTaskCards();")
-        assert page.locator('.cb-deleg-progress').count() == 3
-        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro.', 'd1', ' Poi delego ancora.', 'd2', 'd3', ' Attendo.']
+        assert page.locator('.cb-deleg, .cb-deleg-progress').count() == 0
+        assert page.evaluate('rows()') == ['La mia domanda', 'Passo il lavoro. Poi delego ancora. Attendo.']
     finally:
         page.close()

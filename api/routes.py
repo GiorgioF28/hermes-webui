@@ -11197,6 +11197,9 @@ def _handle_bridge_tasks(handler, parsed):
     except Exception:
         logger.debug("bridge tasks: delegation_store augmentation failed", exc_info=True)
         _sync_prime_delegation_records(session_id, ram_tasks)
+    if parse_qs(parsed.query).get("compact", [""])[0] == "1":
+        allowed = ("id", "agent", "task_type", "status", "started", "finished", "librarian_status")
+        tasks = [{key: task[key] for key in allowed if key in task} for task in tasks]
     payload = {"ok": True, "tasks": tasks}
     # Multi-device sync piggy-backs on this 3 s poll instead of a new socket:
     # the tab compares message_count/delegations_rev with what it has rendered.
@@ -11524,7 +11527,7 @@ def _estimate_prime_history_tokens(session_id: str = "hermes-prime") -> int:
     try:
         from api.prime_session_store import get_prime_session_store
 
-        hist = get_prime_session_store(session_id).history()
+        hist = get_prime_session_store(session_id).history(windowed=True)
         total = 0
         for msg in hist.get("messages") or []:
             if not isinstance(msg, dict):
@@ -12004,17 +12007,22 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         # calcolato SOLO se la sessione non esiste ancora. get_or_create() con
         # sessione esistente ignora system_prompt; la chiamata precedente lo
         # leggiccava a vuoto ogni turno (costo I/O a vuoto).
+        from api.prime_session_store import get_prime_session_store
+        archive_history = get_prime_session_store(session_id).history(windowed=True)
+        # A resumed SDK client would silently reintroduce history outside the
+        # rolling window. Rotate only under the existing turn lock.
+        if (archive_history.get("history_window") or {}).get("archived_count") and reg.get(session_id) is not None:
+            reg.close(session_id)
         _prime_session_exists = reg.get(session_id) is not None
         if not _prime_session_exists:
-            from api.prime_session_store import get_prime_session_store
             from api.codex_prime import prompt_history
-            archive_history = get_prime_session_store(session_id).history()
-            if archive_history.get("archive"):
+            if archive_history.get("archive") or archive_history.get("history_window"):
                 archive_context = prompt_history(
                     archive_history.get("messages") or [],
                     total_messages=archive_history.get("message_count"),
                 )
-                archive_context["archive_summary"] = archive_history["archive"]
+                archive_context["archive_summary"] = archive_history.get("archive")
+                archive_context["history_window"] = archive_history.get("history_window")
                 prompt_text += "\n\n## Contesto storico di recupero (non una nuova richiesta)\n" + json.dumps(archive_context, ensure_ascii=False)
         reg.get_or_create(
             session_id, cwd=workspace, add_dir=workspace,
@@ -12161,24 +12169,15 @@ def _handle_bridge_prime_history(handler, parsed=None):
     Fase 1: include pending_briefs_count so the UI can surface pending briefs
     that survived a server restart (e.g. badge "N brief in attesa").
 
-    Honours ?since_index=N (tail-only fetch for multi-device sync) and uses
-    history_with_tool_events() so the tool-card replay actually has data. The
-    payload also carries the durable `delegations` list plus `message_count`,
-    so a reloaded tab can rebuild the delegation cards without any live task.
+    Honours ?since_index=N and returns the active 50-message window with
+    absolute cursors. Only persisted Prime briefs appear in the chat;
+    operational delegation records and settled tool logs are not hydrated.
     """
     try:
         from api.prime_session_store import get_prime_session_store
         session_id = _request_prime_session_id(handler)
         since_index = _bridge_history_since_index(parsed)
-        hist = get_prime_session_store(session_id).history_with_tool_events(since_index)
-        # Rehydrate bounded outcomes without duplicating logs into session state.
-        try:
-            from api.delegation_store import get_delegation_store
-            from api.delegation_outcome import enrich_history_outcomes
-            records = get_delegation_store(Path(str(DEFAULT_WORKSPACE))).get_all()
-            hist["delegations"] = enrich_history_outcomes(hist.get("delegations") or [], records, session_id)
-        except Exception:
-            logger.debug("bridge history: outcome hydration failed", exc_info=True)
+        hist = get_prime_session_store(session_id).history_with_tool_events(since_index, compact=True)
         # Fase 1: annotate with pending brief count (best-effort)
         try:
             from api.prime_brief_queue import get_brief_queue
@@ -12616,7 +12615,7 @@ def _handle_bridge_prime(handler, body):
         try:
             anchor_message_index = int((store.live() or {}).get("message_count") or 0)
         except Exception:
-            anchor_message_index = len((store.history() or {}).get("messages") or [])
+            anchor_message_index = int((store.history() or {}).get("message_count") or 0)
         anchor_created_at = time.time()
         stream_id = store.begin_turn(msg, attachments)
         try:

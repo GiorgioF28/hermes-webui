@@ -25,7 +25,10 @@ PRIME_SESSION_ID = "hermes-prime"
 PARTIAL_FLUSH_INTERVAL_S = 1.5
 PARTIAL_FLUSH_MAX_TOKENS = 64
 
-# Durable delegation cards (Bug A): bounded list kept inside the session file.
+# Read-only active transcript projection; original slots remain durable.
+HISTORY_WINDOW_CAP = 50
+
+# Operational delegation records remain bounded inside the session file.
 DELEGATIONS_CAP = 200
 _DELEGATION_FIELDS = (
     "agent",
@@ -571,13 +574,14 @@ class PrimeSessionStore:
             return 0
         return min(value, total)
 
-    def history(self, since_index: Any = 0) -> dict[str, Any]:
+    def history(self, since_index: Any = 0, *, windowed: bool = False) -> dict[str, Any]:
         """Persisted transcript.
 
         ``since_index`` slices ``messages[since_index:]`` so a browser that has
         already rendered N messages can fetch just the tail (multi-device sync)
         instead of re-downloading the whole ~2 MB transcript. ``total`` is the
-        full message count regardless of the slice.
+        full message count regardless of the slice. ``windowed`` selects at most
+        50 visible originals without changing stored slots or recovery state.
         """
         with self._lock:
             data = self._read_locked()
@@ -592,18 +596,35 @@ class PrimeSessionStore:
             if archive:
                 messages = [dict(m, message_index=i) for i, m in enumerate(messages)
                             if i >= start and "_prime_archive" not in m]
+            window = None
+            if windowed:
+                retained = [(i, m) for i, m in enumerate(data["messages"])
+                            if "_prime_archive" not in m][-HISTORY_WINDOW_CAP:]
+                owner_stream = (pending or {}).get("stream_id")
+                if owner_stream:
+                    owner = next(((i, m) for i, m in enumerate(data["messages"])
+                                  if m.get("stream_id") == owner_stream and m.get("role") == "user"), None)
+                    if owner and all(i != owner[0] for i, _ in retained):
+                        retained = [owner] + retained[-(HISTORY_WINDOW_CAP - 1):]
+                floor = retained[0][0] if retained else total
+                window = {"limit": HISTORY_WINDOW_CAP, "start_index": floor,
+                          "visible_indexes": [i for i, _ in retained],
+                          "archived_count": total - len(retained),
+                          "summary": "Lo storico precedente alla finestra attiva resta recuperabile con prime_history; per decisioni e task consultare le fonti di memoria pertinenti."}
+                messages = [dict(m, message_index=i) for i, m in retained if i >= start]
             return {
                 "session_id": self.session_id,
-                "messages": messages if archive else (messages[start:] if start else messages),
+                "messages": messages if (archive or windowed) else (messages[start:] if start else messages),
                 "pending_turn": pending,
                 "settings": dict(data.get("settings") or {}),
                 "updated_at": data.get("updated_at"),
                 "since_index": start,
                 "total": total,
                 "message_count": total,
-                "delegations": self._visible_delegations(data),
+                "delegations": [] if windowed else self._visible_delegations(data),
                 "delegations_rev": int(data.get("delegations_rev") or 0),
                 "archive": self._archive_metadata(data),
+                "history_window": window,
             }
 
     def live(self) -> dict[str, Any]:
@@ -854,10 +875,13 @@ class PrimeSessionStore:
             events = [e for e in events if e.get("stream_id") == stream_id]
         return events
 
-    def history_with_tool_events(self, since_index: Any = 0) -> dict:
+    def history_with_tool_events(self, since_index: Any = 0, *, compact: bool = False) -> dict:
         """Like history() but also includes recent tool events for cold-load (P2-C)."""
         with self._lock:
-            payload = self.history(since_index)
+            payload = self.history(since_index, windowed=compact)
+            if compact:
+                payload["tool_events"] = []
+                return payload
             data = self._read_locked()
             pending = payload.get("pending_turn")
             journal = list(data.get("journal") or [])

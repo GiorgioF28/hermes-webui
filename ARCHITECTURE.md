@@ -42,6 +42,18 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 ---
 
+### Command Bridge Prime history window
+
+The browser and automatic provider recovery consume a read-only 50-message
+projection from `api/prime_session_store.py`, with absolute cursors and an
+explicit retrieval reminder. Operational delegations retain their separate
+canonical records; the transcript renders only durable Prime briefs. Compact
+task polling omits worker task/result/log text and does not hydrate historical
+cards when only a delegation revision changes. Older original messages remain
+recoverable without being placed in routine browser/model payloads. See
+[`docs/prime-history-archive-contract.md`](docs/prime-history-archive-contract.md)
+for pending-owner protection, Claude client rotation, rollback and state layers.
+
 ## 2. File Inventory
 
     <repo>/
