@@ -113,6 +113,16 @@ def test_dm_success_does_not_clear_email_source_error(tmp_path: Path):
     assert payload["email"]["lastError"] == "payload email non valido"
 
 
+def test_failed_dm_check_is_reported_as_error_not_zero_replies(tmp_path: Path):
+    from api.daily_brief import update_run_status
+
+    update_run_status(tmp_path, now=NOW, source="dm", last_error="check-dm non completato")
+    payload = build_daily_brief_payload(tmp_path, replies_file=tmp_path / "missing.json", now=NOW)
+    assert payload["ig"]["count"] == 0
+    assert payload["ig"]["sourceStatus"] == "error"
+    assert payload["ig"]["lastError"] == "check-dm non completato"
+
+
 def test_accumulator_error_is_separate_from_digest_status(tmp_path: Path):
     from api.daily_brief import update_run_status
 
@@ -148,8 +158,42 @@ def test_noise_list_filters_sender_after_three_hits(tmp_path: Path):
     assert noise["senders"][0]["hits"] == 3
     assert matches_noise(_email(), noise) is True
     result = ingest_email_digest(tmp_path, {"accounts": [], "emails": [_email()]}, now=NOW + timedelta(days=2))
-    assert result["stored"] == 1
-    assert result["analysed"] == 1
+    assert result["stored"] == 0
+    assert result["skipped"] == 1
+    assert result["analysed"] == 0
+
+
+def test_full_acquired_body_is_kept_in_private_archive_and_used_for_analysis(tmp_path: Path):
+    body = "messaggio completo " * 300
+    row = _email(messageId="full-body", bodyText=body)
+    accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
+    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
+    assert archive["items"][0]["bodyText"] == body
+    assert json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))["items"][0]["bodyText"] == body
+
+
+def test_pending_archive_recovers_a_missing_queue_without_reprocessing_completed_items(tmp_path: Path):
+    row = _email(messageId="recover-me", bodyText="contenuto acquisito")
+    accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
+    (tmp_path / ACCUMULATOR_FILENAME).unlink()
+    with patch("api.email_analysis.analyse_emails", return_value=([{"importance": "media", "summary": "Recuperata", "why": "informa"}], "prime", None)):
+        first = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+        second = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW + timedelta(minutes=1))
+    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
+    assert first["stored"] == 1
+    assert second["stored"] == 0
+    assert archive["items"][0]["processingStatus"] == "processed"
+
+
+def test_account_error_marks_digest_incomplete_not_successful_zero(tmp_path: Path):
+    ingest_email_digest(tmp_path, {
+        "accounts": [{"label": "gmail-personale", "error": "provider unavailable"}],
+        "emails": [],
+    }, now=NOW)
+    payload = build_daily_brief_payload(tmp_path, replies_file=tmp_path / "missing.json", now=NOW)
+    assert payload["email"]["count"] == 0
+    assert payload["email"]["sourceStatus"] == "error"
+    assert payload["email"]["lastError"] == "sorgente email incompleta: gmail-personale"
 
 
 def test_accumulator_dedupes_without_cap_or_age_pruning_and_archives(tmp_path: Path):

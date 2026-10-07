@@ -11,11 +11,15 @@ followed by `os.replace`.
 The pending queue has no age or item-count pruning. The archive is independent
 of the queue and is never flushed when a digest succeeds. Both deduplicate by
 account and stable message ID (fallback: account, sender, subject and receive
-time). A model error or partial/invalid response writes only a fallback digest
-and leaves pending rows queued; successful model classification runs in batches
-of 80 and clears only the cutoff rows after the digest write succeeds. Verify
-the local deployment's request and storage limits before relying on large
-message bodies; the cron JSON request limit is 1 MiB.
+time). Provider-supplied `bodyText` is retained in private local storage and is
+preferred for analysis; `bodyExcerpt` remains a compatibility fallback. The
+digest never contains either body field. A model error or partial/invalid
+response leaves pending rows queued; successful model classification runs in
+batches of 80 and clears only the cutoff rows after the digest write succeeds.
+The cron JSON request limit remains 1 MiB, so providers/workflows must split
+large intake batches without dropping messages. Account-level failures are
+recorded in the run status and surfaced by the WebUI card instead of presenting
+an empty digest as a successful zero.
 
 ## Required configuration
 

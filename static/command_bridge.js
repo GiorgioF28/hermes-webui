@@ -755,7 +755,9 @@
       : 'mai eseguito';
     summary.innerHTML =
       '<div class="cb-brief-summary-row"><span>Email oggi</span><strong>' + Number(email.count || 0) + ' nuove · ' + Number(email.noiseSkipped || 0) + ' filtrate</strong></div>' +
-      '<div class="cb-brief-summary-row"><span>DM Instagram</span><strong>' + Number(ig.count || 0) + ' risposte</strong></div>';
+      '<div class="cb-brief-summary-row"><span>DM Instagram</span><strong>' + Number(ig.count || 0) + ' risposte</strong></div>' +
+      (email.sourceStatus === 'error' || email.sourceStatus === 'incomplete' || email.accumulatorStatus === 'error' || ig.sourceStatus === 'error' || ig.malformed
+        ? '<div class="cb-brief-summary-row"><span>Stato acquisizione</span><strong class="cb-brief-check stale">incompleto · verifica sorgenti</strong></div>' : '');
 
     var importanceRank = { alta: 0, media: 1, bassa: 2 };
     var visibleEmails = (email.items || []).slice().sort(function (left, right) {

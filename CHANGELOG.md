@@ -1,5 +1,14 @@
 ---
 
+## Unreleased — Daily Brief ingestion durability
+
+- Preserve complete provider-supplied email body text in the private archive
+  and pending queue for later analysis; keep message bodies out of the digest.
+- Apply the configured noise list during digest creation and report skipped
+  noise accurately.
+- Persist source-level email failures and show an error status in the Daily
+  Brief card instead of presenting a failed source as zero mail.
+
 ## Unreleased — Prime provider routing
 
 - Delegation cards separate a bounded technical log from the agent result and a short error. Codex usage-limit failures are classified correctly, partial results survive, and historical cards no longer infer commits from session IDs.

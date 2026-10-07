@@ -250,13 +250,14 @@ def build_daily_brief_payload(
     stale = last_dt is None or current - last_dt > STALE_AFTER
     email_status = _read_source_status(data_dir, "digest")
     accumulator_status = _read_source_status(data_dir, "accumulate")
+    dm_status = _read_source_status(data_dir, "dm")
     email_generated_at, _missing_digest, _bad_digest = _read_json(Path(data_dir) / "daily-email-digest.json")
     email_generated = _parse_datetime(email_generated_at.get("generatedAt")) if isinstance(email_generated_at, dict) else None
     email_stale = email_generated is None or _today_local(email_generated) != _today_local(current)
     email_status_value = "error" if email_status["lastErrorAt"] and (
         not email_status["lastSuccessAt"]
         or (_parse_datetime(email_status["lastErrorAt"]) or current) > (_parse_datetime(email_status["lastSuccessAt"]) or current)
-    ) else "stale" if email_stale else "current"
+    ) else "incomplete" if any(row.get("error") for row in email.get("accounts", [])) else "stale" if email_stale else "current"
     accumulator_success = _parse_datetime(accumulator_status["lastSuccessAt"])
     accumulator_error_at = _parse_datetime(accumulator_status["lastErrorAt"])
     accumulator_error_is_newer = accumulator_error_at is not None and (
@@ -265,6 +266,13 @@ def build_daily_brief_payload(
     accumulator_state = (
         "error" if accumulator_error_is_newer
         else "stale" if accumulator_success is None or current - accumulator_success > STALE_AFTER
+        else "current"
+    )
+    dm_success = _parse_datetime(dm_status["lastSuccessAt"])
+    dm_error_at = _parse_datetime(dm_status["lastErrorAt"])
+    dm_state = (
+        "error" if dm_error_at is not None and (dm_success is None or dm_error_at > dm_success)
+        else "stale" if dm_success is None or current - dm_success > STALE_AFTER
         else "current"
     )
     email.update({
@@ -285,6 +293,8 @@ def build_daily_brief_payload(
             "items": replies,
             "notInitialized": not_initialized,
             "malformed": ig_malformed,
+            "sourceStatus": dm_state,
+            "lastError": dm_status["lastError"] if dm_state == "error" else None,
         },
     }
 
@@ -418,6 +428,13 @@ def _clean_body_excerpt(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _clean_full_body(value: Any) -> str:
+    """Preserve all provider-supplied content in private local storage."""
+    if not isinstance(value, str):
+        return ""
+    return _CONTROL_CHARS_RE.sub(" ", value).replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _normalize_email_row(raw: Any, index: int) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise DailyBriefValidationError(f"emails[{index}] must be an object")
@@ -440,6 +457,7 @@ def _normalize_email_row(raw: Any, index: int) -> dict[str, Any]:
         "subject": raw["subject"].strip()[:200],
         "receivedAt": _iso(received),
         "bodyExcerpt": _clean_body_excerpt(raw.get("bodyExcerpt")),
+        "bodyText": _clean_full_body(raw.get("bodyText") if raw.get("bodyText") is not None else raw.get("body")),
         "listUnsubscribe": bool(raw.get("listUnsubscribe")),
     }
 
@@ -470,7 +488,7 @@ def _write_accumulator(data_dir: Path, items: list[dict[str, Any]], *, now: date
     persisted = []
     for item in items:
         persisted.append({key: item.get(key, "") for key in (
-            "account", "messageId", "from", "fromName", "subject", "receivedAt", "bodyExcerpt"
+            "account", "messageId", "from", "fromName", "subject", "receivedAt", "bodyExcerpt", "bodyText"
         )})
     _atomic_write_json(data_dir / ACCUMULATOR_FILENAME, {
         "version": 2,
@@ -493,12 +511,28 @@ def _archive_rows(data_dir: Path, incoming: list[dict[str, Any]], *, now: dateti
     by_key = {_email_key(row): row for row in existing}
     before = len(by_key)
     for row in incoming:
-        by_key.setdefault(_email_key(row), row)
+        archived = dict(row)
+        archived.setdefault("processingStatus", "pending")
+        by_key.setdefault(_email_key(row), archived)
     rows = sorted(by_key.values(), key=lambda row: row.get("receivedAt", ""))
     _atomic_write_json(data_dir / ARCHIVE_FILENAME, {
         "version": 1, "updatedAt": _iso(now), "items": rows,
     })
     return len(by_key) - before
+
+
+def _mark_archive_processed(data_dir: Path, rows: list[dict[str, Any]], *, now: datetime) -> None:
+    keys = {_email_key(row) for row in rows}
+    if not keys:
+        return
+    archived = _load_archive(data_dir)
+    for row in archived:
+        if _email_key(row) in keys:
+            row["processingStatus"] = "processed"
+            row["processedAt"] = _iso(now)
+    _atomic_write_json(Path(data_dir) / ARCHIVE_FILENAME, {
+        "version": 1, "updatedAt": _iso(now), "items": archived,
+    })
 
 
 def accumulate_email_inbox(
@@ -514,9 +548,14 @@ def accumulate_email_inbox(
     with _WRITE_LOCK:
         existing = _load_accumulator(Path(data_dir))
         _archive_rows(Path(data_dir), incoming, now=current)
+        incoming_keys = {_email_key(row) for row in incoming}
+        archive_pending = [
+            row for row in _load_archive(Path(data_dir))
+            if row.get("processingStatus", "pending") == "pending" and _email_key(row) not in incoming_keys
+        ]
         combined: dict[tuple[Any, ...], tuple[dict[str, Any], bool]] = {}
         skipped = 0
-        for row in existing:
+        for row in [*archive_pending, *existing]:
             combined[_email_key(row)] = (row, False)
         for row in incoming:
             key = _email_key(row)
@@ -548,7 +587,12 @@ def ingest_email_digest(
     low_senders: set[str] = set()
     noise_dropped = 0
     accumulated = _load_accumulator(base_dir)
-    consumed = [row for row in accumulated if (_parse_datetime(row.get("receivedAt")) or current) <= cutoff]
+    archive_pending = [row for row in _load_archive(base_dir) if row.get("processingStatus", "pending") == "pending"]
+    consumed_by_key = {
+        _email_key(row): row for row in [*archive_pending, *accumulated]
+        if (_parse_datetime(row.get("receivedAt")) or current) <= cutoff
+    }
+    consumed = list(consumed_by_key.values())
     incoming = [_normalize_email_row(raw, index) for index, raw in enumerate(body["emails"])]
     with _WRITE_LOCK:
         _archive_rows(base_dir, [*consumed, *incoming], now=current)
@@ -562,7 +606,14 @@ def ingest_email_digest(
             continue
         seen.add(key)
         merged.append(normalized)
-    stored.extend(merged)
+    noise = _noise_payload(base_dir)
+    digest_input = []
+    for row in merged:
+        if matches_noise(row, noise):
+            noise_dropped += 1
+        else:
+            digest_input.append(row)
+    stored.extend(digest_input)
     from api.email_analysis import analyse_emails
 
     analyses, analysis_engine, analysis_error = analyse_emails(stored, vip_senders=vip)
@@ -584,6 +635,8 @@ def ingest_email_digest(
     if low_senders:
         merge_noise_list(base_dir, {"senders": sorted(low_senders), "domains": [], "subjectPatterns": []}, now=current, consecutive=True)
     input_noise = _count(body.get("noiseSkipped"))
+    account_errors = [str(item.get("label") or "sorgente") for item in body.get("accounts", []) if isinstance(item, dict) and item.get("error")]
+    source_error = ("sorgente email incompleta: " + ", ".join(account_errors))[:200] if account_errors else analysis_error
     digest = {
         "version": 2,
         "generatedAt": _iso(current),
@@ -596,6 +649,11 @@ def ingest_email_digest(
         digest["analysisError"] = analysis_error
     _atomic_write_json(base_dir / "daily-email-digest.json", digest)
     consumed_keys = {_email_key(row) for row in consumed} if analysis_engine == "prime" and not analysis_error else set()
+    # An empty/rules-only digest is still a successful classification when the
+    # rules engine returned no error. A failed model analysis keeps rows pending.
+    if not analysis_error:
+        _mark_archive_processed(base_dir, consumed, now=current)
+        consumed_keys = {_email_key(row) for row in consumed}
     with _WRITE_LOCK:
         latest = _load_accumulator(base_dir)
         kept = [
@@ -604,7 +662,7 @@ def ingest_email_digest(
             or _email_key(row) not in consumed_keys
         ]
         _write_accumulator(base_dir, kept, now=current)
-    update_run_status(base_dir, now=current, source="digest", last_error=analysis_error)
+    update_run_status(base_dir, now=current, source="digest", last_error=source_error)
     logger.info(
         "daily_brief_email_ingest stored=%d noiseSkipped=%d duplicates=%d engine=%s",
         len(digest_rows), input_noise + noise_dropped, duplicate_dropped, analysis_engine,
@@ -612,7 +670,7 @@ def ingest_email_digest(
     return {
         "ok": True,
         "stored": len(digest_rows),
-        "skipped": duplicate_dropped + noise_dropped,
+        "skipped": duplicate_dropped + noise_dropped + input_noise,
         "analysed": len(digest_rows),
     }
 

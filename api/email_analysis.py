@@ -115,7 +115,7 @@ def analyse_emails(
                     "fromName": row.get("fromName", ""),
                     "subject": row.get("subject", ""),
                     "receivedAt": row.get("receivedAt", ""),
-                    "bodyExcerpt": row.get("bodyExcerpt", ""),
+                    "bodyExcerpt": row.get("bodyText") or row.get("bodyExcerpt", ""),
                 }
                 for index, row in enumerate(batch)
             ]
