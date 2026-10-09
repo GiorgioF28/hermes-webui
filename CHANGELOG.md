@@ -1,17 +1,16 @@
 ---
 
-## Unreleased — Daily Brief ingestion durability
+## Unreleased ? Daily Brief SQLite durability
 
-- Analyze email with Prime's configured Codex chief profile, with a bounded
-  read-only CLI invocation and the existing failure fallback; exclude the
-  private email archive from Git.
-- Preserve complete provider-supplied email body text in the private archive
-  and pending queue for later analysis; keep message bodies out of the digest.
-- Apply the configured noise list during digest creation and report skipped
-  noise accurately.
-- Persist source-level email failures and show an error status in the Daily
-  Brief card instead of presenting a failed source as zero mail.
-
+- Persist email intake in a private transactional SQLite queue with stable
+  deduplication, one-time backed-up JSON migration, and identifier-only replay
+  receipts after delivery.
+- Publish complete Prime analyses through a recoverable SQLite outbox before
+  deleting only the delivered snapshot bodies; failed or partial analysis
+  keeps the snapshot pending.
+- Preserve the existing Daily Brief digest/card contract, report failed or
+  unverified accounts explicitly, and provide an authenticated SQLite
+  readiness check for workflow rollout.
 ## Unreleased — Prime provider routing
 
 - Delegation cards separate a bounded technical log from the agent result and a short error. Codex usage-limit failures are classified correctly, partial results survive, and historical cards no longer infer commits from session IDs.
