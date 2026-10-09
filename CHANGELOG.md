@@ -8329,3 +8329,6 @@ Critical regressions introduced during the server.py split, caught by users and 
 - Add an isolated, evidence-gated and idempotent adapter for syncing verified
   inbound replies to existing VisionBuilts CRM pages. Source integration and
   live activation remain pending Meta and Gmail access.
+# Unreleased
+
+- Hardens verified inbound CRM reply sync: preserves multi-segment Notion notes, normalizes Notion readback timestamps, reconciles applied retries, keeps equal-time distinct messages, closes SQLite handles, and adds a command-line consumer with a reviewed identity-to-page mapping and real Notion API client.

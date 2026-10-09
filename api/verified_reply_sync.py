@@ -98,16 +98,27 @@ class ReplyLedger:
         db.execute("PRAGMA busy_timeout=10000")
         return db
 
+    @staticmethod
+    def _close(db):
+        db.close()
+
     def get(self, key: str):
-        with self._connect() as db:
+        db = self._connect()
+        try:
             return db.execute("SELECT page_id FROM reply_receipts WHERE event_key=?", (key,)).fetchone()
+        finally:
+            self._close(db)
 
     def ack(self, event: ReplyEvent, verification_hash: str):
-        with self._connect() as db:
+        db = self._connect()
+        try:
             db.execute("INSERT OR IGNORE INTO reply_receipts VALUES (?, ?, ?, ?, ?)", (
                 event.key, event.crm_page_id, event.occurred_at,
                 datetime.now(timezone.utc).isoformat(), verification_hash,
             ))
+            db.commit()
+        finally:
+            self._close(db)
 
 
 def _plain(prop: dict) -> str:
@@ -123,7 +134,32 @@ def _plain(prop: dict) -> str:
 
 
 def _rich(value: str):
-    return {"rich_text": [{"type": "text", "text": {"content": value[:2000]}}]}
+    # Notion caps each text object at 2,000 chars; the property itself supports
+    # multiple objects. Preserve existing notes in full.
+    return {"rich_text": [
+        {"type": "text", "text": {"content": value[index:index + 2000]}}
+        for index in range(0, len(value), 2000)
+    ]}
+
+
+def _instant(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _same_notion_date(actual: str, expected: str) -> bool:
+    if not actual or not expected:
+        return False
+    left, right = _instant(actual), _instant(expected)
+    # Notion date-only/minute precision is a valid normalization of a source
+    # timestamp; never accept a mismatch outside the represented precision.
+    if len(actual) == 10:
+        return left.date() == right.date()
+    if len(actual) <= 16:
+        return left.replace(second=0, microsecond=0) == right.replace(second=0, microsecond=0)
+    return left == right
 
 
 def sync_reply(
@@ -156,13 +192,15 @@ def sync_reply(
             if not dm_sent or not contacted_at:
                 raise IdentityReview("contacted_state_not_verified")
             next_status = "Risposto"
-        if last_date:
-            previous = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
-            incoming = datetime.fromisoformat(event.occurred_at.replace("Z", "+00:00"))
-            if previous.tzinfo is None:
-                previous = previous.replace(tzinfo=timezone.utc)
-            if previous >= incoming:
-                return {"action": "stale", "page_id": event.crm_page_id}
+        if last_date and _instant(last_date) > _instant(event.occurred_at):
+            # A prior PATCH may have succeeded while its readback failed. If
+            # Notion already contains this event marker, reconcile the receipt.
+            old_marker = f"[reply:{event.channel}:{event.message_id}]"
+            if old_marker in _plain(props.get("Note") or {}):
+                verified = {"Stato": status, "Data risposta": last_date}
+                ledger.ack(event, hashlib.sha256(json.dumps(verified, sort_keys=True).encode()).hexdigest())
+                return {"action": "reconciled", "page_id": event.crm_page_id}
+            return {"action": "stale", "page_id": event.crm_page_id}
 
         old_notes = _plain(props.get("Note") or {})
         note_marker = f"[reply:{event.channel}:{event.message_id}]"
@@ -171,13 +209,13 @@ def sync_reply(
             part for part in (old_notes, reply_note) if part
         )
         patch = {
-            "Stato": {"select": {"name": next_status}},
+            "Stato": {((props.get("Stato") or {}).get("type") or "select"): {"name": next_status}},
             "Data risposta": {"date": {"start": event.occurred_at}},
             "Note": _rich(notes),
         }
         # Optional properties are written only when the live page exposes them.
         if "Canale risposta" in props:
-            patch["Canale risposta"] = {"select": {"name": event.channel.capitalize()}}
+            patch["Canale risposta"] = {((props.get("Canale risposta") or {}).get("type") or "select"): {"name": event.channel.capitalize()}}
         if "Prossima azione" in props:
             patch["Prossima azione"] = _rich(event.next_action)
         notion.patch_page(event.crm_page_id, patch)
@@ -189,7 +227,11 @@ def sync_reply(
         if "Prossima azione" in patch:
             expected["Prossima azione"] = event.next_action
         actual = {name: _plain(after_props.get(name) or {}) for name in expected}
-        if actual != expected or note_marker not in _plain(after_props.get("Note") or {}):
+        scalar_mismatch = actual.get("Stato") != expected["Stato"]
+        date_mismatch = not _same_notion_date(actual.get("Data risposta", ""), event.occurred_at)
+        optional_mismatch = any(actual.get(k) != v for k, v in expected.items()
+                                if k not in {"Stato", "Data risposta"})
+        if scalar_mismatch or date_mismatch or optional_mismatch or note_marker not in _plain(after_props.get("Note") or {}):
             raise ReplySyncError("notion_readback_mismatch")
         receipt = hashlib.sha256(json.dumps(actual, sort_keys=True).encode()).hexdigest()
         ledger.ack(event, receipt)

@@ -13,6 +13,8 @@ class FakeNotion:
             "Fonte": {"type": "rich_text", "rich_text": [{"plain_text": "historic source"}]},
             "DM inviato": {"type": "rich_text", "rich_text": [{"plain_text": "sent DM"}]},
             "Owner": {"type": "select", "select": {"name": "Giorgio"}},
+            "Canale risposta": {"type": "select", "select": None},
+            "Prossima azione": {"type": "rich_text", "rich_text": []},
             **extra,
         }}
 
@@ -112,6 +114,69 @@ def test_notion_failure_or_readback_mismatch_is_not_acknowledged(tmp_path):
     with pytest.raises(RuntimeError):
         sync_reply(event(), notion=Fails(), ledger=ledger, identity_check=lambda *_: True)
     assert not ledger.get(__import__("api.verified_reply_sync", fromlist=["ReplyEvent"]).ReplyEvent.parse(event()).key)
+
+
+def test_retry_after_applied_patch_reuses_marker_and_acknowledges(tmp_path):
+    class ReadbackInterrupted(FakeNotion):
+        fail_once = True
+
+        def get_page(self, page_id):
+            if self.fail_once and self.calls:
+                self.fail_once = False
+                raise RuntimeError("temporary readback failure")
+            return self.page
+
+    notion = ReadbackInterrupted()
+    ledger = ReplyLedger(tmp_path / "r.db")
+    with pytest.raises(RuntimeError):
+        sync_reply(event(), notion=notion, ledger=ledger, identity_check=lambda *_: True)
+    assert not ledger.get(__import__("api.verified_reply_sync", fromlist=["ReplyEvent"]).ReplyEvent.parse(event()).key)
+    assert sync_reply(event(), notion=notion, ledger=ledger, identity_check=lambda *_: True)["action"] == "updated"
+    note = "".join(x["plain_text"] for x in notion.page["properties"]["Note"]["rich_text"])
+    assert note.count("[reply:instagram:m1]") == 1
+
+
+def test_preserves_long_notes_and_semantic_notion_timestamp(tmp_path):
+    note = "x" * 2600
+    notion = FakeNotion()
+    notion.page["properties"]["Note"] = {"type": "rich_text", "rich_text": [
+        {"plain_text": note[:2000]}, {"plain_text": note[2000:]}
+    ]}
+    original_patch = notion.patch_page
+
+    def normalized_patch(page_id, props):
+        result = original_patch(page_id, props)
+        date = result["properties"]["Data risposta"]["date"]["start"]
+        result["properties"]["Data risposta"]["date"]["start"] = "2026-10-09T10:00:00.000+00:00"
+        return result
+
+    notion.patch_page = normalized_patch
+    sync_reply(event(), notion=notion, ledger=ReplyLedger(tmp_path / "r.db"), identity_check=lambda *_: True)
+    saved = "".join(x["plain_text"] for x in notion.page["properties"]["Note"]["rich_text"])
+    assert saved.startswith(note)
+    assert "Prossima azione: Reply manually" in saved
+    assert len(notion.calls[0]["Note"]["rich_text"]) == 2
+
+
+def test_equal_timestamp_distinct_events_are_not_dropped(tmp_path):
+    notion = FakeNotion()
+    ledger = ReplyLedger(tmp_path / "r.db")
+    sync_reply(event(message_id="first"), notion=notion, ledger=ledger, identity_check=lambda *_: True)
+    result = sync_reply(event(message_id="second"), notion=notion, ledger=ledger, identity_check=lambda *_: True)
+    assert result["action"] == "updated"
+    note = "".join(x["plain_text"] for x in notion.page["properties"]["Note"]["rich_text"])
+    assert "[reply:instagram:first]" in note and "[reply:instagram:second]" in note
+
+
+def test_ledger_connections_close_and_database_reopens(tmp_path):
+    path = tmp_path / "r.db"
+    ledger = ReplyLedger(path)
+    ledger.get("missing")
+    db = ledger._connect()
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.close()
+    ledger2 = ReplyLedger(path)
+    assert ledger2.get("missing") is None
 
     class BadReadback(FakeNotion):
         def patch_page(self, *_):
