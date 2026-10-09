@@ -65,6 +65,11 @@ def consume(events_path: Path, mapping_path: Path, ledger_path: Path, notion: No
                 # identity was verified. Resolve both from the reviewed map.
                 source_event.pop("identity_verified", None)
                 source_event.pop("crm_page_id", None)
+                if (source_event.get("inbound") is not True
+                        or source_event.get("autoresponder") is not False
+                        or source_event.get("echo") is not False):
+                    counts["excluded"] += 1
+                    continue
                 identity = source_event.get("identity_key")
                 key = "|".join((source_event.get("account", ""), source_event.get("channel", ""), str(identity or "")))
                 match = mapping.get(key)
