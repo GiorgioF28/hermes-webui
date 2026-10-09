@@ -1,125 +1,111 @@
-# Hermes Daily Brief v2 — runbook
+# Hermes Daily Brief v2
 
-## Runtime files
+## Email storage and delivery
 
-Hermes stores local state in `data/`: `daily-email-digest.json`,
-`email-inbox-accumulator.json` (pending analysis), `email-archive.json`
-(persistent unique messages), `email-noise-list.json`, `daily-brief-run.json`,
-and optional `email-vip.json`. All are git-ignored. Writes use a sibling `.tmp`
-followed by `os.replace`.
+Email intake, pending analysis, and replay deduplication use the Python
+standard-library SQLite database at `STATE_DIR/daily-brief/email-queue.sqlite3`
+(`STATE_DIR` is `HERMES_WEBUI_STATE_DIR`, or Hermes WebUI's normal private state
+directory). SQLite uses WAL, `synchronous=FULL`, a 15-second busy timeout, and
+unique `(account, message key)` constraints. The key prefers the provider's
+stable message ID and otherwise hashes account, sender, subject, and receive
+time. Accumulation returns HTTP 200 only after its transaction commits.
 
-The pending queue has no age or item-count pruning. The archive is independent
-of the queue and is never flushed when a digest succeeds. Both deduplicate by
-account and stable message ID (fallback: account, sender, subject and receive
-time). Provider-supplied `bodyText` is retained in private local storage and is
-preferred for analysis; `bodyExcerpt` remains a compatibility fallback. The
-digest never contains either body field. A model error or partial/invalid
-response leaves pending rows queued; successful model classification runs in
-batches of 80 and clears only the cutoff rows after the digest write succeeds.
-The cron JSON request limit remains 1 MiB, so providers/workflows must split
-large intake batches without dropping messages. Account-level failures are
-recorded in the run status and surfaced by the WebUI card instead of presenting
-an empty digest as a successful zero.
+The first use backs up the old `email-archive.json` and
+`email-inbox-accumulator.json` into the private state's
+`daily-brief/migration-backups/`, then imports pending message bodies and
+processed message receipts once. Source JSON remains untouched for rollback,
+but once the migration marker commits, SQLite is authoritative and the legacy
+JSON files are not read or parsed again. Stale pending rows cannot restore
+processed bodies after restart. A replay matching a receipt is skipped before
+an INSERT, including after outbox recovery and cleanup.
 
-## Required configuration
+The recap captures a UTC cutoff and snapshots the eligible queue keys in one
+SQLite transaction. Arrivals during AI analysis remain pending, even when their
+message date precedes the cutoff. Every non-noise snapshot row needs one valid
+Prime result. Provider errors and partial replies return retryable HTTP 503 and
+retain the queue. After successful analysis, SQLite commits a prepared recap to
+an outbox, Hermes atomically publishes the same versioned digest read by the
+existing Daily Brief card/API, then SQLite records minimal receipts and deletes
+only that snapshot's bodies. A retry after a crash republishes the same
+`digestId` and finishes cleanup without appending a second recap. The SQLite
+outbox and JSON digest are separate stores; this ordered recovery protocol is
+the consistency boundary, not a cross-store transaction.
 
-1. Set `HERMES_CRON_TOKEN` in the local WebUI `.env`; never commit its value.
-2. In n8n use the existing Header Auth credential `Hermes Cron Token`, whose
-   header name is `X-Hermes-Cron-Token`, on all three HTTP Request nodes. Never
-   copy its value into code, docs, backups, or logs.
-3. The two IMAP credentials are `IMAP account` (id `i3B9BJIveTSJgECN`) and
-   `IMAP account 2` (id `VjYxl7eLUtwmtpSM`).
-4. The Gmail OAuth2 credential is `Gmail account` (id `EYHotM8cXYMUtKFz`),
-   credential type `gmailOAuth2` in the public API.
+An empty recap does not prove zero mail. Each source needs a successful
+same-day acquisition record; failed or unverified accounts carry an explicit
+error. The IMAP trigger branches remain independent and do not mark mail read.
+Instagram remains a separate source.
 
-## Current n8n workflow (2026-09-04)
+The authenticated `POST /api/cron/daily-brief/status` reports storage protocol
+and pending count without exposing message content. A workflow candidate must
+not be imported or activated until it reports `storage=sqlite`,
+`schemaVersion=1`, and `recapProtocol=outbox-v1`.
 
-Workflow `HermesDailyBriefV2` is `active=true` and was updated at
-`2026-09-04T14:03Z`.
+## Rollback
 
-- `Schedule 07:00 Europe Rome` → `POST check DM` and → `Gmail personale`.
-- `Gmail personale` (`Message: Get Many`, limit 50, simple output off, query
-  `newer_than:1d`) → `Label Gmail personale` → `Normalize email rows` → `POST
-  email digest`.
-- `IMAP Gmail secondario` (`IMAP account 2`) → `Label Gmail secondario` → `POST
-  email accumulate`.
-- `IMAP Yahoo` (`IMAP account`) → `Label Yahoo` → `POST email accumulate`.
+Before rolling back to the JSON implementation, run
+`python scripts/daily_brief_sqlite_export_legacy.py --data-dir <legacy-data-dir>`
+while the SQLite implementation is available. The exporter backs up existing
+legacy files, writes SQLite pending rows to the accumulator, and merges pending
+rows and minimal receipts into the archive. Review the exports; keep SQLite
+unchanged until the old process is verified. The digest JSON already contains
+the last published recap. Never restore a migration backup over current queue
+state without merging post-migration pending rows.
+Receipts retain only the message ID or fallback identity (sender, subject,
+receive time), never message bodies. Export marks an existing pending archive
+row processed when its receipt matches, preventing the legacy reader from
+reanalyzing it after rollback, including fallback-hash rows.
 
-Both IMAP nodes keep `postProcessAction: nothing` (mail is never marked as
-read), `trackLastMessageId: true`, `forceReconnect: 60`, and the current filter
-`UNSEEN SINCE Sept 4`. Their label nodes emit `messageId` and a 2000-character
-`bodyExcerpt`.
+## n8n workflow
 
-## Accumulation and 07:00 analysis
+`HermesDailyBriefV2` uses the existing Header Auth credential
+`Hermes Cron Token` (`X-Hermes-Cron-Token`) for all Hermes endpoints. Do not
+copy its value into workflow code, docs, backups, or logs.
 
-`n8n-nodes-base.emailReadImap` is a trigger with no inputs. The two IMAP
-branches therefore run independently and call `POST
-/api/cron/daily-brief/email-accumulate` as messages arrive. They must not be
-connected to the Schedule node. Only the Gmail branch is driven by the 07:00
-schedule.
+Read-only inspection on 2026-10-09 found the workflow active. The latest
+execution, `269382`, was a manual Gmail-only run and did not reach an HTTP node.
+The latest observed `POST email accumulate` failure was execution `269368` on
+2026-10-07. `IMAP Gmail secondario` reached the POST node, where
+`emails[0].receivedAt` was rejected as invalid (HTTP 422 under the current route
+contract). The current Gmail normalizer also references an undefined
+`bodyText`. Execution payloads and email contents must not be copied to logs or
+reports.
 
-At 07:00, `POST /api/cron/daily-brief/email` captures a cutoff, merges Gmail
-rows with accumulated rows at or before that cutoff, deduplicates, applies the
-existing noise/VIP rules, and analyses up to 80 messages in one Prime/Anthropic
-batch. A successful digest is version 2 and adds `summary`, `why`, and
-`importance` without removing v1 fields. It then flushes consumed accumulator
-rows while preserving rows newer than the cutoff.
+`scripts/prepare_daily_brief_workflow_patch.py` transforms an exported workflow
+and writes a candidate JSON file; it never writes to the n8n API. It validates
+workflow identity and active state, fixes Gmail date/body normalization,
+records source status through the accumulation endpoint, separates Gmail
+acquisition from recap generation, adds bounded retries, and leaves IMAP
+triggers independent. It copies the existing Header Auth reference unchanged.
+Prepare/import only after the status endpoint reports SQLite `outbox-v1`. Until
+then, leave the live workflow and credentials unchanged because the 8788
+process may still have the old backend loaded.
 
-Instagram replies in the Daily Brief are read from the original reply
-`timestamp` (not the scanner's `detectedAt`) and limited to the preceding 24
-hours. Invalid and future timestamps are excluded before the latest reply per
-handle is selected. Empty subjects are retained as empty strings; missing
-subject fields, senders, or invalid/missing receive dates remain source data
-errors and must not be replaced with fabricated values.
+The intended graph is:
 
-The brief API adds `email.sourceStatus` (`current`, `stale`, or `error`),
-`email.generatedAt`, and separate `email.accumulatorStatus` metadata. The
-`daily-brief-run.json` source records for digest, IMAP accumulation, and DM
-checks are independent; success in one source does not clear another source's
-error. A missing or prior-day digest is reported as stale even when a newer DM
-check succeeds.
+```text
+Schedule 07:00 Europe/Rome ──┬── Gmail personale → normalize → email-accumulate → daily recap
+                             └── check DM
+IMAP Gmail secondario ─────────── email-accumulate
+IMAP Yahoo ───────────────────── email-accumulate
+```
 
-If the Anthropic credential is missing, the request times out, the call raises,
-or strict JSON parsing fails, Hermes writes the digest anyway with deterministic
-`classify_importance` results, empty `summary`/`why`, `analysisEngine: rules`,
-and a short non-secret `analysisError`. Model failure alone never turns the
-email endpoint into HTTP 500.
+Gmail errors continue through normalization as an explicit source error, so
+the recap still runs from already accumulated mail. Invalid dates are reported
+as source errors and never replaced with the current time. Retries are bounded
+to three attempts; IMAP post-process remains `nothing`.
 
-## Recovery and verification after auth-gate fix
+## Verification after activation
 
-Commit `8d111b27` lets `/api/cron/daily-brief/*` pass the cookie gate so the
-dedicated cron-token validation can run. It is committed and tested (19 tests)
-but is not live until Giorgio chooses to restart the 8788 process.
+1. Ask Giorgio to restart 8788 after reviewing the pushed commit; this runbook
+   does not restart it.
+2. Call the authenticated status endpoint and confirm SQLite, schema 1,
+   `outbox-v1`, and the pending count.
+3. Import/activate the candidate workflow and verify one synthetic or
+   deduplicated intake returns HTTP 200 only after the pending count changes.
+4. Verify the recap API/card exposes summaries and source errors, and that no
+   digest field contains `bodyText` or `bodyExcerpt`.
+5. Confirm only the delivered snapshot is removed from SQLite and its minimal
+   receipt prevents an IMAP replay from re-adding it.
 
-- After restart, toggle the workflow `active` off/on via API to revive the IMAP
-  triggers, which stopped producing executions after the OOM crashes.
-- Confirm one n8n `POST email accumulate` execution returns HTTP 200 and the
-  accumulator receives an item.
-- The next scheduled digest is at 07:00 Europe/Rome. To obtain a brief on the
-  same day, use `Execute workflow` in the n8n UI; the Public API cannot start a
-  manual workflow execution.
-- Keep in mind that `postProcessAction=nothing` leaves mail UNSEEN: reconnects
-  can replay it. Hermes deduplicates content, but future work should reduce the
-  n8n load and OOM risk.
-
-## Verification checklist
-
-- Confirm in the n8n UI that `IMAP account` is the Yahoo mailbox and `IMAP
-  account 2` is the secondary Gmail mailbox.
-- Put the real local cron value into `Hermes Cron Token` without recording it,
-  then run manually and confirm HTTP 200 on the accumulator, email digest, and
-  check-DM endpoints.
-- Confirm each IMAP message remains unread.
-- Confirm the card shows mailbox badges, importance ordering, sender, subject,
-  and summary/why when present; a v1 digest must still render.
-- Confirm `daily-email-digest.json` contains no `bodyExcerpt` and the
-  accumulator is empty after flush except for rows newer than the cutoff.
-- Activate the workflow only after all checks pass.
-
-## Backups
-
-`docs/backups/daily-brief-v2/` holds pre/post snapshots of every API PUT. The
-accumulator rewiring snapshots are:
-
-- `20260901T160208Z-pre-accumulator.json`
-- `20260901T160208Z-post-accumulator.json`
+The n8n workflow remains unchanged until those conditions are met.

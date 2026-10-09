@@ -5,6 +5,7 @@ import secrets
 import threading
 import urllib.error
 import urllib.request
+import pytest
 from http.server import ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from api.daily_brief import (
     accumulate_email_inbox,
     build_daily_brief_payload,
     handle_cron_daily_brief,
+    DailyBriefProcessingError,
     ingest_email_digest,
     matches_noise,
     merge_noise_list,
@@ -126,7 +128,7 @@ def test_failed_dm_check_is_reported_as_error_not_zero_replies(tmp_path: Path):
 def test_accumulator_error_is_separate_from_digest_status(tmp_path: Path):
     from api.daily_brief import update_run_status
 
-    ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+    ingest_email_digest(tmp_path, {"accounts": [{"label": "gmail-personale", "count": 0, "error": None}], "emails": []}, now=NOW)
     update_run_status(tmp_path, now=NOW + timedelta(minutes=1), source="accumulate", last_error="payload email non valido")
 
     payload = build_daily_brief_payload(tmp_path, replies_file=tmp_path / "missing.json", now=NOW + timedelta(minutes=2))
@@ -164,25 +166,32 @@ def test_noise_list_filters_sender_after_three_hits(tmp_path: Path):
 
 
 def test_full_acquired_body_is_kept_in_private_archive_and_used_for_analysis(tmp_path: Path):
+    from api.daily_brief_store import connect
     body = "messaggio completo " * 300
     row = _email(messageId="full-body", bodyText=body)
     accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
-    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
-    assert archive["items"][0]["bodyText"] == body
-    assert json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))["items"][0]["bodyText"] == body
+    db = connect(tmp_path / "email-queue.sqlite3")
+    try:
+        assert json.loads(db.execute("SELECT payload FROM email_queue").fetchone()[0])["bodyText"] == body
+    finally:
+        db.close()
 
 
 def test_pending_archive_recovers_a_missing_queue_without_reprocessing_completed_items(tmp_path: Path):
+    from api.daily_brief_store import connect
     row = _email(messageId="recover-me", bodyText="contenuto acquisito")
     accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
-    (tmp_path / ACCUMULATOR_FILENAME).unlink()
     with patch("api.email_analysis.analyse_emails", return_value=([{"importance": "media", "summary": "Recuperata", "why": "informa"}], "prime", None)):
         first = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
         second = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW + timedelta(minutes=1))
-    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
+    db = connect(tmp_path / "email-queue.sqlite3")
+    receipts = db.execute("SELECT account,item_key FROM email_receipts").fetchall()
+    pending = db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0]
+    db.close()
     assert first["stored"] == 1
     assert second["stored"] == 0
-    assert archive["items"][0]["processingStatus"] == "processed"
+    assert pending == 0
+    assert len(receipts) == 1
 
 
 def test_account_error_marks_digest_incomplete_not_successful_zero(tmp_path: Path):
@@ -196,7 +205,7 @@ def test_account_error_marks_digest_incomplete_not_successful_zero(tmp_path: Pat
     assert payload["email"]["lastError"] == "sorgente email incompleta: gmail-personale"
 
 
-def test_accumulator_dedupes_without_cap_or_age_pruning_and_archives(tmp_path: Path):
+def test_accumulator_dedupes_without_cap_or_age_pruning(tmp_path: Path):
     rows = []
     for index in range(405):
         rows.append(_email(
@@ -208,19 +217,20 @@ def test_accumulator_dedupes_without_cap_or_age_pruning_and_archives(tmp_path: P
 
     result = accumulate_email_inbox(tmp_path, {"emails": rows}, now=NOW)
     duplicate = accumulate_email_inbox(tmp_path, {"emails": [rows[0]]}, now=NOW)
-    stored = json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
+    from api.daily_brief_store import connect
+    db = connect(tmp_path / "email-queue.sqlite3")
+    stored = [json.loads(row[0]) for row in db.execute("SELECT payload FROM email_queue ORDER BY received_at DESC")]
+    db.close()
 
     assert result == {"ok": True, "added": 406, "total": 406, "skipped": 0}
     assert duplicate == {"ok": True, "added": 0, "total": 406, "skipped": 1}
-    assert len(stored["items"]) == 406
-    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
-    assert len(archive["items"]) == 406
-    assert any(row["messageId"] == "expired" for row in archive["items"])
-    assert stored["items"][0]["messageId"] == "message-0"
-    assert "\x00" not in stored["items"][0]["bodyExcerpt"]
-    assert "\n" not in stored["items"][0]["bodyExcerpt"]
-    assert len(stored["items"][0]["bodyExcerpt"]) <= 2000
-    assert stored["items"][0]["bodyExcerpt"].startswith("A body")
+    assert len(stored) == 406
+    assert any(row["messageId"] == "expired" for row in stored)
+    first = next(row for row in stored if row["messageId"] == "message-0")
+    assert "\x00" not in first["bodyExcerpt"]
+    assert "\n" not in first["bodyExcerpt"]
+    assert len(first["bodyExcerpt"]) <= 2000
+    assert first["bodyExcerpt"].startswith("A body")
 
 
 def test_ingestion_archives_durably_without_calling_model(tmp_path: Path):
@@ -229,13 +239,17 @@ def test_ingestion_archives_durably_without_calling_model(tmp_path: Path):
     rows = [_email(messageId=f"arrival-{index}") for index in range(3)]
     with patch("api.email_analysis.analyse_emails", side_effect=AssertionError("model called during ingest")):
         accumulate_email_inbox(tmp_path, {"emails": rows}, now=NOW)
-    archive_path = tmp_path / "email-archive.json"
-    before_restart = json.loads(archive_path.read_text(encoding="utf-8"))
+    from api.daily_brief_store import connect
+    db = connect(tmp_path / "email-queue.sqlite3")
+    before_restart = db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0]
+    db.close()
     # A fresh read models process restart; replaying the same provider items is idempotent.
     replay = accumulate_email_inbox(tmp_path, {"emails": rows}, now=NOW + timedelta(days=3))
-    after_restart = json.loads(archive_path.read_text(encoding="utf-8"))
+    db = connect(tmp_path / "email-queue.sqlite3")
+    after_restart = db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0]
+    db.close()
     assert replay["added"] == 0
-    assert len(before_restart["items"]) == len(after_restart["items"]) == 3
+    assert before_restart == after_restart == 3
 
 
 def test_digest_merges_accumulator_and_flushes_only_consumed_items(tmp_path: Path):
@@ -261,19 +275,23 @@ def test_digest_merges_accumulator_and_flushes_only_consumed_items(tmp_path: Pat
         result = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
 
     digest = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
-    accumulator = json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
+    from api.daily_brief_store import connect
+    db = connect(tmp_path / "email-queue.sqlite3")
+    accumulator = [json.loads(row[0]) for row in db.execute("SELECT payload FROM email_queue")]
+    db.close()
     assert result == {"ok": True, "stored": 1, "skipped": 0, "analysed": 1}
     assert digest["version"] == 2
     assert digest["analysisEngine"] == "prime"
     assert digest["emails"][0]["summary"] == "Serve una decisione."
     assert digest["emails"][0]["why"] == "richiede risposta"
     assert "bodyExcerpt" not in json.dumps(digest)
-    assert [row["messageId"] for row in accumulator["items"]] == ["future"]
-    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
-    assert {row["messageId"] for row in archive["items"]} == {"consumed", "future"}
+    assert [row["messageId"] for row in accumulator] == ["future"]
+    db = connect(tmp_path / "email-queue.sqlite3")
+    assert db.execute("SELECT COUNT(*) FROM email_receipts").fetchone()[0] == 1
+    db.close()
 
 
-def test_analysis_failure_uses_rules_writes_digest_and_flushes(tmp_path: Path):
+def test_analysis_failure_keeps_batch_and_does_not_publish_recap(tmp_path: Path):
     from api.email_analysis import analyse_emails
 
     row = _email(messageId="fallback", subject="Pagamento urgente", bodyExcerpt="testo")
@@ -287,20 +305,202 @@ def test_analysis_failure_uses_rules_writes_digest_and_flushes(tmp_path: Path):
         )
 
     with patch("api.email_analysis.analyse_emails", side_effect=failed_analysis):
-        result = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+        with pytest.raises(DailyBriefProcessingError):
+            ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
 
+    from api.daily_brief_store import connect
+    db = connect(tmp_path / "email-queue.sqlite3")
+    pending = [json.loads(row[0]) for row in db.execute("SELECT payload FROM email_queue")]
+    batch = db.execute("SELECT status FROM digest_batch").fetchone()[0]
+    db.close()
+    assert [item["messageId"] for item in pending] == ["fallback"]
+    assert batch == "analyzing"
+    assert not (tmp_path / "daily-email-digest.json").exists()
+
+
+def test_json_migration_backups_preserves_pending_and_processed_receipts_once(tmp_path: Path):
+    from api.daily_brief_store import connect, migrate_legacy
+
+    pending = _email(messageId="pending", bodyText="pending-private")
+    processed = dict(_email(messageId="done", bodyText="processed-private"), processingStatus="processed")
+    _write(tmp_path / "email-archive.json", {"version": 1, "items": [pending, processed]})
+    _write(tmp_path / ACCUMULATOR_FILENAME, {"version": 2, "items": [pending, _email(messageId="done"), _email(messageId="queue-only")]})
+    archive_before = (tmp_path / "email-archive.json").read_bytes()
+    accumulator_before = (tmp_path / ACCUMULATOR_FILENAME).read_bytes()
+    db_path = tmp_path / "state" / "daily-brief" / "email-queue.sqlite3"
+
+    assert migrate_legacy(db_path, tmp_path, now="2026-09-01T08:00:00Z")["imported"] == 2
+    assert migrate_legacy(db_path, tmp_path, now="2026-09-02T08:00:00Z")["alreadyMigrated"] == 1
+    db = connect(db_path)
+    try:
+        assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM email_receipts").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM email_queue WHERE payload LIKE '%private%'").fetchone()[0] == 1
+    finally:
+        db.close()
+    backup_dir = db_path.parent / "migration-backups"
+    assert (backup_dir / "email-archive.json").read_bytes() == archive_before
+    assert (backup_dir / ACCUMULATOR_FILENAME).read_bytes() == accumulator_before
+    assert (tmp_path / "email-archive.json").read_bytes() == archive_before
+    assert (tmp_path / ACCUMULATOR_FILENAME).read_bytes() == accumulator_before
+
+
+def test_migration_marker_skips_moved_or_corrupt_legacy_files(tmp_path: Path):
+    from api.daily_brief_store import connect, migrate_legacy
+
+    _write(tmp_path / "email-archive.json", {"items": [_email(messageId="once")]})
+    db_path = tmp_path / "state" / "email-queue.sqlite3"
+    assert migrate_legacy(db_path, tmp_path, now="2026-09-01T08:00:00Z")["imported"] == 1
+    (tmp_path / "email-archive.json").write_text("corrupt", encoding="utf-8")
+    (tmp_path / ACCUMULATOR_FILENAME).write_text("corrupt", encoding="utf-8")
+    assert migrate_legacy(db_path, tmp_path, now="2026-09-02T08:00:00Z")["alreadyMigrated"] == 1
+    db = connect(db_path)
+    try:
+        assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+def test_replay_after_cleanup_and_while_prepared_never_recreates_pending(tmp_path: Path):
+    from api.daily_brief_store import connect
+
+    row = _email(messageId="replay-after-cleanup", bodyText="synthetic")
+    accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
+    analysis = ([{"importance": "media", "summary": "Ricevuta", "why": "Info"}], "prime", None)
+    with patch("api.email_analysis.analyse_emails", return_value=analysis):
+        ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+    replay = accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW + timedelta(minutes=1))
+    assert replay["added"] == 0 and replay["skipped"] == 1 and replay["total"] == 0
+
+    second = _email(messageId="replay-prepared", bodyText="synthetic")
+    accumulate_email_inbox(tmp_path, {"emails": [second]}, now=NOW)
+    real_write = __import__("api.daily_brief", fromlist=["_atomic_write_json"])._atomic_write_json
+
+    def fail_publish(path, payload):
+        if Path(path).name == "daily-email-digest.json":
+            raise OSError("simulated publish interruption")
+        return real_write(path, payload)
+
+    with patch("api.email_analysis.analyse_emails", return_value=analysis), patch(
+        "api.daily_brief._atomic_write_json", side_effect=fail_publish,
+    ), pytest.raises(OSError):
+        ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+    replay_prepared = accumulate_email_inbox(tmp_path, {"emails": [second]}, now=NOW + timedelta(minutes=1))
+    db = connect(tmp_path / "email-queue.sqlite3")
+    try:
+        assert replay_prepared["added"] == 0 and replay_prepared["total"] == 1
+        assert db.execute("SELECT status FROM digest_batch").fetchone()[0] == "prepared"
+        assert db.execute("SELECT COUNT(*) FROM email_queue WHERE payload LIKE '%replay-prepared%'").fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+def test_rollback_receipt_overrides_pending_archive_for_message_id_and_hash_fallback(tmp_path: Path):
+    from api.daily_brief_store import connect, enqueue, export_legacy, finish_batch, prepare_batch, start_or_recover_batch
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    identified = _email(messageId="rollback-processed", bodyText="sensitive body")
+    fallback = _email(subject="fallback subject", bodyText="fallback body")
+    # Keep stale pending copies in JSON to reproduce the rollback collision.
+    _write(legacy / "email-archive.json", {"items": [identified, fallback]})
+    db_path = tmp_path / "db" / "email-queue.sqlite3"
+    enqueue(db_path, [identified, fallback])
+    batch_id, _selected, _ = start_or_recover_batch(db_path, "2026-09-02T00:00:00Z", now="2026-09-01T08:00:00Z")
+    digest = {"digestId": batch_id, "emails": []}
+    prepare_batch(db_path, batch_id, digest)
+    finish_batch(db_path, batch_id, processed_at="2026-09-01T08:01:00Z")
+
+    export_legacy(db_path, legacy, now="2026-09-01T08:02:00Z")
+    exported = json.loads((legacy / "email-archive.json").read_text(encoding="utf-8"))
+    assert all(item["processingStatus"] == "processed" for item in exported["items"])
+    assert all("bodyText" not in item for item in exported["items"])
+
+    restored = tmp_path / "restored.sqlite3"
+    from api.daily_brief_store import migrate_legacy
+    migrate_legacy(restored, legacy, now="2026-09-01T08:03:00Z")
+    restored_db = connect(restored)
+    try:
+        assert restored_db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 0
+        assert restored_db.execute("SELECT COUNT(*) FROM email_receipts").fetchone()[0] == 2
+    finally:
+        restored_db.close()
+    replay = enqueue(restored, [identified, fallback])
+    assert replay == {"added": 0, "skipped": 2}
+    assert connect(restored).execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 0
+
+
+def test_crash_after_digest_publish_is_replayed_idempotently_before_cleanup(tmp_path: Path):
+    from api.daily_brief_store import connect
+
+    row = _email(messageId="crash-window")
+    accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
+    analysis = ([{"importance": "alta", "summary": "Azione", "why": "scadenza"}], "prime", None)
+    real_write = __import__("api.daily_brief", fromlist=["_atomic_write_json"])._atomic_write_json
+
+    def fail_digest(path, payload):
+        if Path(path).name == "daily-email-digest.json":
+            raise OSError("simulated publish interruption")
+        return real_write(path, payload)
+
+    with patch("api.email_analysis.analyse_emails", return_value=analysis), patch(
+        "api.daily_brief._atomic_write_json", side_effect=fail_digest,
+    ), pytest.raises(OSError):
+        ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+    db = connect(tmp_path / "email-queue.sqlite3")
+    prepared = db.execute("SELECT batch_id,status,digest_json FROM digest_batch").fetchone()
+    assert prepared["status"] == "prepared"
+    batch_id = prepared["batch_id"]
+    db.close()
+    with patch("api.email_analysis.analyse_emails", side_effect=AssertionError("must reuse prepared recap")):
+        recovered = ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW + timedelta(minutes=1))
     digest = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
-    accumulator = json.loads((tmp_path / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
-    assert result["analysed"] == 1
-    assert digest["analysisEngine"] == "rules"
-    assert "TimeoutError" in digest["analysisError"]
-    assert digest["emails"][0]["importance"] == "alta"
-    assert digest["emails"][0]["summary"] == ""
-    assert digest["emails"][0]["why"] == ""
-    assert [item["messageId"] for item in accumulator["items"]] == ["fallback"]
-    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
-    assert archive["items"][0]["messageId"] == "fallback"
-    assert archive["items"][0]["processingStatus"] == "pending"
+    assert recovered["recovered"] is True
+    assert digest["digestId"] == batch_id
+    db = connect(tmp_path / "email-queue.sqlite3")
+    assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM email_receipts").fetchone()[0] == 1
+    assert db.execute("SELECT COUNT(*) FROM digest_batch").fetchone()[0] == 0
+    db.close()
+    replay = accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW + timedelta(minutes=2))
+    assert replay["added"] == 0
+
+
+def test_rollback_export_preserves_pending_data_and_leaves_sqlite_intact(tmp_path: Path):
+    from api.daily_brief_store import connect, export_legacy
+
+    row = _email(messageId="rollback-pending", bodyText="corpo sintetico")
+    accumulate_email_inbox(tmp_path / "legacy", {"emails": [row]}, now=NOW)
+    db_path = tmp_path / "legacy" / "email-queue.sqlite3"
+    legacy = tmp_path / "legacy"
+    before = connect(db_path)
+    count_before = before.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0]
+    before.close()
+    _write(legacy / ACCUMULATOR_FILENAME, {"version": 2, "items": [{"messageId": "stale-rollback-copy"}]})
+    result = export_legacy(db_path, legacy, now="2026-09-01T08:00:00Z")
+    exported = json.loads((legacy / ACCUMULATOR_FILENAME).read_text(encoding="utf-8"))
+    backup = db_path.parent / "rollback-backups" / (ACCUMULATOR_FILENAME + ".before-export")
+    after = connect(db_path)
+    count_after = after.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0]
+    after.close()
+    assert result["pending"] == 1
+    assert exported["items"][0]["messageId"] == "rollback-pending"
+    assert exported["items"][0]["bodyText"] == "corpo sintetico"
+    assert count_before == count_after == 1
+    assert backup.is_file()
+
+
+def test_concurrent_duplicate_intake_commits_once(tmp_path: Path):
+    from concurrent.futures import ThreadPoolExecutor
+    from api.daily_brief_store import connect
+
+    row = _email(messageId="parallel-duplicate")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _n: accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW), range(8)))
+    assert sum(result["added"] for result in results) == 1
+    db = connect(tmp_path / "email-queue.sqlite3")
+    assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 1
+    db.close()
 
 
 def test_noise_merge_is_incremental_atomic_and_prunes_old_entries(tmp_path: Path):
@@ -392,7 +592,10 @@ def test_cron_endpoint_is_403_when_header_is_missing_or_wrong(tmp_path: Path):
 def test_cron_email_endpoint_accepts_matching_runtime_token_and_writes_atomically(tmp_path: Path):
     runtime_secret = secrets.token_urlsafe(32)
     handler = FakeHandler({"accounts": [], "emails": [_email()]}, runtime_secret)
-    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": runtime_secret}, clear=True):
+    analysis = ([{"importance": "media", "summary": "Aggiornamento", "why": "informazione"}], "prime", None)
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": runtime_secret}, clear=True), patch(
+        "api.email_analysis.analyse_emails", return_value=analysis,
+    ):
         handle_cron_daily_brief(handler, "/api/cron/daily-brief/email", data_dir=tmp_path)
     assert handler.status == 200
     assert (tmp_path / "daily-email-digest.json").is_file()
@@ -407,6 +610,30 @@ def test_cron_accumulator_endpoint_requires_token_and_returns_422_for_bad_date(t
         handle_cron_daily_brief(handler, "/api/cron/daily-brief/email-accumulate", data_dir=tmp_path)
     assert handler.status == 422
     assert not (tmp_path / ACCUMULATOR_FILENAME).exists()
+
+
+def test_sqlite_status_endpoint_is_authenticated_and_confirms_protocol(tmp_path: Path):
+    runtime_secret = secrets.token_urlsafe(32)
+    handler = FakeHandler({}, runtime_secret)
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": runtime_secret}, clear=True):
+        handle_cron_daily_brief(handler, "/api/cron/daily-brief/status", data_dir=tmp_path)
+    assert handler.status == 200
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert response == {"ok": True, "storage": "sqlite", "schemaVersion": 1, "recapProtocol": "outbox-v1", "pending": 0}
+
+
+def test_accumulation_storage_failure_never_returns_http_200(tmp_path: Path):
+    import sqlite3
+
+    runtime_secret = secrets.token_urlsafe(32)
+    handler = FakeHandler({"emails": [_email(messageId="commit-required")]}, runtime_secret)
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": runtime_secret}, clear=True), patch(
+        "api.daily_brief_store.enqueue", side_effect=sqlite3.OperationalError("simulated storage failure"),
+    ):
+        handle_cron_daily_brief(handler, "/api/cron/daily-brief/email-accumulate", data_dir=tmp_path)
+    assert handler.status == 503
+    response = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert response["error"] == "daily_brief_storage_error"
 
 
 def test_cron_noise_endpoint_accepts_matching_runtime_token_and_merges(tmp_path: Path):
@@ -515,7 +742,10 @@ def test_real_http_server_cron_accumulate_uses_token_not_cookie(monkeypatch, tmp
         status, body = post({"Content-Type": "application/json", "X-Hermes-Cron-Token": runtime_secret})
         assert status == 200, body
         assert body["ok"] is True
-        assert (tmp_path / ACCUMULATOR_FILENAME).is_file()
+        from api.daily_brief_store import connect
+        db = connect(tmp_path / "email-queue.sqlite3")
+        assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 1
+        db.close()
     finally:
         httpd.shutdown()
         httpd.server_close()
