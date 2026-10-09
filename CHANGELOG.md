@@ -2,6 +2,9 @@
 
 ## Unreleased — Daily Brief ingestion durability
 
+- Analyze email with Prime's configured Codex chief profile, with a bounded
+  read-only CLI invocation and the existing failure fallback; exclude the
+  private email archive from Git.
 - Preserve complete provider-supplied email body text in the private archive
   and pending queue for later analysis; keep message bodies out of the digest.
 - Apply the configured noise list during digest creation and report skipped
