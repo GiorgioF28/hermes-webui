@@ -1,5 +1,20 @@
 # Hermes Web UI: Browser Testing Plan
 
+Recap notice regressions: `pytest tests/test_prime_brief_recovery.py
+tests/test_prime_brief_notices.py tests/test_prime_brief_async.py
+tests/test_prime_recap_delivery.py tests/test_prime_brief_dedup.py -q` exercises
+queued/running status, a simulated wait over 15 minutes, late durable delivery,
+history/status races, missing in-memory jobs after restart, session boundaries
+and simultaneous retries. Browser tests run at 1200/650/360 pixels with synthetic
+content; no live provider or server is required. Set
+`HERMES_CAPTURE_BRIEF_NOTICE_UI=docs/ui-ux/prime-brief-notices` for before/after
+evidence. Delivery removes only the matching brief notice; a connection problem
+or missing worker is distinct from a confirmed persistence failure.
+
+After operator-controlled activation, finish a delegation while Prime is busy:
+the recap must remain queued without a failure deadline, then appear once and
+clear its notice. Reload and confirm the same durable recap and compact card.
+
 Prime rolling-window regression: `pytest tests/test_prime_history_window.py
  tests/test_prime_delegation_timeline.py tests/test_command_bridge_reload_sync.py
  tests/test_prime_brief_dedup.py tests/test_prime_archive_activation.py -q`

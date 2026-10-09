@@ -43,6 +43,7 @@ var retryNotices = [];
 function sysNoteRetry(text, retry) { retryNotices.push({text:text, retry:retry}); }
 window._showTokenUsage = true;
 function $(id) { return document.getElementById(id); }
+function nearBottom() { return true; }
 function setOrb() {}
 function renderRich(node, text) { node.textContent = text; }
 function speak(text) { spoken.push(text); }

@@ -37,11 +37,23 @@ class BriefAsyncTests(unittest.TestCase):
         # Coda brief isolata su tempdir: i test NON devono scrivere nel file
         # di produzione tasks/prime-brief-queue.jsonl del workspace reale.
         self._tmp = tempfile.TemporaryDirectory()
+        from api.prime_session_store import PrimeSessionStore
+        self.store = PrimeSessionStore(routes.Path(self._tmp.name) / "prime.json")
+        self._store_patch = patch("api.prime_session_store.get_prime_session_store", return_value=self.store)
+        self._store_patch.start()
+        self.addCleanup(self._store_patch.stop)
+        self._delegation_patch = patch("api.delegation_store.get_delegation_store", return_value=MagicMock())
+        self._delegation_patch.start()
+        self.addCleanup(self._delegation_patch.stop)
         self.queue = pbq.PrimeBriefQueue(self._tmp.name)
         self._orig_gbq = pbq.get_brief_queue
         pbq.get_brief_queue = lambda ws: self.queue
 
     def tearDown(self):
+        # Await workers before restoring their store/queue dependencies.
+        for worker in threading.enumerate():
+            if worker.name.startswith("prime-brief-"):
+                worker.join(6)
         routes.j = self._orig_j
         routes._hermes_prime_reply = self._orig_reply
         with routes._BRIEF_JOBS_LOCK:

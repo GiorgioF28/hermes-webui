@@ -1,5 +1,13 @@
 ---
 
+## Unreleased — Reliable delegation recap notices
+
+- Command Bridge separates recaps waiting for Prime from recaps being prepared;
+  browser observation no longer marks a recap failed after 15 minutes. Durable
+  transcript delivery clears the matching notice, including late history sync
+  and restart recovery. Concurrent retries reserve one worker, and genuine
+  persistence failures retain an explicit retry without duplicating the recap.
+
 ## Unreleased — Compact Command Bridge delegation cards
 
 - Restore compact delegation cards at task start and after reload, with

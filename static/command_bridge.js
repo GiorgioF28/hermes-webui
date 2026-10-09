@@ -1594,6 +1594,10 @@
       anchor_message_index: t.anchor_message_index, anchor_stream_id: t.anchor_stream_id,
       anchor_reply_prefix: t.anchor_reply_prefix, brief_message_index: t.brief_message_index };
     if (opts && opts.briefed) prev.briefed = true;
+    if (t.brief_status === 'delivered' || (opts && opts.briefed)) {
+      prev.briefed = true;
+      if (typeof clearBriefNotice === 'function') clearBriefNotice('brief-' + t.id);
+    }
     prev.el.className = 'cb-deleg ' + taskStateClass(t.status);
     if (t.anchor_message_index != null) prev.el.setAttribute('data-anchor-index', String(t.anchor_message_index));
     var sl = esc(t.id) + ' · ' + esc(taskStateLabel(t.status));
@@ -1613,13 +1617,17 @@
     }
   }
   function requestBrief(t) {
+    var briefId = 'brief-' + t.id;
+    if (_cbBriefRequests[briefId]) return;
+    _cbBriefRequests[briefId] = true;
+    clearBriefNotice(briefId);
     // Brief generation is background activity, not another user reply.
     // Render only its durable result, after active local turns have settled.
     var turnUi = createPrimeTurnUi(null);
     var cfg = window.__HERMES_CONFIG__ || {};
     var finish = function (reply, usage) {
       if (turnUi.isClosed()) return;
-      if (_cbOwnTurnCount > 0) { setTimeout(function () { finish(reply, usage); }, 500); return; }
+      if (_cbOwnTurnCount > 0 && reply) { setTimeout(function () { finish(reply, usage); }, 500); return; }
       reply = String(reply || '').trim();
       try {
         if (reply) {
@@ -1628,6 +1636,8 @@
           if (userEngaged) speak(reply);
         }
       } finally {
+        delete _cbBriefRequests[briefId];
+        clearBriefNotice(briefId);
         turnUi.close();
         // The next history poll adopts this result by brief_id without skipping
         // any other transcript entries or changing the active turn's state.
@@ -1636,32 +1646,87 @@
     // Il brief gira in background lato server: qui si fa solo polling leggero,
     // cosi' nessuna connessione resta appesa per minuti (spam "Request timed out").
     var BRIEF_POLL_MS = 3000;
-    var BRIEF_MAX_MS = 15 * 60 * 1000;
-    var t0 = Date.now();
-    var retryNotice = function () {
+    var retryNotice = function (text) {
       finish('');
-      sysNoteRetry('Recap ' + t.id + ' non consegnato - clicca per riprovare', function () { requestBrief(t); });
+      // Delivery may arrive via history while this status request was in flight.
+      if (hasDeliveredBrief(briefId)) return;
+      showBriefNotice(briefId, text + ' - clicca per riprovare', function () { requestBrief(t); });
+    };
+    var acceptStatus = function (s) {
+      if (turnUi.isClosed()) return;
+      if (s && (s.state === 'done' || s.already_delivered || s.delivered || s.reply)) {
+        finish((s && s.reply) || '', s && s.usage); return;
+      }
+      if (hasDeliveredBrief(briefId)) { finish(''); return; }
+      if (s && s.pending) {
+        showBriefNotice(briefId, 'Recap ' + t.id + (s.state === 'queued' ? ' in coda: attende Prime' : ' in elaborazione'));
+        setTimeout(pollStatus, BRIEF_POLL_MS); return;
+      }
+      if (s && s.state === 'failed_retryable') {
+        retryNotice('Recap ' + t.id + ': salvataggio non riuscito'); return;
+      }
+      retryNotice('Recap ' + t.id + ': stato da recuperare');
     };
     var pollStatus = function () {
-      if (Date.now() - t0 > BRIEF_MAX_MS) { retryNotice(); return; }
+      if (turnUi.isClosed()) return;
+      if (hasDeliveredBrief(briefId)) { finish(''); return; }
       api('api/bridge/prime/brief/status?task_id=' + encodeURIComponent(t.id))
-        .then(function (s) {
-          if (s && s.pending) { setTimeout(pollStatus, BRIEF_POLL_MS); return; }
-          if (s && (s.state === 'failed_retryable' || s.state === 'unknown')) { retryNotice(); return; }
-          finish((s && s.reply) || '', s && s.usage);
-        })
-        .catch(function () { setTimeout(pollStatus, BRIEF_POLL_MS); });
+        .then(acceptStatus)
+        .catch(function () {
+          if (turnUi.isClosed()) return;
+          if (hasDeliveredBrief(briefId)) { finish(''); return; }
+          showBriefNotice(briefId, 'Recap ' + t.id + ': verifica connessione in corso');
+          setTimeout(pollStatus, BRIEF_POLL_MS);
+        });
     };
     fetch(new URL('api/bridge/prime/brief', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
       body: JSON.stringify({ task_id: t.id })
-    }).then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (d && d.pending) { setTimeout(pollStatus, BRIEF_POLL_MS); return; }
-        finish((d && d.reply) || '');
-      })
-      .catch(function () { retryNotice(); });
+    }).then(function (r) {
+      if (r.ok === false) throw new Error('Brief request failed');
+      return r.json();
+    })
+      .then(acceptStatus)
+      .catch(function () {
+        // The POST can succeed server-side even when its response is lost.
+        showBriefNotice(briefId, 'Recap ' + t.id + ': verifica connessione in corso');
+        setTimeout(pollStatus, BRIEF_POLL_MS);
+      });
+  }
+  var _cbBriefRequests = {};
+  function hasDeliveredBrief(briefId) {
+    var nodes = document.querySelectorAll('[data-cb-brief-id]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute('data-cb-brief-id') === briefId) return true;
+    }
+    return false;
+  }
+  function clearBriefNotice(briefId) {
+    var nodes = document.querySelectorAll('[data-cb-brief-notice]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute('data-cb-brief-notice') === briefId) nodes[i].remove();
+    }
+  }
+  function showBriefNotice(briefId, text, onRetry) {
+    if (hasDeliveredBrief(briefId)) { clearBriefNotice(briefId); return; }
+    var nodes = document.querySelectorAll('[data-cb-brief-notice]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute('data-cb-brief-notice') === briefId && nodes[i].textContent.indexOf(text) >= 0) return;
+    }
+    clearBriefNotice(briefId);
+    if (onRetry) {
+      var retry = sysNoteRetry(text, onRetry);
+      if (retry) retry.setAttribute('data-cb-brief-notice', briefId);
+    } else {
+      var log = $('cbLog'); if (!log) return;
+      var note = document.createElement('div');
+      note.className = 'cb-msg cb-from-prime';
+      note.setAttribute('data-cb-brief-notice', briefId);
+      note.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic"></div>';
+      note.querySelector('.cb-bubble').textContent = text;
+      var sb = nearBottom(log); log.appendChild(note); if (sb) log.scrollTop = log.scrollHeight;
+    }
   }
   var _cbPollTimer = null;
   function syncStarActiveAgents(tasks) {
@@ -2366,6 +2431,7 @@
   // sync incrementale sa cosa e' gia' a video e le card delega hanno l'ancora.
   function renderPrimeHistoryMessage(m, idx, pendingClarifyId) {
     var log = $('cbLog'); if (!log || !m) return null;
+    if (m.role === 'assistant' && m.brief_id && typeof clearBriefNotice === 'function') clearBriefNotice(String(m.brief_id));
     var hasIdx = idx != null && Number.isFinite(Number(idx));
     if (hasIdx && log.querySelector('[data-cb-msg-index="' + Number(idx) + '"]')) return null;
     var node = null;

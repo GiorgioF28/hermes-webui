@@ -12841,29 +12841,52 @@ def _brief_job_get(task_id):
         return dict(rec) if rec else None
 
 
+def _prime_brief_delivery(session_id, brief_id):
+    from api.prime_session_store import get_prime_session_store
+    delivery = get_prime_session_store(session_id).brief_delivery(brief_id)
+    return delivery if isinstance(delivery, dict) else None
+
+
 def _handle_bridge_prime_brief_status(handler, parsed):
     """GET /api/bridge/prime/brief/status?task_id=... — esito del brief asincrono."""
     qs = parse_qs(parsed.query or "")
     task_id = str((qs.get("task_id") or [""])[0] or "").strip()
     if not task_id:
         return bad(handler, "task_id is required")
+    session_id = _request_prime_session_id(handler)
     rec = _brief_job_get(task_id)
-    if not rec:
-        return j(
-            handler,
-            {"state": "unknown", "reply": "", "pending": False},
-            extra_headers={"Cache-Control": "no-store"},
-        )
-    if str(rec.get("session_id") or "hermes-prime") != _request_prime_session_id(handler):
+    if rec and str(rec.get("session_id") or "hermes-prime") != session_id:
         return j(handler, {"error": "Brief not found"}, status=404)
+    brief_id = str((rec or {}).get("brief_id") or f"brief-{task_id}")
+    delivery = _prime_brief_delivery(session_id, brief_id)
+    if delivery is not None:
+        return j(handler, {"state": "done", "pending": False, "brief_id": brief_id,
+                           "delivered": True, **delivery},
+                 extra_headers={"Cache-Control": "no-store"})
+    if not rec:
+        from api.prime_brief_queue import get_brief_queue
+        durable = get_brief_queue(Path(str(DEFAULT_WORKSPACE))).get_brief(brief_id)
+        if durable and str(durable.get("session_id") or "hermes-prime") != session_id:
+            return j(handler, {"error": "Brief not found"}, status=404)
+        # A missing in-memory worker after restart is recovery, not delivery failure.
+        state = "unknown"
+        if durable:
+            state = (
+                "failed_retryable"
+                if durable.get("status") in ("failed", "failed_retryable")
+                else "pending_recovery"
+            )
+        rec = {"state": state, "brief_id": brief_id}
     return j(
         handler,
         {
             "state": rec.get("state") or "unknown",
-            "pending": rec.get("state") == "running",
+            "pending": rec.get("state") in ("queued", "running"),
             "reply": rec.get("reply") or "",
             "brief_id": rec.get("brief_id") or "",
             "usage": rec.get("usage") if isinstance(rec.get("usage"), dict) else {},
+            "queued_at": rec.get("queued_at"),
+            "started_at": rec.get("started_at"),
         },
         extra_headers={"Cache-Control": "no-store"},
     )
@@ -12922,16 +12945,20 @@ def _handle_bridge_prime_brief(handler, body):
     if task_session_id != session_id:
         return j(handler, {"error": "Delegation not found"}, status=404)
     existing = _brief_job_get(task_id)
-    if existing and existing.get("state") == "running":
+    if existing and existing.get("state") in ("queued", "running"):
         # job gia' in corso: non duplicare il turno LLM
         return j(
             handler,
-            {"reply": "", "pending": True, "async": True, "brief_id": existing.get("brief_id") or ""},
+            {"reply": "", "pending": True, "async": True, "state": existing["state"], "brief_id": existing.get("brief_id") or ""},
             extra_headers={"Cache-Control": "no-store"},
         )
     workspace = Path(str(DEFAULT_WORKSPACE))
     # Enqueue brief (idempotent via brief_id=brief-<task_id>)
     brief_id = f"brief-{task_id}"
+    delivery = _prime_brief_delivery(session_id, brief_id)
+    if delivery is not None:
+        return j(handler, {"already_delivered": True, "brief_id": brief_id, **delivery},
+                 extra_headers={"Cache-Control": "no-store"})
     already_delivered = False
     try:
         from api.prime_brief_queue import get_brief_queue
@@ -12989,15 +13016,22 @@ def _handle_bridge_prime_brief(handler, body):
         "richiesta da sola non autorizza un fix. Non riavviare Hermes. Poi fai un brief "
         "all'utente in 1-2 frasi su risultato verificato e recupero realmente avviato."
     )
-    _brief_job_set(
-        task_id,
-        state="running",
-        reply="",
-        brief_id=brief_id,
-        started_at=time.time(),
-        finished_at=0.0,
-        session_id=session_id,
-    )
+    # Atomically reserve a worker even when two browsers retry at once.
+    pending_state = None
+    with _BRIEF_JOBS_LOCK:
+        existing = _BRIEF_JOBS.get(task_id)
+        if existing and existing.get("state") in ("queued", "running"):
+            pending_state = existing["state"]
+        else:
+            _BRIEF_JOBS[task_id] = {
+                "state": "queued", "reply": "", "brief_id": brief_id,
+                "queued_at": time.time(), "started_at": None,
+                "finished_at": 0.0, "session_id": session_id,
+            }
+    if pending_state:
+        return j(handler, {"reply": "", "pending": True, "async": True,
+                           "state": pending_state, "brief_id": brief_id},
+                 extra_headers={"Cache-Control": "no-store"})
     worker = threading.Thread(
         target=_run_prime_brief_job,
         args=(task_id, brief_id, brief_msg, workspace, session_id, identity.user),
@@ -13007,7 +13041,7 @@ def _handle_bridge_prime_brief(handler, body):
     worker.start()
     return j(
         handler,
-        {"reply": "", "pending": True, "async": True, "brief_id": brief_id},
+        {"reply": "", "pending": True, "async": True, "state": "queued", "brief_id": brief_id},
         extra_headers={"Cache-Control": "no-store"},
     )
 
@@ -13016,6 +13050,14 @@ def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace, session_id="he
     # Keep background replies outside a user's durable begin/finish boundary.
     # Provider-only locking ends before persistence and leaves a replay race.
     with _prime_bridge_turn_lock(session_id):
+        # Another recovery path may have persisted the brief while we waited.
+        delivery = _prime_brief_delivery(session_id, brief_id)
+        if delivery is not None:
+            _brief_job_set(task_id, state="done", brief_id=brief_id,
+                           session_id=session_id, finished_at=time.time(), **delivery)
+            return delivery["reply"]
+        _brief_job_set(task_id, state="running", started_at=time.time(),
+                       session_id=session_id, brief_id=brief_id)
         return _run_prime_brief_job_owned(task_id, brief_id, brief_msg, workspace, session_id, user)
 
 

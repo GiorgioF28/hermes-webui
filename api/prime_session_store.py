@@ -817,6 +817,19 @@ class PrimeSessionStore:
                 del journal[:-500]
             self._write_locked(data)
 
+    def brief_delivery(self, brief_id: str) -> dict | None:
+        """Read delivery truth without hydrating history or changing its cursor."""
+        with self._lock:
+            data = self._read_locked()
+            index = (data.get("_prime_archive") or {}).get("brief_indexes", {}).get(brief_id)
+            if index is not None:
+                return {"message_index": int(index), "reply": "", "usage": {}}
+            for index, msg in enumerate(data["messages"]):
+                if msg.get("role") == "assistant" and msg.get("brief_id") == brief_id:
+                    return {"message_index": index, "reply": msg.get("content") or "",
+                            "usage": msg.get("usage") if isinstance(msg.get("usage"), dict) else {}}
+        return None
+
     def inject_assistant_message(self, content: str, meta: dict | None = None) -> int:
         """Inject an assistant message directly into the transcript, bypassing turn lifecycle.
 

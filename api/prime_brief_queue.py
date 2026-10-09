@@ -173,7 +173,7 @@ class PrimeBriefQueue:
             logger.debug("prime_brief_queue: append failed", exc_info=True)
 
     def _read_all(self) -> dict[str, dict]:
-        """Return latest state per brief_id (last-write-wins per id in JSONL)."""
+        """Return latest state per brief_id, merging successive field patches."""
         if not self._path.is_file():
             return {}
         latest: dict[str, dict] = {}
@@ -188,12 +188,18 @@ class PrimeBriefQueue:
                     continue
                 bid = rec.get("brief_id")
                 if bid:
-                    latest[bid] = rec
+                    latest[bid] = {**latest.get(bid, {}), **rec}
         except Exception:
             logger.debug("prime_brief_queue: read_all failed", exc_info=True)
         return latest
 
     # -- public API -----------------------------------------------------------
+
+    def get_brief(self, brief_id: str) -> dict | None:
+        """Read one durable delivery record, retaining metadata across events."""
+        with self._lock:
+            rec = self._read_all().get(str(brief_id))
+            return dict(rec) if rec else None
 
     def enqueue(
         self,
