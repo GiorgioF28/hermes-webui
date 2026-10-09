@@ -741,7 +741,7 @@ def test_command_bridge_frontend_loads_history_and_renders_attention_cards():
     assert "cb-recovered" in source
 
 
-def test_command_bridge_frontend_preserves_indices_and_renders_only_briefs():
+def test_command_bridge_frontend_preserves_indices_and_compact_cards():
     source = Path("static/command_bridge.js").read_text(encoding="utf-8")
 
     assert "data-cb-msg-index" in source

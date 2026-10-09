@@ -27,13 +27,18 @@ not invent decisions or task outcomes; consult the canonical memory sources.
 The full on-disk transcript is still read by the store: this change bounds browser
 payload and rendering, not all backend disk I/O.
 
-The chat contains Prime's persisted final delegation briefs only. Worker task
-text, results and technical logs remain in the operational delegation store;
-they are not replayed as transcript cards or settled tool traces. The Bridge
-requests `/api/bridge/tasks?compact=1` for IDs, status and active-agent signals;
+The chat contains compact delegation cards and Prime's persisted final briefs.
+Cards show the delegation ID, agent, state, elapsed/final duration and an
+objective of at most 160 characters. There is no prompt expansion control.
+Full worker task text, results and technical logs remain in the operational
+delegation store and are excluded from compact UI payloads and card DOM. The Bridge
+requests `/api/bridge/tasks?compact=1` for compact cards and active-agent signals;
 brief generation/acknowledgement, pending work, planet activity and voice remain
-on their existing paths. A delegation revision alone no longer triggers history
-hydration. Raw diagnostic retrieval through team tools remains available.
+on their existing paths. A delegation revision reconciles cards even without
+a new message. Compact browser history includes cards anchored to a retained
+message or brief and all running tasks; automatic model recovery remains
+card-free. Cold replay and repeated polls reuse one card per task ID and never
+regenerate a historical brief. Raw diagnostic retrieval through team tools remains available.
 
 Codex receives the bounded window and the retrieval reminder. When old rows
 have left the window, Claude rotates its SDK client under the existing turn lock
@@ -90,8 +95,8 @@ The active slots contain small tombstones. `history()` filters those slots and
 includes each visible message's absolute `message_index`; `message_count` and
 `since_index` still count all slots. The browser consumes the absolute index and
 shows a collapsed archive summary. Polling never retrieves archived contents;
-settled delegation cards are omitted from the compact chat payload, while
-active/pending records and their durable anchors remain intact.
+settled delegation cards outside the retained window are omitted from the
+compact chat payload, while active records and their durable anchors remain intact.
 
 Codex receives the retained messages and the summary. A fresh Claude client
 receives the same bounded recovery context; its new SDK session does not resume

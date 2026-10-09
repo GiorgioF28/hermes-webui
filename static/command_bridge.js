@@ -419,23 +419,8 @@
 '.cb-deleg.cb-deleg-error{border-color:rgba(255,92,92,.42);border-left-color:#ff6b5c;background:rgba(255,92,92,.08);box-shadow:0 12px 30px -24px rgba(255,92,92,.75);}',
 '.cb-deleg-timer{float:right;margin-right:9px;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.04em;}',
 '.cb-deleg-running .cb-deleg-timer{color:var(--cb-accent-2);}',
-'.cb-deleg-summary{margin-top:0;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-'.cb-deleg-sumrow{display:flex;align-items:flex-start;gap:6px;margin-top:6px;}',
-'.cb-deleg-sumtext{flex:1;min-width:0;}',
-'.cb-deleg-arrow{flex:0 0 auto;background:transparent;border:0;padding:0;cursor:pointer;color:var(--cb-faint);',
-'  font-family:var(--cb-mono);font-size:11px;line-height:1.35;transition:transform .18s,color .15s;}',
-'.cb-deleg-arrow:hover{color:var(--cb-accent);}',
-'.cb-deleg-open .cb-deleg-arrow{transform:rotate(90deg);color:var(--cb-accent);}',
-'.cb-deleg-open .cb-deleg-summary{white-space:pre-wrap;overflow:visible;text-overflow:clip;word-break:break-word;}',
-'.cb-deleg-taskfull{display:none;}',
-'.cb-deleg-open .cb-deleg-taskfull{display:block;margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);',
-'  font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;}',
-'.cb-deleg-details{margin-top:6px;color:var(--cb-muted);font-family:var(--cb-sans);font-size:11.5px;}',
-'.cb-deleg-details summary{cursor:pointer;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;}',
-'.cb-deleg-details[open] .cb-deleg-full{margin-top:6px;color:var(--cb-text);font-size:12px;line-height:1.42;white-space:pre-wrap;word-break:break-word;}',
+'.cb-deleg-summary{margin-top:6px;color:var(--cb-text);font-family:var(--cb-sans);font-size:12.5px;line-height:1.35;white-space:normal;overflow-wrap:anywhere;}',
 '.cb-deleg-failure{margin-top:6px;color:#ff9b91;font-family:var(--cb-sans);font-size:11.5px;line-height:1.4;white-space:pre-wrap;word-break:break-word;}',
-'.cb-deleg-diagnostic pre{max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}',
-'.cb-deleg-partial{margin-top:6px;color:#e0b15d;line-height:1.4;}',
 /* input: a single compact row, fixed at the bottom of the chat console */
 '.cb-chat-input{display:flex;padding:12px 14px 14px;border-top:1px solid var(--cb-line2);}',
 '.cb-chat-input textarea{flex:1;min-width:0;box-sizing:border-box;background:rgba(255,255,255,.04);border:1px solid var(--cb-line);border-radius:12px;',
@@ -1449,7 +1434,7 @@
     return card;
   }
 
-  // Delegation control metadata; only final Prime briefs enter the chat.
+  // Compact delegation cards; prompts, worker results and logs stay out of DOM.
   var _cbTasks = {};
   var _cbActiveAgents = {};
   function taskStateClass(status) {
@@ -1459,16 +1444,15 @@
   }
   function taskStateLabel(status) {
     if (status === 'in_corso' || status === 'running' || status === 'pending') return 'in corso';
-    if (status === 'ok' || status === 'parziale' || status === 'done') return 'completato';
+    if (status === 'parziale') return 'parziale';
+    if (status === 'ok' || status === 'done') return 'completato';
     if (status === 'interrotta') return 'interrotta';
     if (status === 'errore' || status === 'failed') return 'fallita';
     return 'errore';
   }
   function taskSummary(t) {
-    if (t && t.summary) return String(t.summary);
-    var id = t && t.id ? String(t.id) : 'delega';
-    var task = String((t && t.task) || (t && t.task_type) || 'task').replace(/\s+/g, ' ').trim();
-    return id + ' - ' + task.slice(0, 72) + ': ' + taskStateLabel(t && t.status);
+    var summary = String((t && t.summary) || (t && t.task_type) || 'Delega').replace(/\s+/g, ' ').trim();
+    return summary.length > 160 ? summary.slice(0, 159).trim() + '…' : summary;
   }
   // ── Timer card delega: da quando gira / quanto ci ha messo ──────────────
   function fmtDuration(secs) {
@@ -1560,11 +1544,14 @@
           log.insertBefore(card, next);
         }
       } else {
-        // The owner reply may arrive on the next poll. Never show the card above it.
-        card.hidden = true;
-        if (card.parentNode !== log) log.appendChild(card);
+        // The task can start before the first reply token. Show it after its owner.
+        card.hidden = false;
+        var next = anchor.nextSibling;
+        while (next && next.classList && next.classList.contains('cb-deleg') && next.getAttribute('data-anchor-index') === String(anchorIdx)) next = next.nextSibling;
+        log.insertBefore(card, next);
       }
     } else if (card.parentNode !== log) {
+      card.hidden = false;
       log.appendChild(card);
     }
   }
@@ -1577,18 +1564,11 @@
     if (bubble) bubble.textContent = prefix && text.indexOf(prefix) === 0 ? text.slice(prefix.length) : text;
   }
   function repositionPrimeTaskCards() {
-    // Delegations are summarized as ordinary persisted Prime messages.
-  }
-  // freccetta: espande/riduce il testo della delega dentro la card
-  function wireDelegArrow(card) {
-    if (!card) return;
-    var btn = card.querySelector ? card.querySelector('.cb-deleg-arrow') : null;
-    if (!btn) return;
-    btn.addEventListener('click', function (ev) {
-      if (ev && ev.stopPropagation) ev.stopPropagation();
-      var open = card.classList.toggle('cb-deleg-open');
-      var id = card.getAttribute('data-task-id');
-      if (id && _cbTasks[id]) _cbTasks[id].open = open;
+    Object.keys(_cbTasks).sort(function (a, b) {
+      return Number((_cbTasks[a].task || {}).started || 0) - Number((_cbTasks[b].task || {}).started || 0) || a.localeCompare(b, undefined, {numeric:true});
+    }).forEach(function (id) {
+      var entry = _cbTasks[id];
+      if (entry && entry.el && entry.task) placeTaskCard(entry.el, entry.task);
     });
   }
   // opts.replay  = card idratata dallo storico (nessun sysNote "ha finito")
@@ -1596,14 +1576,33 @@
   function renderTask(t, opts) {
     if (!t || !t.id) return;
     opts = (opts && typeof opts === 'object') ? opts : null;
-    // Keep only control metadata in RAM. Worker task/result/log text never
-    // becomes a chat card; requestBrief renders the durable Prime summary.
+    var log = $('cbLog'); if (!log) return;
+    var sb = nearBottom(log);
     var prev = _cbTasks[t.id];
+    // A delayed running snapshot cannot undo an observed terminal outcome.
+    if (prev && !taskIsRunning(prev.status) && taskIsRunning(t.status)) return;
+    t = Object.assign({}, (prev && prev.task) || {}, t);
     if (!prev) {
-      prev = _cbTasks[t.id] = { briefed: !!(opts && opts.briefed) };
+      var card = el('div', 'cb-deleg');
+      card.setAttribute('data-task-id', t.id);
+      prev = _cbTasks[t.id] = { el: card, briefed: !!(opts && opts.briefed) };
       if (window.cbStar && window.cbStar.flare) window.cbStar.flare((t.agent || '') + ' ' + (t.task_type || ''));
     }
+    // Store only what placement/replay requires, never the full worker payload.
+    prev.task = { id: t.id, agent: t.agent, task_type: t.task_type, summary: taskSummary(t),
+      status: t.status, started: t.started || t.started_at, finished: t.finished || t.finished_at,
+      anchor_message_index: t.anchor_message_index, anchor_stream_id: t.anchor_stream_id,
+      anchor_reply_prefix: t.anchor_reply_prefix, brief_message_index: t.brief_message_index };
+    if (opts && opts.briefed) prev.briefed = true;
+    prev.el.className = 'cb-deleg ' + taskStateClass(t.status);
+    if (t.anchor_message_index != null) prev.el.setAttribute('data-anchor-index', String(t.anchor_message_index));
+    var sl = esc(t.id) + ' · ' + esc(taskStateLabel(t.status));
+    prev.el.innerHTML = '<b>' + esc(t.agent || 'agente') + '</b>' +
+      ' <span style="float:right">' + sl + '</span>' + taskTimerHtml(t) +
+      '<div class="cb-deleg-summary">' + esc(prev.task.summary) + '</div>';
     prev.status = t.status;
+    repositionPrimeTaskCards();
+    if (sb && !_cbHistoryBatch) log.scrollTop = log.scrollHeight;
     // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
     // Le card idratate dallo storico non rilanciano MAI il brief: il testo e'
     // gia' nel transcript (zero regressione su iss-prime-brief-replay-dopo-riavvio).
@@ -2458,16 +2457,11 @@
       id: String(d.id),
       agent: d.agent || '',
       task_type: d.task_type || '',
-      task: d.task_excerpt || '',
       status: String(d.status || ''),
-      output: d.output || '',
-      failure_reason: d.failure_reason || '',
-      error_category: d.error_category || '',
-      diagnostic_log: d.diagnostic_log || '',
-      result_partial: !!d.result_partial,
       summary: d.summary || '',
-      started: d.started_at,
-      finished: d.finished_at,
+      started: d.started_at || d.started,
+      finished: d.finished_at || d.finished,
+      brief_message_index: d.brief_message_index,
       anchor_message_index: d.anchor_message_index,
       anchor_stream_id: d.anchor_stream_id,
       anchor_reply_prefix: d.anchor_reply_prefix
@@ -2483,8 +2477,6 @@
     try { delegations.forEach(function (d) {
       var t = delegationRecordToTask(d);
       if (!t) return;
-      // Il poller live e' piu' ricco (output, failure_reason): non lo sovrascriviamo.
-      if (_cbTasks[t.id]) return;
       renderTask(t, {
         replay: true,
         briefed: String((d && d.brief_status) || '') === 'delivered'
@@ -2504,8 +2496,17 @@
       var index = Number(node.getAttribute('data-cb-msg-index'));
       if (Array.isArray(visible) ? visible.indexOf(index) === -1 : index < floor) node.remove();
     });
-    // Remove obsolete card/debug DOM from an already-open browser as well.
-    log.querySelectorAll('.cb-deleg, .cb-deleg-progress, .cb-tool-card').forEach(function (node) { node.remove(); });
+    // Prune settled cards outside the window; active work remains observable.
+    Object.keys(_cbTasks).forEach(function (id) {
+      var entry = _cbTasks[id], task = entry.task || {};
+      var anchor = task.anchor_message_index, brief = task.brief_message_index;
+      var retained = function (index) { return index != null && (Array.isArray(visible) ? visible.indexOf(Number(index)) !== -1 : Number(index) >= floor); };
+      if (taskIsRunning(task.status) || retained(anchor) || retained(brief)) return;
+      if (entry.el && entry.el._cbProgress) entry.el._cbProgress.remove();
+      if (entry.el) entry.el.remove();
+      delete _cbTasks[id];
+    });
+    log.querySelectorAll('.cb-tool-card').forEach(function (node) { node.remove(); });
     var count = Number(data.history_window.archived_count) || 0;
     var note = log.querySelector('[data-cb-window-note]');
     if (count) {
@@ -2631,8 +2632,9 @@
     if (ownPrimeTurnInFlight()) return;
     var count = Number(serverCount);
     var needMessages = Number.isFinite(count) && count > _cbRenderedCount;
-    // Summary delivery changes message_count; delegation revisions need no DOM work.
-    if (!needMessages) return;
+    var rev = Number(serverRev);
+    var needCards = Number.isFinite(rev) && rev !== _cbDelegationsRev;
+    if (!needMessages && !needCards) return;
     _cbSyncBusy = true;
     var since = _cbRenderedCount;
     fetchPrimeHistory(since).then(function (data) {

@@ -59,15 +59,17 @@ def test_delta_cursor_survives_window_movement_and_pending_turn(tmp_path):
 
 def test_compact_history_excludes_worker_logs_but_keeps_final_brief(tmp_path):
     store = populated(tmp_path, 60)
-    store.upsert_delegation('d1', task_excerpt='PRIVATE LONG TASK', status='ok', brief_status='delivered')
+    store.upsert_delegation('d1', task_excerpt='PRIVATE LONG TASK', status='ok', brief_status='delivered', anchor_message_index=60)
     stream = store.begin_turn('question')
     store.append_tool_event(stream, 'mcp__hermes_prime__delega', 'FULL WORKER LOG')
     store.finish_turn(stream, 'delegated')
     store.inject_assistant_message('Verified summary only.', {'task_id': 'd1', 'brief_id': 'brief-d1'})
     before = store.path.read_bytes()
     payload = store.history_with_tool_events(compact=True)
-    assert payload['delegations'] == payload['tool_events'] == []
-    assert 'PRIVATE LONG TASK' not in json.dumps(payload)
+    assert len(payload['delegations']) == 1
+    assert payload['tool_events'] == []
+    assert 'task_excerpt' not in payload['delegations'][0]
+    assert payload['delegations'][0]['summary'] == 'PRIVATE LONG TASK'
     assert 'FULL WORKER LOG' not in json.dumps(payload)
     assert payload['messages'][-1]['content'] == 'Verified summary only.'
     assert store.get_tool_events()[0]['summary'] == 'FULL WORKER LOG'
@@ -89,6 +91,23 @@ def test_codex_context_excludes_rolling_archive(tmp_path, monkeypatch):
     assert store.retrieve_history(0, 1)['messages'][0]['content'] == 'message 0'
 
 
+def test_browser_history_retains_recent_and_running_cards_without_model_cards(tmp_path):
+    store = populated(tmp_path, 100)
+    store.upsert_delegation('old', anchor_message_index=0, status='ok')
+    store.upsert_delegation('recent', anchor_message_index=75, status='ok',
+                            task_excerpt='Correggere il timer. ' + 'LONG PROMPT ' * 100)
+    store.upsert_delegation('brief', anchor_message_index=1, brief_message_index=90, status='errore')
+    store.upsert_delegation('running', anchor_message_index=2, status='in_corso')
+    before = store.path.read_bytes()
+    cards = store.history_with_tool_events(compact=True)['delegations']
+    assert [c['id'] for c in cards] == ['recent', 'brief', 'running']
+    assert len(cards[0]['summary']) == 160
+    assert cards[0]['summary'].startswith('Correggere il timer.')
+    assert all('task_excerpt' not in c and 'output' not in c for c in cards)
+    assert store.history(windowed=True)['delegations'] == []
+    assert store.path.read_bytes() == before
+
+
 def test_tasks_compact_wire_drops_large_fields_without_mutating_workers(tmp_path, monkeypatch):
     from api import delegation_store, prime_delegation
     task = {'id': 'd1', 'agent': 'programmatore', 'status': 'ok', 'task': 'T' * 100000,
@@ -101,7 +120,8 @@ def test_tasks_compact_wire_drops_large_fields_without_mutating_workers(tmp_path
     captured = []
     monkeypatch.setattr(routes, 'j', lambda _, payload, **kw: captured.append(payload) or True)
     routes._handle_bridge_tasks(object(), urlsplit('/api/bridge/tasks?compact=1'))
-    assert captured[-1]['tasks'] == [{k: task[k] for k in ('id', 'agent', 'status', 'librarian_status')}]
+    assert captured[-1]['tasks'][0]['summary'] == 'T' * 159 + '…'
+    assert not {'task', 'output', 'diagnostic_log'} & captured[-1]['tasks'][0].keys()
     assert len(json.dumps(captured[-1])) < 1000
     assert len(task['output']) == 100000
 
@@ -117,7 +137,7 @@ def browser():
 
 def ui_source():
     source = Path('static/command_bridge.js').read_text(encoding='utf-8')
-    return (source[source.index('  function updatePrimeLiveText('):source.index('  // freccetta:')] +
+    return (source[source.index('  function taskStateClass('):source.index('  // opts.replay')] +
             source[source.index('  function renderTask('):source.index('  function requestBrief(t)')] +
             source[source.index('  function renderPrimeHistoryMessage('):source.index('  // Record durevole')] +
             source[source.index('  function applyPrimeHistoryWindow('):source.index('  function renderPrimeHistoryPayload(')] +
@@ -126,6 +146,7 @@ def ui_source():
 
 HARNESS = r'''
 var _cbTasks={}, _cbHistoryBatch=0, _cbRenderedCount=0, _cbDelegationsRev=0;
+function esc(s){var n=document.createElement('div');n.textContent=String(s||'');return n.innerHTML}
 var _cbHistoryLoaded=true, _cbSyncBusy=false, _cbRemoteTurnNode=null;
 var requested=[], payload=null, _sb=true, userEngaged=false;
 window._showTokenUsage=false;
@@ -153,7 +174,8 @@ def test_browser_cold_replay_delta_large_gap_and_summary_only(browser, width, tm
         # Running tasks and repeated polls never attach full worker text to DOM.
         page.evaluate("renderTask({id:'d1',status:'in_corso',output:'FULL WORKER OUTPUT',task:'FULL TASK'});renderTask({id:'d1',status:'ok'});renderTask({id:'d1',status:'ok'});")
         assert page.evaluate('requested') == ['d1']
-        assert page.locator('.cb-deleg, .cb-deleg-progress').count() == 0
+        assert page.locator('.cb-deleg').count() == 1
+        assert 'FULL TASK' not in page.locator('#cbLog').inner_text()
         assert 'FULL WORKER' not in page.locator('#cbLog').inner_text()
         page.evaluate("payload={since_index:50,message_count:51,delegations_rev:1,history_window:{start_index:1,archived_count:1},messages:[{role:'assistant',content:'Riassunto verificato.',message_index:50,brief_id:'brief-d1',task_id:'d1'}]}; hydrateDelegationCards=function(){};syncPrimeTranscriptFromServer(51,1);")
         page.wait_for_function('!_cbSyncBusy && _cbRenderedCount===51')
@@ -166,9 +188,10 @@ def test_browser_cold_replay_delta_large_gap_and_summary_only(browser, width, tm
         assert page.locator('[data-cb-msg-index]').count() == 50
         assert page.locator('#active').count() == 1
         assert page.locator('[data-cb-window-note]').inner_text().startswith('Ultimi 50 messaggi')
-        # Delegation revision alone cannot download/rebuild the chat anymore.
-        page.evaluate("fetchPrimeHistory=function(){throw Error('revision caused reload')};syncPrimeTranscriptFromServer(200,99);")
-        assert page.evaluate('_cbSyncBusy') is False
+        # A revision reconciles cards even when message_count has not changed.
+        page.evaluate("syncPrimeTranscriptFromServer(200,99);")
+        page.wait_for_function('!_cbSyncBusy')
+        assert page.locator('[data-cb-msg-index]').count() == 50
     finally:
         page.close()
 

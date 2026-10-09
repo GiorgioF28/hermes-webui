@@ -1,5 +1,12 @@
 ---
 
+## Unreleased — Compact Command Bridge delegation cards
+
+- Restore compact delegation cards at task start and after reload, with
+  orange/green/red status, a live/final timer and a short objective. Full
+  prompts, worker results and logs remain outside the cards; history sync keeps
+  active cards and reconciles status changes without duplicating briefs.
+
 ## Unreleased — Daily Brief ingestion durability
 
 - Analyze email with Prime's configured Codex chief profile, with a bounded

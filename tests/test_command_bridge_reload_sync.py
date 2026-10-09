@@ -48,7 +48,7 @@ def _get_history(query: str = ""):
 
 # ── GET /api/bridge/prime/history ───────────────────────────────────────────
 
-def test_history_endpoint_returns_count_without_delegation_cards(bridge):
+def test_history_endpoint_returns_count_with_compact_delegation_cards(bridge):
     store, captured = bridge
     sid = store.begin_turn("delega a librarian")
     store.finish_turn(sid, "ok, delegato")
@@ -63,7 +63,8 @@ def test_history_endpoint_returns_count_without_delegation_cards(bridge):
     assert payload["total"] == 2
     assert payload["since_index"] == 0
     assert len(payload["messages"]) == 2
-    assert payload["delegations"] == []
+    assert payload["delegations"][0]["id"] == "d16"
+    assert "task_excerpt" not in payload["delegations"][0]
     assert store.get_delegations()[0]["id"] == "d16"
     assert payload["delegations_rev"] > 0
 

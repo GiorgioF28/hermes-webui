@@ -5,7 +5,27 @@ import re
 
 DIAGNOSTIC_LIMIT = 12_000
 ERROR_LIMIT = 500
+CARD_SUMMARY_LIMIT = 160
 _QUOTA = re.compile(r"hit your usage limit|usage_limit_(?:exceeded|reached)|plan limit reached|used up your usage|insufficient_quota", re.I)
+
+
+def compact_delegation_card(task: dict) -> dict:
+    """Read-only UI projection: identity, state, anchors and a bounded objective."""
+    allowed = ("id", "agent", "task_type", "status", "started", "finished",
+               "started_at", "finished_at", "librarian_status", "brief_status",
+               "brief_message_index", "anchor_message_index", "anchor_stream_id",
+               "anchor_reply_prefix")
+    card = {key: task[key] for key in allowed if key in task}
+    # Prefer the human-facing announcement over an instruction to read a spec.
+    subject = str(task.get("anchor_reply_prefix") or task.get("task_excerpt")
+                  or task.get("task") or task.get("task_type") or "Delega")
+    subject = subject.strip().split("\n\n")[-1]
+    subject = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", subject)
+    subject = re.sub(r"[`*#]", "", subject)
+    subject = " ".join(subject.split())
+    card["summary"] = (subject[:CARD_SUMMARY_LIMIT - 1].rstrip() + "…"
+                       if len(subject) > CARD_SUMMARY_LIMIT else subject)
+    return card
 
 
 def diagnostic_excerpt(text: str) -> str:

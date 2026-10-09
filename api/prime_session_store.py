@@ -880,6 +880,14 @@ class PrimeSessionStore:
         with self._lock:
             payload = self.history(since_index, windowed=compact)
             if compact:
+                from api.delegation_outcome import compact_delegation_card
+                data = self._read_locked()
+                visible = set((payload.get("history_window") or {}).get("visible_indexes") or [])
+                payload["delegations"] = [compact_delegation_card(record)
+                    for record in self._public_delegations(data)
+                    if record.get("anchor_message_index") in visible
+                    or record.get("brief_message_index") in visible
+                    or record.get("status") in ("in_corso", "running", "pending")]
                 payload["tool_events"] = []
                 return payload
             data = self._read_locked()
