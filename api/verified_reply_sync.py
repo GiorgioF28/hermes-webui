@@ -85,12 +85,15 @@ class ReplyLedger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._connect() as db:
+        db = self._connect()
+        try:
             db.execute("""CREATE TABLE IF NOT EXISTS reply_receipts (
                 event_key TEXT PRIMARY KEY, page_id TEXT NOT NULL,
                 occurred_at TEXT NOT NULL, synced_at TEXT NOT NULL,
                 verified_hash TEXT NOT NULL
             )""")
+        finally:
+            self._close(db)
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=10)
