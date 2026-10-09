@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 from typing import Any, Callable
 
 
@@ -14,6 +15,7 @@ MAX_ANALYSIS_EMAILS = 80
 MAX_SUMMARY_CHARS = 400
 MAX_WHY_CHARS = 200
 DEFAULT_MODEL = "claude-sonnet-4-6"
+CODEX_TIMEOUT_SECONDS = 120
 
 _SYSTEM_PROMPT = """Sei Prime e prepari il Daily Brief di Giorgio.
 Valuta con severita: la maggior parte delle email e rumore. Usa importanza
@@ -25,8 +27,83 @@ clausola che spiega perche conta. Non ripetere il nome della casella: il caller
 lo mostra separatamente."""
 
 
+def _active_provider_id() -> str | None:
+    """Return Prime's runtime provider, independent of the WebUI model picker."""
+    # The persistent Prime turn is currently executed by api.codex_prime.run_prime
+    # with the chief Codex profile. api.providers._active_provider_id() describes
+    # the unrelated global chat model and can be a different provider.
+    from api.codex_profiles import profile
+
+    return "codex" if profile(chief=True).get("model") else None
+
+
+def _run_codex_analysis(prompt: str) -> str:
+    """Run a bounded, read-only Codex turn with Prime's configured chief profile."""
+    from api.codex_profiles import cli_args
+    from api.config import DEFAULT_WORKSPACE
+    from api.prime_delegation import _resolve_codex_executable
+
+    command = [
+        _resolve_codex_executable(), "exec", *cli_args(chief=True), "--json",
+        "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
+        "-C", str(DEFAULT_WORKSPACE), "-",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=str(DEFAULT_WORKSPACE),
+        input=prompt,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=CODEX_TIMEOUT_SECONDS,
+        shell=False,
+        check=False,
+    )
+    if completed.returncode:
+        raise RuntimeError("Codex Prime email analysis failed")
+    messages: list[str] = []
+    for line in (completed.stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") == "item.completed":
+            item = event.get("item") or {}
+            if item.get("type") == "agent_message" and item.get("phase") != "commentary":
+                content = item.get("text")
+                if isinstance(content, str):
+                    messages.append(content)
+    if not messages:
+        raise ValueError("Codex Prime returned no complete analysis")
+    return messages[-1]
+
+
+class _CodexMessages:
+    def create(self, **kwargs: Any) -> dict[str, Any]:
+        user_messages = kwargs.get("messages") or []
+        user_text = "\n".join(
+            str(row.get("content") or "") for row in user_messages if isinstance(row, dict)
+        )
+        prompt = (
+            str(kwargs.get("system") or "")
+            + "\n\n"
+            + user_text
+            + "\n\nRestituisci solo il JSON richiesto, senza commenti o markdown."
+        )
+        text = _run_codex_analysis(prompt)
+        return {"content": [{"type": "text", "text": text}]}
+
+
 def _default_client() -> Any:
-    """Build the already-configured Hermes Anthropic client."""
+    """Build a client for Hermes' selected Prime provider."""
+    provider = (_active_provider_id() or "").strip().lower()
+    if provider in {"codex", "codex-cli", "openai-codex"}:
+        return type("CodexEmailClient", (), {"messages": _CodexMessages()})()
+    if provider not in {"", "anthropic"}:
+        raise RuntimeError("configured Prime provider does not support email analysis")
+
+    # Keep Anthropic available for installations where Prime is configured to use it.
     from agent.anthropic_adapter import build_anthropic_client
     from hermes_cli.auth import get_anthropic_key
 

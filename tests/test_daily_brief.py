@@ -298,6 +298,9 @@ def test_analysis_failure_uses_rules_writes_digest_and_flushes(tmp_path: Path):
     assert digest["emails"][0]["summary"] == ""
     assert digest["emails"][0]["why"] == ""
     assert [item["messageId"] for item in accumulator["items"]] == ["fallback"]
+    archive = json.loads((tmp_path / "email-archive.json").read_text(encoding="utf-8"))
+    assert archive["items"][0]["messageId"] == "fallback"
+    assert archive["items"][0]["processingStatus"] == "pending"
 
 
 def test_noise_merge_is_incremental_atomic_and_prunes_old_entries(tmp_path: Path):
