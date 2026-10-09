@@ -345,6 +345,91 @@ def test_json_migration_backups_preserves_pending_and_processed_receipts_once(tm
     assert (tmp_path / ACCUMULATOR_FILENAME).read_bytes() == accumulator_before
 
 
+def test_migration_marker_skips_moved_or_corrupt_legacy_files(tmp_path: Path):
+    from api.daily_brief_store import connect, migrate_legacy
+
+    _write(tmp_path / "email-archive.json", {"items": [_email(messageId="once")]})
+    db_path = tmp_path / "state" / "email-queue.sqlite3"
+    assert migrate_legacy(db_path, tmp_path, now="2026-09-01T08:00:00Z")["imported"] == 1
+    (tmp_path / "email-archive.json").write_text("corrupt", encoding="utf-8")
+    (tmp_path / ACCUMULATOR_FILENAME).write_text("corrupt", encoding="utf-8")
+    assert migrate_legacy(db_path, tmp_path, now="2026-09-02T08:00:00Z")["alreadyMigrated"] == 1
+    db = connect(db_path)
+    try:
+        assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+def test_replay_after_cleanup_and_while_prepared_never_recreates_pending(tmp_path: Path):
+    from api.daily_brief_store import connect
+
+    row = _email(messageId="replay-after-cleanup", bodyText="synthetic")
+    accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW)
+    analysis = ([{"importance": "media", "summary": "Ricevuta", "why": "Info"}], "prime", None)
+    with patch("api.email_analysis.analyse_emails", return_value=analysis):
+        ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+    replay = accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW + timedelta(minutes=1))
+    assert replay["added"] == 0 and replay["skipped"] == 1 and replay["total"] == 0
+
+    second = _email(messageId="replay-prepared", bodyText="synthetic")
+    accumulate_email_inbox(tmp_path, {"emails": [second]}, now=NOW)
+    real_write = __import__("api.daily_brief", fromlist=["_atomic_write_json"])._atomic_write_json
+
+    def fail_publish(path, payload):
+        if Path(path).name == "daily-email-digest.json":
+            raise OSError("simulated publish interruption")
+        return real_write(path, payload)
+
+    with patch("api.email_analysis.analyse_emails", return_value=analysis), patch(
+        "api.daily_brief._atomic_write_json", side_effect=fail_publish,
+    ), pytest.raises(OSError):
+        ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+    replay_prepared = accumulate_email_inbox(tmp_path, {"emails": [second]}, now=NOW + timedelta(minutes=1))
+    db = connect(tmp_path / "email-queue.sqlite3")
+    try:
+        assert replay_prepared["added"] == 0 and replay_prepared["total"] == 1
+        assert db.execute("SELECT status FROM digest_batch").fetchone()[0] == "prepared"
+        assert db.execute("SELECT COUNT(*) FROM email_queue WHERE payload LIKE '%replay-prepared%'").fetchone()[0] == 1
+    finally:
+        db.close()
+
+
+def test_rollback_receipt_overrides_pending_archive_for_message_id_and_hash_fallback(tmp_path: Path):
+    from api.daily_brief_store import connect, enqueue, export_legacy, finish_batch, prepare_batch, start_or_recover_batch
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    identified = _email(messageId="rollback-processed", bodyText="sensitive body")
+    fallback = _email(subject="fallback subject", bodyText="fallback body")
+    # Keep stale pending copies in JSON to reproduce the rollback collision.
+    _write(legacy / "email-archive.json", {"items": [identified, fallback]})
+    db_path = tmp_path / "db" / "email-queue.sqlite3"
+    enqueue(db_path, [identified, fallback])
+    batch_id, _selected, _ = start_or_recover_batch(db_path, "2026-09-02T00:00:00Z", now="2026-09-01T08:00:00Z")
+    digest = {"digestId": batch_id, "emails": []}
+    prepare_batch(db_path, batch_id, digest)
+    finish_batch(db_path, batch_id, processed_at="2026-09-01T08:01:00Z")
+
+    export_legacy(db_path, legacy, now="2026-09-01T08:02:00Z")
+    exported = json.loads((legacy / "email-archive.json").read_text(encoding="utf-8"))
+    assert all(item["processingStatus"] == "processed" for item in exported["items"])
+    assert all("bodyText" not in item for item in exported["items"])
+
+    restored = tmp_path / "restored.sqlite3"
+    from api.daily_brief_store import migrate_legacy
+    migrate_legacy(restored, legacy, now="2026-09-01T08:03:00Z")
+    restored_db = connect(restored)
+    try:
+        assert restored_db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 0
+        assert restored_db.execute("SELECT COUNT(*) FROM email_receipts").fetchone()[0] == 2
+    finally:
+        restored_db.close()
+    replay = enqueue(restored, [identified, fallback])
+    assert replay == {"added": 0, "skipped": 2}
+    assert connect(restored).execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 0
+
+
 def test_crash_after_digest_publish_is_replayed_idempotently_before_cleanup(tmp_path: Path):
     from api.daily_brief_store import connect
 

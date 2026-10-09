@@ -44,7 +44,7 @@ def connect(path: Path | str) -> sqlite3.Connection:
         );
         CREATE TABLE IF NOT EXISTS email_receipts (
             account TEXT NOT NULL, item_key TEXT NOT NULL, processed_at TEXT NOT NULL,
-            PRIMARY KEY(account, item_key)
+            identity_payload TEXT, PRIMARY KEY(account, item_key)
         );
         CREATE TABLE IF NOT EXISTS email_sources (
             account TEXT PRIMARY KEY, last_success_at TEXT, last_error_at TEXT,
@@ -62,6 +62,9 @@ def connect(path: Path | str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS email_queue_received ON email_queue(received_at);
         """
     )
+    receipt_columns = {row["name"] for row in db.execute("PRAGMA table_info(email_receipts)")}
+    if "identity_payload" not in receipt_columns:
+        db.execute("ALTER TABLE email_receipts ADD COLUMN identity_payload TEXT")
     db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
     return db
 
@@ -80,7 +83,6 @@ def migrate_legacy(db_path: Path | str, legacy_dir: Path | str, *, now: str | No
     """Back up then import the old JSON stores once; never mutate source files."""
     legacy = Path(legacy_dir)
     sources = ("email-archive.json", "email-inbox-accumulator.json")
-    rows_by_source = {name: _load_rows(legacy / name, name) for name in sources}
     stamp = now or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     db = connect(db_path)
     try:
@@ -88,6 +90,9 @@ def migrate_legacy(db_path: Path | str, legacy_dir: Path | str, *, now: str | No
         if db.execute("SELECT 1 FROM meta WHERE key='legacy_migration_v1'").fetchone():
             db.rollback()
             return {"imported": 0, "receipts": 0, "alreadyMigrated": 1}
+        # The marker makes SQLite authoritative. Do not even parse legacy files
+        # after it exists: they may have been moved, corrupted, or stale.
+        rows_by_source = {name: _load_rows(legacy / name, name) for name in sources}
         existing = [name for name in sources if (legacy / name).is_file()]
         if existing:
             backup_dir = Path(db_path).parent / "migration-backups"
@@ -105,12 +110,14 @@ def migrate_legacy(db_path: Path | str, legacy_dir: Path | str, *, now: str | No
                             os.unlink(temporary)
         queue: dict[tuple[str, str], dict[str, Any]] = {}
         receipts: set[tuple[str, str]] = set()
+        archive_identity: dict[tuple[str, str], dict[str, Any]] = {}
         for row in rows_by_source["email-archive.json"]:
             account = str(row.get("account") or "").strip()
             key = message_key(row)
             if not account:
                 continue
             pair = (account, key)
+            archive_identity[pair] = row
             if row.get("processingStatus") == "processed":
                 receipts.add(pair)
             else:
@@ -129,9 +136,11 @@ def migrate_legacy(db_path: Path | str, legacy_dir: Path | str, *, now: str | No
                 (account, key, str(row.get("receivedAt") or ""), json.dumps(row, ensure_ascii=False)),
             )
         for account, key in receipts:
+            source = archive_identity.get((account, key), {})
+            identity = {field: source.get(field, "") for field in ("account", "messageId", "from", "subject", "receivedAt")}
             db.execute(
-                "INSERT OR IGNORE INTO email_receipts(account,item_key,processed_at) VALUES(?,?,?)",
-                (account, key, stamp),
+                "INSERT OR IGNORE INTO email_receipts(account,item_key,processed_at,identity_payload) VALUES(?,?,?,?)",
+                (account, key, stamp, json.dumps(identity, ensure_ascii=False)),
             )
         db.execute("INSERT INTO meta(key,value) VALUES('legacy_migration_v1',?)", (stamp,))
         db.commit()
@@ -153,11 +162,14 @@ def enqueue(db_path: Path | str, rows: list[dict[str, Any]]) -> dict[str, int]:
             receipt = db.execute(
                 "SELECT 1 FROM email_receipts WHERE account=? AND item_key=?", (account, key)
             ).fetchone()
+            if receipt:
+                skipped += 1
+                continue
             cursor = db.execute(
                 "INSERT OR IGNORE INTO email_queue(account,item_key,received_at,payload) VALUES(?,?,?,?)",
                 (account, key, row["receivedAt"], json.dumps(row, ensure_ascii=False)),
             )
-            if cursor.rowcount and not receipt:
+            if cursor.rowcount:
                 added += 1
             else:
                 skipped += 1
@@ -233,11 +245,13 @@ def finish_batch(db_path: Path | str, batch_id: str, *, processed_at: str) -> in
         batch = db.execute("SELECT status FROM digest_batch WHERE singleton=1 AND batch_id=?", (batch_id,)).fetchone()
         if not batch or batch["status"] != "prepared":
             raise RuntimeError("Daily Brief batch is not durably prepared")
-        rows = list(db.execute("SELECT account,item_key FROM digest_batch_items WHERE batch_id=?", (batch_id,)))
+        rows = list(db.execute("SELECT account,item_key,payload FROM digest_batch_items WHERE batch_id=?", (batch_id,)))
         for row in rows:
+            message = json.loads(row["payload"])
+            identity = {key: message.get(key, "") for key in ("account", "messageId", "from", "subject", "receivedAt")}
             db.execute(
-                "INSERT OR IGNORE INTO email_receipts(account,item_key,processed_at) VALUES(?,?,?)",
-                (row["account"], row["item_key"], processed_at),
+                "INSERT OR IGNORE INTO email_receipts(account,item_key,processed_at,identity_payload) VALUES(?,?,?,?)",
+                (row["account"], row["item_key"], processed_at, json.dumps(identity, ensure_ascii=False)),
             )
             db.execute("DELETE FROM email_queue WHERE account=? AND item_key=?", (row["account"], row["item_key"]))
         db.execute("DELETE FROM digest_batch_items WHERE batch_id=?", (batch_id,))
@@ -315,7 +329,7 @@ def export_legacy(db_path: Path | str, legacy_dir: Path | str, *, now: str | Non
     db = connect(db_path)
     try:
         pending = [json.loads(row[0]) for row in db.execute("SELECT payload FROM email_queue ORDER BY received_at")]
-        receipts = [dict(row) for row in db.execute("SELECT account,item_key,processed_at FROM email_receipts")]
+        receipts = [dict(row) for row in db.execute("SELECT account,item_key,processed_at,identity_payload FROM email_receipts")]
     finally:
         db.close()
     archive = {message_key(row) + "\0" + str(row.get("account") or ""): row for row in existing_archive["items"] if isinstance(row, dict)}
@@ -325,13 +339,28 @@ def export_legacy(db_path: Path | str, legacy_dir: Path | str, *, now: str | Non
         archive[message_key(saved) + "\0" + str(saved.get("account") or "")] = saved
     for receipt in receipts:
         key = str(receipt["item_key"])
+        identity = json.loads(receipt["identity_payload"]) if receipt.get("identity_payload") else {}
         tombstone: dict[str, Any] = {
+            **identity,
             "account": receipt["account"], "processingStatus": "processed",
-            "processedAt": receipt["processed_at"], "_dedupeKey": key,
+            "processedAt": receipt["processed_at"],
         }
-        if key.startswith("id:"):
-            tombstone["messageId"] = key[3:]
-        archive.setdefault(key + "\0" + str(receipt["account"]), tombstone)
+        if not identity:
+            tombstone["_dedupeKey"] = key
+            if key.startswith("id:"):
+                tombstone["messageId"] = key[3:]
+        archive_key = key + "\0" + str(receipt["account"])
+        # A previous JSON archive may still contain the same row as pending.
+        # A receipt is authoritative and must win when rolling back to the
+        # legacy consumer, otherwise it will analyze that body again.
+        existing = archive.get(archive_key)
+        if existing is not None:
+            existing["processingStatus"] = "processed"
+            existing["processedAt"] = receipt["processed_at"]
+            existing.pop("bodyText", None)
+            existing.pop("bodyExcerpt", None)
+        else:
+            archive[archive_key] = tombstone
     accumulator = {"version": 2, "updatedAt": stamp, "items": pending}
     archive_payload = {"version": 1, "updatedAt": stamp, "items": list(archive.values())}
     backup_dir = Path(db_path).parent / "rollback-backups"

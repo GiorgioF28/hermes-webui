@@ -14,8 +14,10 @@ The first use backs up the old `email-archive.json` and
 `email-inbox-accumulator.json` into the private state's
 `daily-brief/migration-backups/`, then imports pending message bodies and
 processed message receipts once. Source JSON remains untouched for rollback,
-but the migration marker means it is no longer read as an authoritative queue
-and cannot restore processed bodies after restart.
+but once the migration marker commits, SQLite is authoritative and the legacy
+JSON files are not read or parsed again. Stale pending rows cannot restore
+processed bodies after restart. A replay matching a receipt is skipped before
+an INSERT, including after outbox recovery and cleanup.
 
 The recap captures a UTC cutoff and snapshots the eligible queue keys in one
 SQLite transaction. Arrivals during AI analysis remain pending, even when their
@@ -49,6 +51,10 @@ rows and minimal receipts into the archive. Review the exports; keep SQLite
 unchanged until the old process is verified. The digest JSON already contains
 the last published recap. Never restore a migration backup over current queue
 state without merging post-migration pending rows.
+Receipts retain only the message ID or fallback identity (sender, subject,
+receive time), never message bodies. Export marks an existing pending archive
+row processed when its receipt matches, preventing the legacy reader from
+reanalyzing it after rollback, including fallback-hash rows.
 
 ## n8n workflow
 

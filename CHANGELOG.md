@@ -5,6 +5,9 @@
 - Persist email intake in a private transactional SQLite queue with stable
   deduplication, one-time backed-up JSON migration, and identifier-only replay
   receipts after delivery.
+- Skip receipt replays before queue insertion; the migration marker makes
+  SQLite authoritative, and rollback exports mark matching legacy rows
+  processed while preserving fallback-hash deduplication without email bodies.
 - Publish complete Prime analyses through a recoverable SQLite outbox before
   deleting only the delivered snapshot bodies; failed or partial analysis
   keeps the snapshot pending.
