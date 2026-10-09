@@ -8353,3 +8353,8 @@ Critical regressions introduced during the server.py split, caught by users and 
 ---
 
 - Bridge performance: batch history scroll/layout work, pause invisible WebGL scenes, cap decorative rendering to 24 FPS, and prevent overlapping background polls.
+# Unreleased
+
+- Add an isolated, evidence-gated and idempotent adapter for syncing verified
+  inbound replies to existing VisionBuilts CRM pages. Source integration and
+  live activation remain pending Meta and Gmail access.
