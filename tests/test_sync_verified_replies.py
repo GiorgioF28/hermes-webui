@@ -34,6 +34,7 @@ def test_consumer_uses_reviewed_mapping_not_payload_page_or_verified_flag(tmp_pa
              "occurred_at": "2026-10-09T10:00:00Z", "summary": "Asked a question",
              "next_action": "Review manually", "identity_key": "sender-a",
              "sender_email": "a@example.com", "thread_id": "thread-1", "in_reply_to": "out-1",
+             "inbound": True, "autoresponder": False, "echo": False,
              "crm_page_id": "attacker-page", "identity_verified": False}
     events = tmp_path / "events.jsonl"
     events.write_text(json.dumps(event) + "\n", encoding="utf-8")
@@ -52,7 +53,8 @@ def test_consumer_uses_reviewed_mapping_not_payload_page_or_verified_flag(tmp_pa
 
 def test_consumer_keeps_unmapped_events_in_review(tmp_path):
     events = tmp_path / "events.jsonl"
-    events.write_text(json.dumps({"channel": "instagram", "account": "ig", "message_id": "m"}) + "\n", encoding="utf-8")
+    events.write_text(json.dumps({"channel": "instagram", "account": "ig", "message_id": "m",
+                                  "inbound": True, "autoresponder": False, "echo": False}) + "\n", encoding="utf-8")
     mapping = tmp_path / "mapping.json"
     mapping.write_text("{}", encoding="utf-8")
     notion = Notion()
