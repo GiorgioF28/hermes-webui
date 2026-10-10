@@ -189,11 +189,9 @@ def sync_reply(
         elif status in {"Contattato", "Risposto"}:
             next_status = "Risposto"
         else:
-            # A stale status is usable only when CRM itself documents the sent DM.
-            dm_sent = _plain(props.get("DM inviato") or {})
-            contacted_at = _plain(props.get("Data contatto") or {})
-            if not dm_sent or not contacted_at:
-                raise IdentityReview("contacted_state_not_verified")
+            # The caller has verified the sender against an exact identity on
+            # this existing CRM page. The first inbound is sufficient; an
+            # outbound thread/reference is not required.
             next_status = "Risposto"
         if last_date and _instant(last_date) > _instant(event.occurred_at):
             # A prior PATCH may have succeeded while its readback failed. If

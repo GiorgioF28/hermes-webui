@@ -26,7 +26,10 @@ at exactly 07:00 belongs to the next window. The queue snapshot selects only
 that interval in one SQLite transaction; older backlog and late arrivals stay
 pending for an explicit `windowStart`/`windowEnd` recovery request. A completed
 window returns the same persisted digest on retry rather than publishing a
-second recap. Arrivals during AI analysis remain pending. Every non-noise
+second recap. An explicit repeat of a completed window checks for eligible late
+arrivals; it analyzes only those new rows and reconciles their summaries into
+the same window ledger, without replaying already receipted messages. Arrivals
+during AI analysis remain pending. Every non-noise
 snapshot row needs one valid
 Prime result. Provider errors and partial replies return retryable HTTP 503 and
 retain the queue. After successful analysis, SQLite commits a prepared recap to
@@ -42,10 +45,28 @@ same-day acquisition record; failed or unverified accounts carry an explicit
 error. The IMAP trigger branches remain independent and do not mark mail read.
 Instagram remains a separate source.
 
+## CRM email outbox
+
+The same SQLite transaction that accepts an email also records a minimized CRM
+event (normalized sender email, account, provider message ID, timestamp, short
+subject/excerpt summary, and next action). The original body stays only in the
+email queue. Recap cleanup can therefore proceed independently of Notion
+availability without losing a CRM event. A separate authenticated
+`POST /api/cron/daily-brief/crm-consume` drains this outbox. It queries every
+exact Email match in People with pagination, updates only one existing page,
+and requires PATCH plus GET readback before marking the event acknowledged.
+Zero or multiple matches move the event to durable review; transient failures
+leave it retryable. The consumer never creates a person or sends a message.
+
+The n8n workflow must call the CRM consumer on a bounded recurring trigger and
+retain its existing Header Auth credential reference. This code change does not
+alter the live workflow or establish that the consumer is scheduled.
+
 The authenticated `POST /api/cron/daily-brief/status` reports storage protocol
 and pending count without exposing message content. A workflow candidate must
 not be imported or activated until it reports `storage=sqlite`,
-`schemaVersion=2`, and `recapProtocol=outbox-v1`.
+`schemaVersion=2`, and `recapProtocol=outbox-v1`. CRM consumer readiness is a
+separate authenticated call; it does not change the recap storage gate.
 
 ## Rollback
 

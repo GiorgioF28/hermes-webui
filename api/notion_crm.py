@@ -121,6 +121,31 @@ class NotionCRM:
         }
         return self._request("POST", f"/databases/{self.database_id}/query", body).get("results", [])
 
+    def query_identity_pages(self, prop: str, kind: str, value: str) -> list[dict]:
+        """Return every exact People match; callers review conflicts explicitly."""
+        if prop not in {"Email", "Handle IG"} or not value:
+            return []
+        body = {"filter": {"property": prop, kind: {"equals": value}}, "page_size": 100}
+        results: list[dict] = []
+        cursor = None
+        while True:
+            request_body = dict(body)
+            if cursor:
+                request_body["start_cursor"] = cursor
+            page = self._request("POST", f"/databases/{self.database_id}/query", request_body)
+            results.extend(page.get("results", []))
+            if not page.get("has_more"):
+                return results
+            cursor = page.get("next_cursor")
+            if not cursor:
+                raise NotionError("notion_pagination_cursor_missing")
+
+    def get_page(self, page_id: str) -> dict:
+        return self._request("GET", f"/pages/{page_id}")
+
+    def patch_page(self, page_id: str, properties: dict) -> dict:
+        return self._request("PATCH", f"/pages/{page_id}", {"properties": properties})
+
     @staticmethod
     def _plain(prop: dict) -> str:
         kind = prop.get("type")

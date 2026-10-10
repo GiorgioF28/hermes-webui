@@ -65,17 +65,10 @@ def test_protected_status_is_preserved(tmp_path, status):
     assert notion.page["properties"]["Stato"]["select"]["name"] == status
 
 
-def test_inconsistent_status_requires_documented_outbound(tmp_path):
+def test_first_inbound_to_exact_known_person_does_not_require_outbound(tmp_path):
     unproven = FakeNotion("Da contattare")
-    with pytest.raises(IdentityReview, match="contacted_state_not_verified"):
-        sync_reply(event(), notion=unproven, ledger=ReplyLedger(tmp_path / "a.db"), identity_check=lambda *_: True)
-    assert unproven.calls == []
-
-    proven = FakeNotion("Da contattare")
-    proven.page["properties"]["DM inviato"] = {"type": "rich_text", "rich_text": [{"plain_text": "hello"}]}
-    proven.page["properties"]["Data contatto"] = {"type": "date", "date": {"start": "2026-10-01"}}
-    sync_reply(event(), notion=proven, ledger=ReplyLedger(tmp_path / "b.db"), identity_check=lambda *_: True)
-    assert proven.page["properties"]["Stato"]["select"]["name"] == "Risposto"
+    sync_reply(event(), notion=unproven, ledger=ReplyLedger(tmp_path / "a.db"), identity_check=lambda *_: True)
+    assert unproven.page["properties"]["Stato"]["select"]["name"] == "Risposto"
 
 
 def test_identity_conflict_is_review_only(tmp_path):

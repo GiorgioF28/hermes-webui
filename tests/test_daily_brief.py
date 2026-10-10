@@ -158,6 +158,30 @@ def test_ingest_uses_completed_rome_07_window_and_preserves_late_backlog(tmp_pat
     assert stored["windowEnd"] == "2026-09-01T05:00:00Z"
 
 
+def test_explicit_completed_window_reconciles_late_email_once(tmp_path: Path):
+    from api.daily_brief_store import connect
+    start, end = "2026-08-31T05:00:00Z", "2026-09-01T05:00:00Z"
+    window = {"accounts": [], "emails": [], "windowStart": start, "windowEnd": end}
+    first = ingest_email_digest(tmp_path, window, now=NOW)
+    late = _email(messageId="late-in-window", receivedAt="2026-08-31T12:00:00Z", subject="Risposta tardiva")
+    accumulate_email_inbox(tmp_path, {"emails": [late]}, now=NOW + timedelta(minutes=1))
+    analysis = ([{"importance": "media", "summary": "Risposta recuperata", "why": "messaggio diretto"}], "prime", None)
+    with patch("api.email_analysis.analyse_emails", return_value=analysis) as prime:
+        recovered = ingest_email_digest(tmp_path, window, now=NOW + timedelta(minutes=2))
+        replay = ingest_email_digest(tmp_path, window, now=NOW + timedelta(minutes=3))
+    digest = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
+    db = connect(tmp_path / "email-queue.sqlite3")
+    try:
+        assert db.execute("SELECT COUNT(*) FROM email_queue WHERE payload LIKE '%late-in-window%'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM email_receipts WHERE item_key LIKE '%late-in-window%'").fetchone()[0] == 1
+    finally:
+        db.close()
+    assert first["stored"] == 0
+    assert recovered["analysed"] == 1 and replay.get("recovered") is True
+    assert prime.call_count == 1
+    assert len(digest["emails"]) == 1 and digest["emails"][0]["subject"] == "Risposta tardiva"
+
+
 def test_daily_window_boundaries_and_dst_lengths():
     from datetime import timedelta
     _before, end = daily_brief_window(datetime(2026, 9, 1, 4, 59, 59, tzinfo=timezone.utc))
@@ -206,8 +230,90 @@ def test_full_acquired_body_is_kept_in_private_archive_and_used_for_analysis(tmp
     db = connect(tmp_path / "email-queue.sqlite3")
     try:
         assert json.loads(db.execute("SELECT payload FROM email_queue").fetchone()[0])["bodyText"] == body
+        assert db.execute("SELECT COUNT(*) FROM crm_outbox").fetchone()[0] == 1
     finally:
         db.close()
+
+
+def test_newsletter_and_autoresponder_do_not_enter_crm_outbox(tmp_path: Path):
+    from api.daily_brief_store import connect
+    rows = [
+        _email(messageId="newsletter", **{"from": "digest@example.test", "listUnsubscribe": True}),
+        _email(messageId="autoreply", **{"from": "no-reply@example.test", "subject": "Automatic reply: received"}),
+    ]
+    accumulate_email_inbox(tmp_path, {"emails": rows}, now=NOW)
+    db = connect(tmp_path / "email-queue.sqlite3")
+    try:
+        assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM crm_outbox").fetchone()[0] == 0
+    finally:
+        db.close()
+
+
+def test_email_endpoint_to_sqlite_prime_crm_readback_and_cleanup_e2e(tmp_path: Path):
+    from api.daily_brief_store import connect
+
+    class NotionStub:
+        database_id = "people-db"
+
+        def __init__(self):
+            self.page = {"id": "person-1", "parent": {"database_id": self.database_id},
+                         "properties": {
+                             "Email": {"type": "email", "email": "person@example.test"},
+                             "Stato": {"type": "select", "select": {"name": "Da contattare"}},
+                             "Data risposta": {"type": "date", "date": None},
+                             "Canale risposta": {"type": "select", "select": None},
+                             "Prossima azione": {"type": "rich_text", "rich_text": []},
+                             "Note": {"type": "rich_text", "rich_text": []},
+                         }}
+
+        def query_identity_pages(self, prop, kind, value):
+            assert (prop, kind, value) == ("Email", "email", "person@example.test")
+            return [self.page]
+
+        def get_page(self, page_id):
+            return self.page
+
+        def patch_page(self, page_id, properties):
+            for name, value in properties.items():
+                kind, raw = next(iter(value.items()))
+                if kind == "rich_text":
+                    raw = [{"plain_text": item["text"]["content"]} for item in raw]
+                self.page["properties"][name] = {"type": kind, kind: raw}
+            return self.page
+
+    token = secrets.token_urlsafe(32)
+    row = _email(messageId="e2e-1", bodyText="corpo privato sintetico", bodyExcerpt="Serve una risposta")
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": token}, clear=True):
+        handler = FakeHandler({"emails": [row]}, token)
+        handle_cron_daily_brief(handler, "/api/cron/daily-brief/email-accumulate", data_dir=tmp_path)
+        assert handler.status == 200
+        digest_handler = FakeHandler({"accounts": [], "emails": [],
+                                      "windowStart": "2026-08-31T05:00:00Z",
+                                      "windowEnd": "2026-09-01T05:00:00Z"}, token)
+        with patch("api.email_analysis.analyse_emails", return_value=(
+            [{"importance": "media", "summary": "Risposta da gestire", "why": "email diretta"}], "prime-stub", None
+        )) as prime:
+            handle_cron_daily_brief(digest_handler, "/api/cron/daily-brief/email", data_dir=tmp_path)
+        assert digest_handler.status == 200 and prime.call_count == 1
+    notion = NotionStub()
+    crm_handler = FakeHandler({}, token)
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": token}, clear=True), patch(
+        "api.email_crm_consumer.NotionCRM.from_env", return_value=notion,
+    ):
+        handle_cron_daily_brief(crm_handler, "/api/cron/daily-brief/crm-consume", data_dir=tmp_path)
+    assert crm_handler.status == 200
+    result = json.loads(crm_handler.wfile.getvalue())
+    db = connect(tmp_path / "email-queue.sqlite3")
+    try:
+        pending_body_rows = db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0]
+        crm_state = db.execute("SELECT status FROM crm_outbox").fetchone()[0]
+    finally:
+        db.close()
+    assert result["updated"] == 1 and crm_state == "acked"
+    assert pending_body_rows == 0
+    assert notion.page["properties"]["Stato"]["select"]["name"] == "Risposto"
+    assert "[reply:email:e2e-1]" in "".join(x["plain_text"] for x in notion.page["properties"]["Note"]["rich_text"])
 
 
 def test_pending_archive_recovers_a_missing_queue_without_reprocessing_completed_items(tmp_path: Path):
@@ -610,7 +716,7 @@ class FakeHandler:
 
 
 def test_all_cron_endpoints_are_403_when_server_token_is_not_configured(tmp_path: Path):
-    for endpoint in ("email", "email-accumulate", "noise", "check-dm"):
+    for endpoint in ("email", "email-accumulate", "crm-consume", "noise", "check-dm"):
         handler = FakeHandler({"emails": []})
         with patch.dict(os.environ, {}, clear=True):
             assert handle_cron_daily_brief(handler, f"/api/cron/daily-brief/{endpoint}", data_dir=tmp_path) is True
@@ -656,7 +762,7 @@ def test_sqlite_status_endpoint_is_authenticated_and_confirms_protocol(tmp_path:
         handle_cron_daily_brief(handler, "/api/cron/daily-brief/status", data_dir=tmp_path)
     assert handler.status == 200
     response = json.loads(handler.wfile.getvalue().decode("utf-8"))
-    assert response == {"ok": True, "storage": "sqlite", "schemaVersion": 2, "recapProtocol": "outbox-v1", "pending": 0}
+    assert response == {"ok": True, "storage": "sqlite", "schemaVersion": 2, "recapProtocol": "outbox-v1", "pending": 0, "crmPending": 0}
 
 
 def test_accumulation_storage_failure_never_returns_http_200(tmp_path: Path):

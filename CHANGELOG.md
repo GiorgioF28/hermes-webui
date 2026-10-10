@@ -57,6 +57,12 @@
 ## [Unreleased]
 
 ### Fixed
+- Persist minimized email CRM events atomically with Daily Brief intake; add an authenticated paginated Notion consumer with review, retry, and PATCH/GET acknowledgement.
+- Reconcile newly arrived mail into an explicitly recovered completed Rome window without reprocessing previously receipted messages.
+
+## [Unreleased]
+
+### Fixed
 - Daily Brief digests now cover a persisted Europe/Rome 07:00-to-07:00 civil
   window, preserve late/backlog email outside that window, and reuse the same
   digest on retries. The additive SQLite completed-window ledger is schema 2.

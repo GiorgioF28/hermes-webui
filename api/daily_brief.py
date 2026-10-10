@@ -541,7 +541,7 @@ def ingest_email_digest(
         window_start, cutoff = requested_start, requested_end
     incoming = [_normalize_email_row(raw, index) for index, raw in enumerate(body["emails"])]
     _migrate_email_store(base_dir)
-    from api.daily_brief_store import enqueue, prepare_batch, start_or_recover_batch, finish_batch, record_sources, source_statuses
+    from api.daily_brief_store import enqueue, prepare_batch, start_or_recover_batch, finish_batch, record_sources, source_statuses, completed_digest
 
     database = _email_db_path(base_dir)
     counts = enqueue(database, incoming)
@@ -567,6 +567,7 @@ def ingest_email_digest(
                 else:
                     error = "acquisizione non verificata oggi"
                 accounts_payload.append({"label": row["label"], "count": row["last_count"], "error": error})
+    prior_digest = completed_digest(database, _iso(window_start), _iso(cutoff))
     batch_id, consumed, prepared = start_or_recover_batch(
         database, _iso(cutoff), now=_iso(current), start_after=_iso(window_start),
     )
@@ -622,7 +623,8 @@ def ingest_email_digest(
         "generatedAt": _iso(current),
         "accounts": _normalized_accounts(accounts_payload, digest_rows),
         "noiseSkipped": input_noise + noise_dropped,
-        "emails": digest_rows,
+        "emails": (list({(row.get("account"), row.get("from"), row.get("subject"), row.get("receivedAt")): row
+                         for row in [*((prior_digest or {}).get("emails", [])), *digest_rows]}.values())),
         "analysisEngine": analysis_engine,
         "digestId": batch_id,
         "windowStart": _iso(window_start),
@@ -742,9 +744,12 @@ def handle_cron_daily_brief(handler: Any, path: str, *, data_dir: Path | str = D
             result = ingest_email_digest(data_dir, _read_cron_body(handler))
         elif path == "/api/cron/daily-brief/email-accumulate":
             result = accumulate_email_inbox(data_dir, _read_cron_body(handler))
+        elif path == "/api/cron/daily-brief/crm-consume":
+            from api.email_crm_consumer import consume_email_crm
+            result = {"ok": True, **consume_email_crm(data_dir)}
         elif path == "/api/cron/daily-brief/status":
             _migrate_email_store(data_dir)
-            from api.daily_brief_store import connect, pending_count
+            from api.daily_brief_store import connect, pending_count, pending_crm_count
 
             database = _email_db_path(data_dir)
             db = connect(database)
@@ -759,6 +764,7 @@ def handle_cron_daily_brief(handler: Any, path: str, *, data_dir: Path | str = D
                 "schemaVersion": schema_version,
                 "recapProtocol": "outbox-v1",
                 "pending": pending_count(database),
+                "crmPending": pending_crm_count(database),
             }
         elif path == "/api/cron/daily-brief/noise":
             result = merge_noise_list(data_dir, _read_cron_body(handler))

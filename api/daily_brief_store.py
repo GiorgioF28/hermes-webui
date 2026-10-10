@@ -9,6 +9,8 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
+from email.utils import parseaddr
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +66,13 @@ def connect(path: Path | str) -> sqlite3.Connection:
             digest_json TEXT NOT NULL, completed_at TEXT NOT NULL,
             PRIMARY KEY(window_start, window_end)
         );
+        CREATE TABLE IF NOT EXISTS crm_outbox (
+            event_key TEXT PRIMARY KEY, channel TEXT NOT NULL, account TEXT NOT NULL,
+            message_id TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS crm_outbox_pending ON crm_outbox(status, created_at);
         CREATE INDEX IF NOT EXISTS email_queue_received ON email_queue(received_at);
         """
     )
@@ -180,6 +189,38 @@ def enqueue(db_path: Path | str, rows: list[dict[str, Any]]) -> dict[str, int]:
             )
             if cursor.rowcount:
                 added += 1
+                # Commit the CRM event in the same SQLite transaction as the
+                # email queue row. The recap may clean its body only after this
+                # independently durable, minimized event has been acknowledged.
+                address = parseaddr(str(row.get("from") or ""))[1].strip().casefold()
+                local_part = address.partition("@")[0]
+                subject = str(row.get("subject") or "").casefold()
+                excluded_auto = (
+                    bool(row.get("listUnsubscribe"))
+                    or bool(re.search(r"(?:^|[._+-])(no.?reply|do.?not.?reply|automated|mailer.?daemon)(?:$|[._+-])", local_part))
+                    or bool(re.match(r"\s*(automatic reply|auto(?:matic)? response|out of office|autoreply)\b", subject))
+                )
+                if address and "@" in address and not excluded_auto:
+                    crm_event = {
+                        "channel": "email", "account": account,
+                        "message_id": str(row.get("messageId") or key),
+                        "occurred_at": str(row["receivedAt"]),
+                        "identity_key": address,
+                        "summary": (str(row.get("subject") or "Email ricevuta")[:180]
+                                    + (": " + str(row.get("bodyExcerpt") or "")[:260]
+                                       if row.get("bodyExcerpt") else "")),
+                        "next_action": "Valutare la risposta inbound e aggiornare il contatto.",
+                        "inbound": True, "autoresponder": False, "echo": False,
+                    }
+                    event_key = hashlib.sha256(
+                        "\0".join((account, "email", crm_event["message_id"])).encode()
+                    ).hexdigest()
+                    now = datetime.now(timezone.utc).isoformat()
+                    db.execute(
+                        "INSERT OR IGNORE INTO crm_outbox(event_key,channel,account,message_id,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                        (event_key, "email", account, crm_event["message_id"],
+                         json.dumps(crm_event, ensure_ascii=False), now, now),
+                    )
             else:
                 skipped += 1
         db.commit()
@@ -191,6 +232,48 @@ def enqueue(db_path: Path | str, rows: list[dict[str, Any]]) -> dict[str, int]:
     return {"added": added, "skipped": skipped}
 
 
+def pending_crm_events(db_path: Path | str, *, limit: int = 100) -> list[dict[str, Any]]:
+    db = connect(db_path)
+    try:
+        return [json.loads(row[0]) for row in db.execute(
+            "SELECT payload FROM crm_outbox WHERE status='pending' ORDER BY created_at LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        )]
+    finally:
+        db.close()
+
+
+def pending_crm_count(db_path: Path | str) -> int:
+    db = connect(db_path)
+    try:
+        return int(db.execute("SELECT COUNT(*) FROM crm_outbox WHERE status='pending'").fetchone()[0])
+    finally:
+        db.close()
+
+
+def finish_crm_event(db_path: Path | str, account: str, channel: str, message_id: str,
+                     *, error: str | None = None, review: str | None = None) -> None:
+    event_key = hashlib.sha256("\0".join((account, channel, message_id)).encode()).hexdigest()
+    db = connect(db_path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        if review:
+            db.execute("UPDATE crm_outbox SET status='review',attempts=attempts+1,last_error=?,updated_at=? WHERE event_key=?",
+                       (review[:100], datetime.now(timezone.utc).isoformat(), event_key))
+        elif error:
+            db.execute("UPDATE crm_outbox SET attempts=attempts+1,last_error=?,updated_at=? WHERE event_key=?",
+                       (error[:100], datetime.now(timezone.utc).isoformat(), event_key))
+        else:
+            db.execute("UPDATE crm_outbox SET status='acked',last_error=NULL,updated_at=? WHERE event_key=?",
+                       (datetime.now(timezone.utc).isoformat(), event_key))
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def start_or_recover_batch(db_path: Path | str, cutoff: str, *, now: str, start_after: str | None = None) -> tuple[str, list[dict[str, Any]], str | None]:
     db = connect(db_path)
     try:
@@ -200,7 +283,11 @@ def start_or_recover_batch(db_path: Path | str, cutoff: str, *, now: str, start_
                 "SELECT digest_json FROM completed_digest_windows WHERE window_start=? AND window_end=?",
                 (start_after, cutoff),
             ).fetchone()
-            if completed:
+            late_count = db.execute(
+                "SELECT COUNT(*) FROM email_queue WHERE received_at>=? AND received_at<?",
+                (start_after, cutoff),
+            ).fetchone()[0]
+            if completed and not late_count:
                 db.commit()
                 return "completed:" + start_after, [], completed["digest_json"]
         prior = db.execute("SELECT * FROM digest_batch WHERE singleton=1").fetchone()
@@ -243,6 +330,18 @@ def start_or_recover_batch(db_path: Path | str, cutoff: str, *, now: str, start_
         db.close()
 
 
+def completed_digest(db_path: Path | str, window_start: str, window_end: str) -> dict[str, Any] | None:
+    db = connect(db_path)
+    try:
+        row = db.execute(
+            "SELECT digest_json FROM completed_digest_windows WHERE window_start=? AND window_end=?",
+            (window_start, window_end),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+    finally:
+        db.close()
+
+
 def prepare_batch(db_path: Path | str, batch_id: str, digest: dict[str, Any]) -> str:
     encoded = json.dumps(digest, ensure_ascii=False, separators=(",", ":"))
     db = connect(db_path)
@@ -275,7 +374,7 @@ def finish_batch(db_path: Path | str, batch_id: str, *, processed_at: str) -> in
         if window_start and window_end and batch_row:
             db.execute(
                 "INSERT INTO completed_digest_windows(window_start,window_end,digest_json,completed_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(window_start,window_end) DO NOTHING",
+                "ON CONFLICT(window_start,window_end) DO UPDATE SET digest_json=excluded.digest_json,completed_at=excluded.completed_at",
                 (window_start, window_end, batch_row["digest_json"], processed_at),
             )
         for row in rows:

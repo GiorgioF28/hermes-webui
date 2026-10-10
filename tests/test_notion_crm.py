@@ -115,3 +115,19 @@ def test_retry_only_429_and_5xx():
     with pytest.raises(Exception, match="notion_http_400"):
         client.validate_schema()
     assert attempts == []
+
+
+def test_exact_identity_lookup_follows_all_notion_pages():
+    calls = []
+
+    def transport(method, path, payload):
+        calls.append(payload)
+        if payload.get("start_cursor") is None:
+            return 200, {}, {"results": [{"id": "p1"}], "has_more": True, "next_cursor": "cursor-2"}
+        return 200, {}, {"results": [{"id": "p2"}], "has_more": False, "next_cursor": None}
+
+    pages = NotionCRM("token", "db", transport=transport).query_identity_pages(
+        "Email", "email", "person@example.test",
+    )
+    assert [page["id"] for page in pages] == ["p1", "p2"]
+    assert calls[1]["start_cursor"] == "cursor-2"

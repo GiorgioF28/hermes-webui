@@ -1,6 +1,8 @@
 # Verified inbound replies to VisionBuilts CRM
 
-The adapter updates one existing People/CRM page after a source identity is mapped and checked against the page. It never sends messages, creates contacts, or infers commercial interest.
+The adapter updates one existing People/CRM page after a source identity is matched exactly and checked against the page. It never sends messages, creates contacts, or infers commercial interest. A first inbound from an existing People email address is sufficient; thread/outbound correspondence is not required.
+
+Email intake writes a minimized record to the `crm_outbox` table in the same SQLite transaction as the email queue insert. `api.email_crm_consumer` queries all exact `Email` matches in People, marks zero/multiple matches for review, and acknowledges one matching page only after PATCH + GET readback. Failed Notion requests remain retryable. The outbox is independent of digest cleanup. The authenticated endpoint is `POST /api/cron/daily-brief/crm-consume`; a workflow or operator must invoke it. These code and fixture changes do not imply live scheduling or a live Notion write.
 
 ## Executable consumer
 
@@ -8,19 +10,19 @@ The adapter updates one existing People/CRM page after a source identity is mapp
 
 Set `NOTION_API_TOKEN` and `NOTION_CRM_DATABASE_ID` in the process environment. The command emits aggregate outcome counts only. Do not place tokens or the reviewed mapping in the repository.
 
-Each JSONL event contains `channel`, `account`, immutable `message_id`, timezone-aware `occurred_at`, short `summary`, `next_action`, and source `identity_key`, plus explicit `inbound: true`, `echo: false`, and `autoresponder: false`. Missing or contradictory direction/classification flags are excluded. Instagram additionally requires `recipient_account == account` and `sender_igsid == identity_key`. Email additionally requires normalized `sender_email`, the mapped thread ID, and `in_reply_to` or a `references` entry matching a mapped outbound message ID. The input cannot nominate a Notion page or assert verified identity: the consumer discards those fields and resolves the page through the separate reviewed mapping. Mapping keys are `account|channel|identity_key`; values contain `page_id`, `notion_property` (`Handle IG` or `Email`), and the exact `identity_value` expected on that page. Email mappings also include `thread_id` and `outbound_message_ids`. Identity mismatch or missing evidence is review-only.
+Each JSONL event contains `channel`, `account`, immutable `message_id`, timezone-aware `occurred_at`, short `summary`, `next_action`, and source `identity_key`, plus explicit `inbound: true`, `echo: false`, and `autoresponder: false`. Missing or contradictory direction/classification flags are excluded. Instagram additionally requires `recipient_account == account` and `sender_igsid == identity_key`. The legacy export consumer still uses a reviewed mapping. The Daily Brief queue consumer instead resolves an email against every exact, paginated People email match and does not require outbound-thread evidence. Identity mismatch or missing/ambiguous identity is review-only.
 
 The event export itself must come from an authorized source reader. The consumer is not an inbox reader or an authentication bypass. No Meta access, Gmail auth, OAuth repair, secret retrieval, or message send is implemented here. The current authorized Meta export path was unavailable in D637; Gmail primary remains blocked by the deferred `invalid_grant`.
 
-## D641 email queue boundary
+## Email queue boundary
 
-D641 owns the SQLite email queue and its delivery/receipt gate. This consumer does not open, mutate, acknowledge, or delete D641 queue rows and does not process newsletter/non-CRM bodies. Before connecting the queue, D641 must provide a handoff contract that supplies source identity plus thread/outbound evidence, retains the body until CRM acknowledgement where applicable, and distinguishes excluded, review, retryable error, and synced outcomes. Until then, use a separately authorized event export. This command does not claim automatic scheduling or delivery-recap integration.
+The Daily Brief SQLite queue owns email bodies and its digest receipt gate. CRM events contain only a short summary and are retained independently, so recap cleanup does not delete an unacknowledged CRM event. The consumer never creates new contacts and keeps unmatched or ambiguous events in durable review.
 
 ## Update and receipt behavior
 
 - Dedupe key: SHA-256 of receiving account + channel + immutable message ID.
 - Reject outbound echoes and autoresponders; reject non-inbound events.
-- Preserve `In trattativa`, `Chiuso`, `Perso`, source, owner, DM history, and all prior notes. Advance only `Contattato`/`Risposto`, or a stale status with documented outbound evidence.
+- Preserve `In trattativa`, `Chiuso`, `Perso`, source, owner, DM history, and all prior notes. Advance an exact known contact to `Risposto` on its first inbound.
 - Append a message marker and short summary without truncating long Notion rich text. Set response date and optional channel/action only when those properties exist.
 - Never replace a later response. Distinct events with equal timestamps both retain their marker.
 - A receipt is written only after PATCH and GET confirm status, semantically normalized date, optional properties, and marker. A repeated event after a successful PATCH is idempotent and remains recoverable until readback succeeds.
