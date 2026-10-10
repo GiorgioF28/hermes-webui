@@ -652,6 +652,35 @@ class PrimeSessionStore:
         with self._lock:
             return self._public_delegations(self._read_locked())
 
+    def project_task_cards(self, tasks: list[dict]) -> list[dict]:
+        """Read-only polling view; transcript delivery outranks stale task flags."""
+        from api.delegation_outcome import compact_delegation_card
+        with self._lock:
+            data = self._read_locked()
+            visible = set(self.history(windowed=True)["history_window"]["visible_indexes"])
+            deliveries = dict((data.get("_prime_archive") or {}).get("brief_indexes") or {})
+            for index, message in enumerate(data["messages"]):
+                if message.get("role") == "assistant" and message.get("brief_id"):
+                    deliveries[str(message["brief_id"])] = index
+            records = {r["id"]: r for r in self._public_delegations(data)}
+            cards = []
+            for task in tasks:
+                merged = {**records.get(task.get("id"), {}), **task}
+                # RAM snapshots often omit the durable brief/anchor metadata.
+                for key in ("anchor_message_index", "brief_message_index"):
+                    if merged.get(key) is None:
+                        merged[key] = records.get(task.get("id"), {}).get(key)
+                delivered_index = deliveries.get("brief-" + str(task.get("id")))
+                if delivered_index is not None:
+                    merged.update(brief_status="delivered", brief_message_index=int(delivered_index))
+                card = compact_delegation_card(merged)
+                anchors = [merged.get("anchor_message_index"), merged.get("brief_message_index")]
+                card["card_visible"] = (merged.get("status") in ("in_corso", "running", "pending")
+                    or all(index is None for index in anchors)
+                    or any(index in visible for index in anchors if index is not None))
+                cards.append(card)
+            return cards
+
     def get_delegations_rev(self) -> int:
         with self._lock:
             return int(self._read_locked().get("delegations_rev") or 0)
