@@ -36,9 +36,12 @@ def test_transcript_wins_over_stale_failure_and_missing_queue_ack(delivery):
     status()
     assert payloads[-1][0]['state'] == 'done'
     assert payloads[-1][0]['reply'] == 'Recap salvato'
+    original_time = store.brief_delivery(bid)['created_at']
+    assert payloads[-1][0]['created_at'] == original_time
     routes._BRIEF_JOBS.clear()  # process restart
     status()
     assert payloads[-1][0]['delivered']
+    assert payloads[-1][0]['created_at'] == original_time
     assert payloads[-1][0]['usage'] == {'input_tokens': 7}
 
 

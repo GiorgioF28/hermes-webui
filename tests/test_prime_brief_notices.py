@@ -17,7 +17,7 @@ def renderer(source=SOURCE):
     retry = source[source.index('  function sysNoteRetry('):source.index('  // ── Todos panel')]
     cards = source[source.index('  function taskStateClass('):source.index('  function requestBrief(t)')]
     request = source[source.index('  function requestBrief(t)'):source.index('  var _cbPollTimer')]
-    history = source[source.index('  function renderPrimeHistoryMessage('):source.index('  function renderPrimeHistoryMessages(')]
+    history = source[(source.index('  function primeTimestamp(') if '  function primeTimestamp(' in source else source.index('  function renderPrimeHistoryMessage(')):source.index('  function renderPrimeHistoryMessages(')]
     styles = source[source.index('  function injectStyles()'):source.index('  /*', source.index('  function injectStyles()'))]
     return harness + retry + cards + request + history + styles + '\ninjectStyles();'
 

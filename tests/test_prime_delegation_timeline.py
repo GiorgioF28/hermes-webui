@@ -41,7 +41,7 @@ def browser():
 def renderer_source(source=None):
     source = source or Path('static/command_bridge.js').read_text(encoding='utf-8')
     return (source[source.index('  function taskStateClass('):source.index('  function requestBrief(t)')] +
-            source[source.index('  function renderPrimeHistoryMessage('):source.index('  function renderPrimeHistoryMessages(')])
+            source[(source.index('  function primeTimestamp(') if '  function primeTimestamp(' in source else source.index('  function renderPrimeHistoryMessage(')):source.index('  function renderPrimeHistoryMessages(')])
 
 
 HARNESS = r'''

@@ -383,6 +383,8 @@
 '.cb-msg .cb-who{font-family:var(--cb-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--cb-faint);margin-bottom:4px;}',
 '.cb-msg.cb-from-prime{align-self:flex-start;}',
 '.cb-msg.cb-from-user{align-self:flex-end;text-align:right;color:#fff;}',
+'.cb-msg-time{display:block;margin-top:5px;text-align:right;color:var(--cb-faint);font-family:var(--cb-mono);font-size:10px;letter-spacing:.04em;}',
+'.cb-from-user>.cb-msg-time{text-align:left;}',
 '.cb-msg.cb-from-prime .cb-bubble{color:var(--cb-text);}',
 '.cb-prime-status{margin-top:5px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.06em;color:var(--cb-faint);}',
 '.cb-msg-foot{margin-top:7px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.04em;color:var(--cb-faint);}',
@@ -1244,6 +1246,7 @@
         if (replyNode) {
           replyNode.setAttribute('data-cb-stream-id', pending.stream_id || '');
           replyNode.setAttribute('data-cb-role', 'assistant');
+          stampPrimeNode(replyNode, pending.started_at, 'assistant');
         }
         if (node && partial && partial !== lastText) {
           lastText = partial;
@@ -1377,6 +1380,7 @@
     var log = $('cbLog'); if (!log) return;
     var m = el('div', 'cb-msg cb-from-prime');
     m.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">' + esc(text) + '</div>';
+    stampPrimeNode(m, Date.now() / 1000, 'assistant');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
   }
   // Nota di sistema cliccabile: usata quando lo storico non si carica, cosi'
@@ -1397,6 +1401,7 @@
         if (ev && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); fire(); }
       });
     }
+    stampPrimeNode(m, Date.now() / 1000, 'assistant');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
     return m;
   }
@@ -1447,7 +1452,12 @@
     if (t.card_visible === false) return false;
     if (!_cbTaskWindow || taskIsRunning(t.status)) return true;
     var indexes = [t.anchor_message_index, t.brief_message_index].filter(function (i) { return i != null; });
-    if (!indexes.length) return true;
+    if (!indexes.length) {
+      var started = primeTimestamp(t.started || t.started_at);
+      var dated = $('cbLog') && $('cbLog').querySelectorAll('[data-cb-msg-index][data-cb-created-at]');
+      var floor = dated && dated.length ? Math.min.apply(null, Array.from(dated).map(function (n) { return Number(n.getAttribute('data-cb-created-at')); })) : null;
+      return !started || floor == null || started >= floor;
+    }
     var visible = _cbTaskWindow.visible_indexes;
     return indexes.some(function (i) {
       i = Number(i);
@@ -1544,6 +1554,7 @@
           }
           progress.hidden = prefix === previous;
           renderRich(progress.querySelector('.cb-bubble'), prefix.slice(previous.length));
+          stampPrimeNode(progress, t.started || t.started_at, 'assistant');
           log.insertBefore(progress, replyNode);
           card._cbPrefix = prefix;
           var oldPrefix = replyNode.getAttribute('data-cb-delegated-prefix') || '';
@@ -1593,6 +1604,7 @@
       var entry = _cbTasks[id];
       if (entry && entry.el && entry.task) placeTaskCard(entry.el, entry.task);
     });
+    orderPrimeTimeline();
   }
   // opts.replay  = card idratata dallo storico (nessun sysNote "ha finito")
   // opts.briefed = il brief e' gia' stato consegnato e persistito nel transcript
@@ -1623,7 +1635,7 @@
     }
     // Store only what placement/replay requires, never the full worker payload.
     prev.task = { id: t.id, agent: t.agent, task_type: t.task_type, summary: taskSummary(t),
-      status: t.status, started: t.started || t.started_at, finished: t.finished || t.finished_at,
+      status: t.status, started: (prev.task && prev.task.started) || t.started || t.started_at, finished: t.finished || t.finished_at,
       anchor_message_index: t.anchor_message_index, anchor_stream_id: t.anchor_stream_id,
       anchor_reply_prefix: t.anchor_reply_prefix, brief_message_index: t.brief_message_index };
     if (opts && opts.briefed) prev.briefed = true;
@@ -1635,8 +1647,9 @@
     if (t.anchor_message_index != null) prev.el.setAttribute('data-anchor-index', String(t.anchor_message_index));
     var sl = esc(t.id) + ' · ' + esc(taskStateLabel(t.status));
     prev.el.innerHTML = '<b>' + esc(t.agent || 'agente') + '</b>' +
-      ' <span style="float:right">' + sl + '</span>' + taskTimerHtml(t) +
+      ' <span style="float:right">' + sl + '</span>' + taskTimerHtml(prev.task) +
       '<div class="cb-deleg-summary">' + esc(prev.task.summary) + '</div>';
+    stampPrimeNode(prev.el, prev.task.started, 'assistant');
     prev.status = t.status;
     repositionPrimeTaskCards();
     if (sb && !_cbHistoryBatch) log.scrollTop = log.scrollHeight;
@@ -1658,14 +1671,14 @@
     // Render only its durable result, after active local turns have settled.
     var turnUi = createPrimeTurnUi(null);
     var cfg = window.__HERMES_CONFIG__ || {};
-    var finish = function (reply, usage, messageIndex, historical) {
+    var finish = function (reply, usage, messageIndex, historical, createdAt) {
       if (turnUi.isClosed()) return;
-      if (_cbOwnTurnCount > 0 && reply) { setTimeout(function () { finish(reply, usage, messageIndex, historical); }, 500); return; }
+      if (_cbOwnTurnCount > 0 && reply) { setTimeout(function () { finish(reply, usage, messageIndex, historical, createdAt); }, 500); return; }
       reply = String(reply || '').trim();
       try {
         if (reply) {
           var rendered = renderPrimeHistoryMessage({role: 'assistant', content: reply,
-            brief_id: 'brief-' + t.id, task_id: t.id, usage: usage}, messageIndex);
+            brief_id: 'brief-' + t.id, task_id: t.id, usage: usage, created_at: createdAt}, messageIndex);
           if (userEngaged && !historical && (rendered || messageIndex == null)) speak(reply);
         }
       } finally {
@@ -1689,7 +1702,7 @@
       if (turnUi.isClosed()) return;
       if (s && (s.state === 'done' || s.already_delivered || s.delivered || s.reply)) {
         finish((s && s.reply) || '', s && s.usage, s && s.message_index,
-          !!(s && s.already_delivered) || (s.message_index != null && s.message_index < _cbRenderedCount)); return;
+          !!(s && s.already_delivered) || (s.message_index != null && s.message_index < _cbRenderedCount), s.created_at); return;
       }
       if (hasDeliveredBrief(briefId)) { finish(''); return; }
       if (s && s.pending) {
@@ -1759,6 +1772,7 @@
       note.setAttribute('data-cb-brief-notice', briefId);
       note.innerHTML = '<div class="cb-who">sistema</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic"></div>';
       note.querySelector('.cb-bubble').textContent = text;
+      stampPrimeNode(note, Date.now() / 1000, 'assistant');
       var sb = nearBottom(log); log.appendChild(note); if (sb) log.scrollTop = log.scrollHeight;
     }
   }
@@ -1883,6 +1897,7 @@
     var log = $('cbLog'); if (!log) return null;
     var m = el('div', 'cb-msg cb-from-prime');
     m.innerHTML = '<div class="cb-who">hermes prime</div><div class="cb-bubble" style="color:var(--cb-muted);font-style:italic">sto ragionando&#8230;</div><div class="cb-prime-status" hidden></div><div class="cb-msg-foot" hidden></div>';
+    stampPrimeNode(m, Date.now() / 1000, 'assistant');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight; return m;
   }
   function streamPrimeResponse(response, handlers) {
@@ -2113,7 +2128,7 @@
     if (!voiceOn) { stopSpeak(); setOrb('idle', 0); }
   }
 
-  function primeSay(who, text, thumbs, quiet) {
+  function primeSay(who, text, thumbs, quiet, createdAt) {
     var log = $('cbLog'); if (!log) return;
     var m = el('div', 'cb-msg ' + (who === 'user' ? 'cb-from-user' : 'cb-from-prime'));
     var imgs = '';
@@ -2129,6 +2144,7 @@
     m.innerHTML = '<div class="cb-who">' + (who === 'user' ? 'tu' : 'hermes prime') + '</div>' +
       '<div class="cb-bubble">' + label + imgs + '</div>' +
       (who === 'prime' ? '<div class="cb-msg-foot" hidden></div>' : '');
+    stampPrimeNode(m, createdAt === undefined ? Date.now() / 1000 : createdAt, who === 'user' ? 'user' : 'assistant');
     var _sb = nearBottom(log); log.appendChild(m); if (_sb) log.scrollTop = log.scrollHeight;
     if (who === 'prime' && userEngaged && !quiet) speak(text);
     return m;
@@ -2166,6 +2182,7 @@
       '<div class="cb-attention-title">' + esc(title) + '</div>' +
       (body ? '<div class="cb-attention-body">' + esc(body) + '</div>' : '') +
       '<div class="cb-attention-actions"></div>';
+    stampPrimeNode(card, Date.now() / 1000, 'assistant');
     var _sb = nearBottom(log); log.appendChild(card); if (_sb) log.scrollTop = log.scrollHeight;
     return card;
   }
@@ -2463,13 +2480,61 @@
   }
   // Un solo messaggio dello storico -> un nodo con data-cb-msg-index, cosi' il
   // sync incrementale sa cosa e' gia' a video e le card delega hanno l'ancora.
+  function primeTimestamp(value) {
+    if (value == null || value === '') return null;
+    var n = Number(value);
+    if (!Number.isFinite(n)) n = Date.parse(String(value)) / 1000;
+    else if (n > 1e11) n /= 1000;
+    return n > 0 && Number.isFinite(new Date(n * 1000).getTime()) ? n : null;
+  }
+  function stampPrimeNode(node, value, role) {
+    if (!node) return;
+    var ts = primeTimestamp(value);
+    var time = node.querySelector('.cb-msg-time');
+    if (!time) { time = document.createElement('time'); time.className = 'cb-msg-time'; node.appendChild(time); }
+    node.setAttribute('data-cb-role', role || 'assistant');
+    if (ts == null) {
+      node.removeAttribute('data-cb-created-at');
+      time.removeAttribute('datetime');
+      time.textContent = 'Ora non disponibile';
+      time.title = 'Questo elemento storico non ha un timestamp salvato';
+      return;
+    }
+    var date = new Date(ts * 1000);
+    node.setAttribute('data-cb-created-at', String(ts));
+    time.dateTime = date.toISOString();
+    time.textContent = date.toLocaleString('it-IT', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+    time.title = time.dateTime;
+  }
+  function orderPrimeTimeline() {
+    var log = $('cbLog'); if (!log || (typeof _cbHistoryBatch !== 'undefined' && _cbHistoryBatch)) return;
+    // Sort only dated rows in their existing slots. Legacy undated rows retain
+    // durable index/owner placement; observation never invents a historical time.
+    var dated = Array.from(log.children).filter(function (n) { return n.hasAttribute('data-cb-created-at'); });
+    var ordered = dated.map(function (n, i) { return {node:n, slot:i}; }).sort(function (a, b) {
+      var delta = Number(a.node.getAttribute('data-cb-created-at')) - Number(b.node.getAttribute('data-cb-created-at'));
+      if (delta) return delta;
+      if (a.node.hasAttribute('data-cb-msg-index') && b.node.hasAttribute('data-cb-msg-index')) {
+        return Number(a.node.getAttribute('data-cb-msg-index')) - Number(b.node.getAttribute('data-cb-msg-index'));
+      }
+      function rank(n) { return n.classList.contains('cb-deleg-progress') ? 0 : n.classList.contains('cb-deleg') ? 1 : 2; }
+      var aTask = a.node.getAttribute('data-task-id') || a.node.getAttribute('data-progress-task-id');
+      var bTask = b.node.getAttribute('data-task-id') || b.node.getAttribute('data-progress-task-id');
+      if (aTask && bTask) return aTask.localeCompare(bTask, undefined, {numeric:true}) || rank(a.node) - rank(b.node);
+      return rank(a.node) - rank(b.node) || a.slot - b.slot;
+    });
+    if (ordered.every(function (e, i) { return e.node === dated[i]; })) return;
+    var markers = dated.map(function (n) { var marker = document.createComment('timeline'); log.replaceChild(marker, n); return marker; });
+    ordered.forEach(function (e, i) { log.replaceChild(e.node, markers[i]); });
+  }
   function renderPrimeHistoryMessage(m, idx, pendingClarifyId) {
     var log = $('cbLog'); if (!log || !m) return null;
     if (m.role === 'assistant' && m.brief_id && typeof clearBriefNotice === 'function') clearBriefNotice(String(m.brief_id));
     var hasIdx = idx != null && Number.isFinite(Number(idx));
     if (hasIdx && m.brief_id && typeof _cbTaskWindow !== 'undefined' && _cbTaskWindow &&
         !taskCardInWindow({status:'ok', brief_message_index:Number(idx)})) return null;
-    if (hasIdx && log.querySelector('[data-cb-msg-index="' + Number(idx) + '"]')) return null;
+    var existing = hasIdx && log.querySelector('[data-cb-msg-index="' + Number(idx) + '"]');
+    if (existing) { stampPrimeNode(existing, m.created_at || m.timestamp, m.role); orderPrimeTimeline(); return null; }
     var node = null;
     if (m.stream_id) {
       var streamNodes = log.querySelectorAll('[data-cb-stream-id]');
@@ -2511,12 +2576,15 @@
         }
       );
       if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
+      stampPrimeNode(node, m.created_at || m.timestamp, m.role);
+      orderPrimeTimeline();
       return node;
     }
-    node = node || primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '', null, true);
+    node = node || primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '', null, true, m.created_at || m.timestamp || null);
+    stampPrimeNode(node, m.created_at || m.timestamp, m.role);
     if (node && briefId) node.setAttribute('data-cb-brief-id', briefId);
     if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
-    if (node && hasIdx && briefId) {
+    if (node && hasIdx) {
       var ordered = log.querySelectorAll('[data-cb-msg-index]');
       for (var o = 0; o < ordered.length; o++) {
         if (ordered[o] !== node && Number(ordered[o].getAttribute('data-cb-msg-index')) > Number(idx)) {
@@ -2545,6 +2613,7 @@
         if (_briefFoot) { _briefFoot.textContent = _briefBadge; _briefFoot.title = _bridgeUsageTitle(m.usage); _briefFoot.hidden = false; }
       }
     }
+    orderPrimeTimeline();
     return node;
   }
   function renderPrimeHistoryMessages(messages, offset, pendingClarifyId) {
@@ -2558,6 +2627,7 @@
         if (renderPrimeHistoryMessage(m, messageIndex, pendingClarifyId)) rendered += 1;
       });
     } finally { _cbHistoryBatch -= 1; }
+    orderPrimeTimeline();
     return rendered;
   }
   // Record durevole della delega (store) -> forma legacy attesa da renderTask.
@@ -2671,6 +2741,7 @@
         // Il turno recuperato non e' di questa scheda: trattalo come remoto,
         // cosi' a fine turno viene sostituito dal messaggio definitivo.
         _cbRemoteTurnNode = node;
+        stampPrimeNode(node, pending.started_at, 'assistant');
         node.setAttribute('data-cb-stream-id', pending.stream_id);
         node.setAttribute('data-cb-role', 'assistant');
         updatePrimeLiveText(node, pending.partial_output || '');
@@ -2998,6 +3069,8 @@
       return streamPrimeResponse(r, {
         started: function (d) {
           if (!d || !d.stream_id) return;
+          stampPrimeNode(userNode, d.created_at, 'user');
+          stampPrimeNode(ph, d.created_at, 'assistant');
           if (userNode) { userNode.setAttribute('data-cb-stream-id', d.stream_id); userNode.setAttribute('data-cb-role', 'user'); }
           if (ph) { ph.setAttribute('data-cb-stream-id', d.stream_id); ph.setAttribute('data-cb-role', 'assistant'); }
           if (userNode && d.user_message_index != null) userNode.setAttribute('data-cb-msg-index', String(d.user_message_index));
@@ -3029,6 +3102,7 @@
         tool: function (d) { if (d && d.tool) renderToolCard(d.tool, d.summary || ''); },
         done: function (d) {
           if (d && d.usage) showUsage(d.usage);
+          if (ph && d) stampPrimeNode(ph, d.created_at, 'assistant');
           // The canonical final answer replaces interim process text.
           if (d && typeof d.reply === 'string') reply = d.reply;
           if (ph && d && d.assistant_message_index != null) ph.setAttribute('data-cb-msg-index', String(d.assistant_message_index));
@@ -3039,6 +3113,7 @@
           }
           if (!reply) showToken('Ricevuto.');
           finish('\u2713 completato');
+          repositionPrimeTaskCards();
           if (d && d.delegations && d.delegations.length) d.delegations.forEach(function (t) { renderTask(t); });
         },
         error: function (d) {

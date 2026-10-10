@@ -14,6 +14,9 @@ def test_brief_live_and_history_reconcile_by_id_without_text_dedup():
     start = source.index("  function renderPrimeHistoryMessage(")
     end = source.index("  function renderPrimeHistoryMessages(", start)
     renderer = source[start:end]
+    # This dependency-free identity stub omits browser timestamp/layout APIs;
+    # actual metadata and chronology are exercised by the Chromium suite.
+    renderer = 'function stampPrimeNode(){} function orderPrimeTimeline(){}\n' + renderer
     harness = r"""
 const attrs = n => n.attrs;
 const nodes = [];
@@ -74,7 +77,8 @@ def test_late_brief_waits_for_the_active_local_prime_turn():
     request = source[start:end]
     harness = r"""
 const window = {__HERMES_CONFIG__:{}, _showTokenUsage:false};
-const document = {baseURI:'http://prime.test/'};
+const document = {baseURI:'http://prime.test/',querySelectorAll:()=>[]};
+let _cbRenderedCount=0;
 const location = {href:'http://prime.test/'};
 let _cbOwnTurnCount=1, userEngaged=false, timers=[], orbWrites=[], deliveredAt=[];
 function setOrb(...args){orbWrites.push(args)}

@@ -846,6 +846,16 @@ class PrimeSessionStore:
                 del journal[:-500]
             self._write_locked(data)
 
+    def message_created_at(self, index: int | None) -> float | None:
+        """Read the original timestamp for an SSE row without copying history."""
+        if index is None:
+            return None
+        with self._lock:
+            messages = self._read_locked()["messages"]
+            if 0 <= index < len(messages):
+                return messages[index].get("created_at")
+        return None
+
     def brief_delivery(self, brief_id: str) -> dict | None:
         """Read delivery truth without hydrating history or changing its cursor."""
         with self._lock:
@@ -856,6 +866,7 @@ class PrimeSessionStore:
             for index, msg in enumerate(data["messages"]):
                 if msg.get("role") == "assistant" and msg.get("brief_id") == brief_id:
                     return {"message_index": index, "reply": msg.get("content") or "",
+                            "created_at": msg.get("created_at"),
                             "usage": msg.get("usage") if isinstance(msg.get("usage"), dict) else {}}
         return None
 

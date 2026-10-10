@@ -33,7 +33,7 @@ def browser():
 def _renderer_source():
     source = Path("static/command_bridge.js").read_text(encoding="utf-8")
     request = source[source.index("  function requestBrief(t)"):source.index("  var _cbPollTimer")]
-    history = source[source.index("  function renderPrimeHistoryMessage("):source.index("  function renderPrimeHistoryMessages(")]
+    history = source[(source.index("  function primeTimestamp(") if "  function primeTimestamp(" in source else source.index("  function renderPrimeHistoryMessage(")):source.index("  function renderPrimeHistoryMessages(")]
     return request + history
 
 
