@@ -50,12 +50,17 @@ def test_patch_separates_gmail_intake_from_recap_and_keeps_auth_reference():
     assert "POST email accumulate Gmail" in names
     assert "POST daily recap" in names
     assert "Normalize IMAP rows" in names
+    assert "CRM consumer every minute" in names
+    assert "POST CRM consumer" in names
     assert "POST email digest" not in names
     by_name = {node["name"]: node for node in result["nodes"]}
     assert by_name["POST email accumulate Gmail"]["parameters"]["url"].endswith("email-accumulate")
     assert by_name["POST daily recap"]["parameters"]["url"].endswith("/email")
     assert by_name["POST daily recap"]["credentials"] == {"httpHeaderAuth": {"id": "credential-ref", "name": "Hermes Cron Token"}}
     assert by_name["POST daily recap"]["retryOnFail"] is True
+    assert by_name["POST CRM consumer"]["parameters"]["url"].endswith("/crm-consume")
+    assert by_name["POST CRM consumer"]["retryOnFail"] is True
+    assert result["connections"]["CRM consumer every minute"]["main"][0][0]["node"] == "POST CRM consumer"
     assert result["connections"]["POST email accumulate Gmail"]["main"][0][0]["node"] == "POST daily recap"
     assert result["connections"]["Normalize IMAP rows"]["main"][0][0]["node"] == "POST email accumulate"
     assert "Number.isFinite(date.getTime())" in by_name["Normalize email rows"]["parameters"]["jsCode"]

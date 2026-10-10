@@ -243,6 +243,36 @@ def pending_crm_events(db_path: Path | str, *, limit: int = 100) -> list[dict[st
         db.close()
 
 
+def enqueue_crm_events(db_path: Path | str, events: list[dict[str, Any]]) -> dict[str, int]:
+    """Durably import authenticated relay events without storing raw payloads."""
+    added = skipped = 0
+    db = connect(db_path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        now = datetime.now(timezone.utc).isoformat()
+        for event in events:
+            account = str(event["account"])
+            channel = str(event["channel"])
+            message_id = str(event["message_id"])
+            event_key = hashlib.sha256("\0".join((account, channel, message_id)).encode()).hexdigest()
+            payload = json.dumps(event, ensure_ascii=False)
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO crm_outbox(event_key,channel,account,message_id,payload,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (event_key, channel, account, message_id, payload, now, now),
+            )
+            if cursor.rowcount:
+                added += 1
+            else:
+                skipped += 1
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    return {"added": added, "skipped": skipped}
+
+
 def pending_crm_count(db_path: Path | str) -> int:
     db = connect(db_path)
     try:

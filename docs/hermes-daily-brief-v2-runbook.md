@@ -62,6 +62,25 @@ The n8n workflow must call the CRM consumer on a bounded recurring trigger and
 retain its existing Header Auth credential reference. This code change does not
 alter the live workflow or establish that the consumer is scheduled.
 
+The default runtime database path is
+`<HERMES_WEBUI_STATE_DIR>/daily-brief/email-queue.sqlite3`; when the variable
+is unset it follows Hermes' configured private state directory. The CRM
+consumer and reply ledger resolve beside this database. Do not derive either
+path from the repository `data/` directory.
+
+The VisionBuilts Console's signed Meta webhook now also writes minimized CRM
+relay receipts to KV. Authenticated GET polling and POST ack use the existing
+`CRM_SYNC_TOKEN`. Relay events preserve the IGSID separately from
+`verified_handle`; Hermes only matches the verified handle against Notion's
+exact `Handle IG` property. An event without a verified handle stays in durable
+review and must not be matched by treating an IGSID as a username.
+
+The workflow patch candidate adds a one-minute CRM consumer schedule,
+independent of the 07:00 recap. Publishing still requires a configured,
+authenticated Console relay poll/ingest/ack chain and a current n8n runtime
+compatibility check. Never substitute the Hermes cron credential for the
+separate Console relay credential.
+
 The authenticated `POST /api/cron/daily-brief/status` reports storage protocol
 and pending count without exposing message content. A workflow candidate must
 not be imported or activated until it reports `storage=sqlite`,

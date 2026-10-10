@@ -316,6 +316,94 @@ def test_email_endpoint_to_sqlite_prime_crm_readback_and_cleanup_e2e(tmp_path: P
     assert "[reply:email:e2e-1]" in "".join(x["plain_text"] for x in notion.page["properties"]["Note"]["rich_text"])
 
 
+def test_crm_consumer_route_uses_runtime_default_state_database(tmp_path: Path, monkeypatch):
+    from api import config
+    from api.daily_brief import DEFAULT_DATA_DIR, accumulate_email_inbox, handle_cron_daily_brief
+    from api.daily_brief_store import connect
+
+    class NotionStub:
+        database_id = "people-db"
+
+        def __init__(self):
+            self.page = {"id": "person-1", "parent": {"database_id": self.database_id},
+                         "properties": {"Email": {"type": "email", "email": "person@example.test"},
+                                        "Stato": {"type": "select", "select": {"name": "Da contattare"}},
+                                        "Data risposta": {"type": "date", "date": None},
+                                        "Canale risposta": {"type": "select", "select": None},
+                                        "Prossima azione": {"type": "rich_text", "rich_text": []},
+                                        "Note": {"type": "rich_text", "rich_text": []}}}
+
+        def query_identity_pages(self, prop, kind, value):
+            assert (prop, kind, value) == ("Email", "email", "person@example.test")
+            return [self.page]
+
+        def get_page(self, page_id):
+            return self.page
+
+        def patch_page(self, page_id, properties):
+            for name, value in properties.items():
+                kind, raw = next(iter(value.items()))
+                if kind == "rich_text":
+                    raw = [{"plain_text": item["text"]["content"]} for item in raw]
+                self.page["properties"][name] = {"type": kind, kind: raw}
+            return self.page
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "private")
+    row = _email(messageId="default-path", bodyText="payload sintetico")
+    accumulate_email_inbox(DEFAULT_DATA_DIR, {"emails": [row]}, now=NOW)
+    expected = tmp_path / "private" / "daily-brief" / "email-queue.sqlite3"
+    assert expected.is_file()
+
+    token = secrets.token_urlsafe(32)
+    handler = FakeHandler({}, token)
+    notion = NotionStub()
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": token}, clear=True), patch(
+        "api.email_crm_consumer.NotionCRM.from_env", return_value=notion,
+    ):
+        handle_cron_daily_brief(handler, "/api/cron/daily-brief/crm-consume")
+    result = json.loads(handler.wfile.getvalue())
+    db = connect(expected)
+    try:
+        assert db.execute("SELECT status FROM crm_outbox").fetchone()[0] == "acked"
+        assert db.execute("SELECT COUNT(*) FROM crm_outbox WHERE status='pending'").fetchone()[0] == 0
+    finally:
+        db.close()
+    assert result["updated"] == 1
+
+    # The legacy checkout-relative location must never receive this event.
+    assert not (DEFAULT_DATA_DIR / "email-queue.sqlite3").exists()
+
+
+def test_meta_relay_igsid_is_durable_but_never_guessed_as_notion_handle(tmp_path: Path):
+    from api.daily_brief import handle_cron_daily_brief
+    from api.daily_brief_store import connect, pending_crm_events
+
+    token = secrets.token_urlsafe(32)
+    handler = FakeHandler({"events": [{
+        "message_id": "meta-mid-1", "instagram_scoped_user_id": "person@example.test",
+        "account_aziendale_destinatario": "business-1", "occurred_at": "2026-10-10T12:00:00Z",
+        "verified_handle": "", "text": "Ciao",
+    }]}, token)
+    with patch.dict(os.environ, {"HERMES_CRON_TOKEN": token}, clear=True):
+        handle_cron_daily_brief(handler, "/api/cron/daily-brief/meta-relay-ingest", data_dir=tmp_path)
+    assert handler.status == 200
+    event, = pending_crm_events(tmp_path / "email-queue.sqlite3")
+    assert event["identity_key"] == "igsid:person@example.test"
+
+    class MustNotQueryNotion:
+        def query_identity_pages(self, *args):
+            raise AssertionError("IGSID must be reviewed before any Notion handle lookup")
+
+    from api.email_crm_consumer import consume_email_crm
+    assert consume_email_crm(tmp_path, MustNotQueryNotion())["review"] == 1
+    db = connect(tmp_path / "email-queue.sqlite3")
+    try:
+        row = db.execute("SELECT status,last_error FROM crm_outbox").fetchone()
+        assert tuple(row) == ("review", "instagram_igsid_without_verified_handle")
+    finally:
+        db.close()
+
+
 def test_pending_archive_recovers_a_missing_queue_without_reprocessing_completed_items(tmp_path: Path):
     from api.daily_brief_store import connect
     row = _email(messageId="recover-me", bodyText="contenuto acquisito")

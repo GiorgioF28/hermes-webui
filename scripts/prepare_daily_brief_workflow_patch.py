@@ -125,6 +125,26 @@ def prepare(workflow: dict[str, Any]) -> dict[str, Any]:
     recap["onError"] = "continueRegularOutput"
     result["nodes"].append(recap)
 
+    # Drain the durable CRM outbox independently of the daily recap. The
+    # one-minute interval is bounded by Notion's own retry/backoff behavior.
+    crm_trigger = {
+        "id": str(uuid.uuid4()), "name": "CRM consumer every minute",
+        "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2,
+        "position": [old_position[0] + 520, old_position[1] + 220],
+        "parameters": {"rule": {"interval": [{"field": "minutes", "minutesInterval": 1}]}},
+    }
+    crm_consumer = copy.deepcopy(imap_accumulator)
+    crm_consumer["id"] = str(uuid.uuid4())
+    crm_consumer["name"] = "POST CRM consumer"
+    crm_consumer["position"] = [old_position[0] + 780, old_position[1] + 220]
+    crm_consumer["parameters"]["url"] = "http://host.docker.internal:8788/api/cron/daily-brief/crm-consume"
+    crm_consumer["parameters"]["body"] = "={{ JSON.stringify({}) }}"
+    crm_consumer["retryOnFail"] = True
+    crm_consumer["maxTries"] = 3
+    crm_consumer["waitBetweenTries"] = 3000
+    crm_consumer["onError"] = "continueRegularOutput"
+    result["nodes"].extend([crm_trigger, crm_consumer])
+
     connections = result["connections"]
     # Reroute Gmail normalizer to intake, then run the recap after intake
     # succeeds or exhausts its bounded retries. The daily schedule still runs
@@ -135,6 +155,7 @@ def prepare(workflow: dict[str, Any]) -> dict[str, Any]:
                 target["node"] = "POST email accumulate Gmail"
     connections.pop("POST email digest", None)
     connections["POST email accumulate Gmail"] = {"main": [[{"node": "POST daily recap", "type": "main", "index": 0}]]}
+    connections["CRM consumer every minute"] = {"main": [[{"node": "POST CRM consumer", "type": "main", "index": 0}]]}
     for label in ("Label Gmail secondario", "Label Yahoo"):
         connections[label]["main"] = [[{"node": "Normalize IMAP rows", "type": "main", "index": 0}]]
     connections["Normalize IMAP rows"] = {"main": [[{"node": "POST email accumulate", "type": "main", "index": 0}]]}

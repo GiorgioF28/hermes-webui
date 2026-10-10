@@ -747,6 +747,36 @@ def handle_cron_daily_brief(handler: Any, path: str, *, data_dir: Path | str = D
         elif path == "/api/cron/daily-brief/crm-consume":
             from api.email_crm_consumer import consume_email_crm
             result = {"ok": True, **consume_email_crm(data_dir)}
+        elif path == "/api/cron/daily-brief/meta-relay-ingest":
+            from api.daily_brief_store import enqueue_crm_events
+
+            payload = _read_cron_body(handler)
+            raw_events = payload.get("events") if isinstance(payload, dict) else None
+            if not isinstance(raw_events, list) or len(raw_events) > 100:
+                raise DailyBriefValidationError("events deve essere una lista di massimo 100 eventi")
+            events = []
+            for raw in raw_events:
+                if not isinstance(raw, dict):
+                    continue
+                message_id = str(raw.get("message_id") or "").strip()
+                sender_id = str(raw.get("instagram_scoped_user_id") or "").strip()
+                account = str(raw.get("account_aziendale_destinatario") or "").strip()
+                occurred = str(raw.get("occurred_at") or "").strip()
+                verified_handle = str(raw.get("verified_handle") or "").strip().lstrip("@").casefold()
+                if not all((message_id, sender_id, account, occurred)):
+                    continue
+                # An IGSID is not a username. Unmapped senders deliberately
+                # receive an impossible-to-match identity and stay in review.
+                identity = verified_handle if verified_handle else f"igsid:{sender_id}"
+                events.append({
+                    "channel": "instagram", "account": account,
+                    "message_id": message_id, "occurred_at": occurred,
+                    "identity_key": identity,
+                    "summary": str(raw.get("text") or "")[:450],
+                    "next_action": "Rivedere il DM e preparare una risposta.",
+                    "inbound": True, "autoresponder": False, "echo": False,
+                })
+            result = {"ok": True, **enqueue_crm_events(_email_db_path(data_dir), events)}
         elif path == "/api/cron/daily-brief/status":
             _migrate_email_store(data_dir)
             from api.daily_brief_store import connect, pending_count, pending_crm_count
