@@ -122,6 +122,17 @@ def test_quiet_turn_has_heartbeat_and_thread_stops(bridge, monkeypatch):
     assert store.history()["messages"][-1]["content"] == "completato"
 
 
+def test_sse_timestamps_match_durable_history(bridge, monkeypatch):
+    store, handler = bridge
+    events = {}
+    monkeypatch.setattr("api.streaming._sse", lambda _, event, payload: events.update({event: payload}))
+    monkeypatch.setattr(routes, "_call_hermes_prime_reply_for_bridge", lambda *a, **kw: {"reply": "Answer"})
+    routes._handle_bridge_prime(handler, {"message": "Question"})
+    history = store.history()["messages"]
+    assert events['started']['created_at'] == history[events['started']['user_message_index']]['created_at']
+    assert events['done']['created_at'] == history[events['done']['assistant_message_index']]['created_at']
+
+
 def test_provider_error_after_disconnect_remains_a_real_turn_error(bridge, monkeypatch):
     store, handler = bridge
 

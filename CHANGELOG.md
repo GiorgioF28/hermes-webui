@@ -1,5 +1,15 @@
 ---
 
+## Unreleased — Command Bridge timestamps and ordering
+
+- Show original date/time with seconds on every conversation row and delegation,
+  left for user timestamps and right for Prime/delegations. SSE and recap status
+  carry the durable message timestamp, matching cold history replay.
+- Order dated conversation rows and delegation starts by their original time;
+  late polling, completion and reload retain the same chronology. Old completed
+  tasks without an owner cannot re-enter a newer dated history window. Undated
+  legacy rows retain index/owner order and explicitly show unavailable time.
+
 ## Unreleased — Delegation polling chronology
 
 - Reconcile compact task polling with durable recap indexes, including archived

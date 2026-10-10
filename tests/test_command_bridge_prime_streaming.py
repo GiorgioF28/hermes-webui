@@ -187,6 +187,7 @@ def test_bridge_prime_post_streams_tokens_then_done(monkeypatch, tmp_path):
                 "stream_id": events[0][1]["stream_id"],
                 "user_message_index": 0,
                 "assistant_message_index": 1,
+                "created_at": prime_session_store._STORE.message_created_at(1),
                 "delegations": [{"id": "prime-2", "status": "in_corso"}],
                 "usage": {
                     "input_tokens": 1200,
@@ -778,8 +779,8 @@ def test_command_bridge_frontend_renders_usage_quota_and_default_view():
 def test_command_bridge_frontend_renders_automatic_brief_usage_live_and_from_history():
     bridge = Path("static/command_bridge.js").read_text(encoding="utf-8")
 
-    assert "var finish = function (reply, usage)" in bridge
-    assert "finish((s && s.reply) || '', s && s.usage)" in bridge
+    assert "var finish = function (reply, usage, messageIndex, historical, createdAt)" in bridge
+    assert "finish((s && s.reply) || '', s && s.usage, s && s.message_index" in bridge
     # Live brief delivery now uses the same renderer and usage gate as replay.
     assert "brief_id: 'brief-' + t.id, task_id: t.id, usage: usage" in bridge
     assert "_hasBridgeUsage(m.usage) && window._showTokenUsage === true" in bridge

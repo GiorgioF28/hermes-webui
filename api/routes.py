@@ -12627,7 +12627,8 @@ def _handle_bridge_prime(handler, body):
             )
         except Exception:
             logger.debug("bridge prime delegation anchor setup failed", exc_info=True)
-        emit("started", {"stream_id": stream_id, "user_message_index": anchor_message_index})
+        emit("started", {"stream_id": stream_id, "user_message_index": anchor_message_index,
+                         "created_at": store.message_created_at(anchor_message_index)})
         def _token(text):
             store.append_token(stream_id, text)
             emit("token", {"text": text})
@@ -12717,6 +12718,7 @@ def _handle_bridge_prime(handler, body):
                     "stream_id": stream_id,
                     "user_message_index": anchor_message_index,
                     "assistant_message_index": reply_index,
+                    "created_at": store.message_created_at(reply_index),
                     "delegations": result.get("delegations", []),
                     "usage": usage,
                 },

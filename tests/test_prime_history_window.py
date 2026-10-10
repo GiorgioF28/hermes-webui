@@ -139,7 +139,7 @@ def ui_source():
     source = Path('static/command_bridge.js').read_text(encoding='utf-8')
     return (source[source.index('  function taskStateClass('):source.index('  // opts.replay')] +
             source[source.index('  function renderTask('):source.index('  function requestBrief(t)')] +
-            source[source.index('  function renderPrimeHistoryMessage('):source.index('  // Record durevole')] +
+            source[(source.index('  function primeTimestamp(') if '  function primeTimestamp(' in source else source.index('  function renderPrimeHistoryMessage(')):source.index('  // Record durevole')] +
             source[source.index('  function applyPrimeHistoryWindow('):source.index('  function renderPrimeHistoryPayload(')] +
             source[source.index('  function syncPrimeTranscriptFromServer('):source.index('  /*', source.index('  function syncPrimeTranscriptFromServer('))])
 

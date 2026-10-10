@@ -1,5 +1,20 @@
 # Hermes Web UI: Browser Testing Plan
 
+Command Bridge timestamp regression: `pytest tests/test_prime_timestamps.py
+tests/test_prime_delegation_replay.py tests/test_prime_delegation_timeline.py
+tests/test_prime_brief_dedup.py tests/test_prime_transport_continuity.py -q`
+uses isolated state and real Chromium renderer/CSS at 1200/650/360 pixels.
+Set `HERMES_CAPTURE_TIMESTAMP_UI=docs/ui-ux/prime-timestamps` to regenerate
+before/after evidence. It checks original timestamps through SSE, recap status,
+live adoption and cold replay, equal-time index order, repeated polls with 50
+obsolete unowned cards, delayed recap placement and explicit undated legacy rows.
+
+After operator-controlled activation, send a message and start a delegation:
+timestamps must show date and seconds, left for user rows and right for Prime
+and cards. Complete it during another turn, then reload on a second device;
+the card retains its start time and the recap retains its saved delivery time.
+Scroll upward during polling and confirm there is no obsolete tail or duplicate.
+
 Recap notice regressions: `pytest tests/test_prime_brief_recovery.py
 tests/test_prime_brief_notices.py tests/test_prime_brief_async.py
 tests/test_prime_recap_delivery.py tests/test_prime_brief_dedup.py -q` exercises
