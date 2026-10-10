@@ -114,6 +114,31 @@ def test_fallback_history_survives_empty_status_and_cold_replay(browser):
         page.close()
 
 
+@pytest.mark.parametrize('index, visible', [(10, [12, 13]), (11, [11, 12, 13])])
+def test_delivered_status_keeps_absolute_order_and_does_not_speak_history(browser, index, visible):
+    source = Path('static/command_bridge.js').read_text(encoding='utf-8')
+    cards = source[source.index('  function taskStateClass('):source.index('  function requestBrief(t)')]
+    page = browser.new_page()
+    try:
+        page.set_content('<base href="http://brief.test/"><div id="cbLog"></div>')
+        page.add_script_tag(content=HARNESS + 'var _cbTasks={},_cbHistoryBatch=0;' + cards + _renderer_source())
+        page.evaluate("renderPrimeHistoryMessage({role:'user',content:'Latest question'},12);renderPrimeHistoryMessage({role:'assistant',content:'Latest answer'},13);")
+        page.evaluate('(v)=>{_cbTaskWindow={start_index:v[0],visible_indexes:v};}', visible)
+        page.evaluate("requestBrief({id:'d528'})")
+        page.wait_for_function("typeof nextPoll === 'function'")
+        page.evaluate('nextPoll()')
+        page.evaluate('(i)=>finishStatus({state:"done",reply:message.content,message_index:i,already_delivered:true})', index)
+        page.evaluate('() => Promise.resolve()')
+        assert page.evaluate('spoken') == []
+        assert page.locator('[data-cb-msg-index="12"] .cb-bubble').inner_text() == 'Latest question'
+        assert page.locator('#cbLog > :last-child .cb-bubble').inner_text() == 'Latest answer'
+        assert page.locator('[data-cb-brief-id]').count() == (1 if index == 11 else 0)
+        if index == 11:
+            assert page.locator('[data-cb-brief-id]').evaluate('(n)=>n.nextElementSibling.getAttribute("data-cb-msg-index")') == '12'
+    finally:
+        page.close()
+
+
 def test_failed_delivery_is_visible_and_can_be_retried(browser):
     page = browser.new_page()
     try:

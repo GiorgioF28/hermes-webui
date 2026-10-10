@@ -1442,6 +1442,19 @@
     if (status === 'errore' || status === 'interrotta' || status === 'failed') return 'cb-deleg-error';
     return 'cb-deleg-running';
   }
+  var _cbTaskWindow = null;
+  function taskCardInWindow(t) {
+    if (t.card_visible === false) return false;
+    if (!_cbTaskWindow || taskIsRunning(t.status)) return true;
+    var indexes = [t.anchor_message_index, t.brief_message_index].filter(function (i) { return i != null; });
+    if (!indexes.length) return true;
+    var visible = _cbTaskWindow.visible_indexes;
+    return indexes.some(function (i) {
+      i = Number(i);
+      // A just-created task can precede the next transcript synchronization.
+      return Array.isArray(visible) ? visible.indexOf(i) !== -1 || i > Math.max.apply(null, visible) : i >= _cbTaskWindow.start_index;
+    });
+  }
   function taskStateLabel(status) {
     if (status === 'in_corso' || status === 'running' || status === 'pending') return 'in corso';
     if (status === 'parziale') return 'parziale';
@@ -1550,6 +1563,16 @@
         while (next && next.classList && next.classList.contains('cb-deleg') && next.getAttribute('data-anchor-index') === String(anchorIdx)) next = next.nextSibling;
         log.insertBefore(card, next);
       }
+    } else if (Number.isFinite(anchorIdx)) {
+      // An old active owner can have left the window. Keep its card before
+      // newer transcript rows, rather than below the user's current reply.
+      var indexed = log.querySelectorAll('[data-cb-msg-index]');
+      var later = null;
+      for (var k = 0; k < indexed.length; k++) {
+        if (Number(indexed[k].getAttribute('data-cb-msg-index')) > anchorIdx) { later = indexed[k]; break; }
+      }
+      card.hidden = false;
+      log.insertBefore(card, later);
     } else if (card.parentNode !== log) {
       card.hidden = false;
       log.appendChild(card);
@@ -1582,6 +1605,16 @@
     // A delayed running snapshot cannot undo an observed terminal outcome.
     if (prev && !taskIsRunning(prev.status) && taskIsRunning(t.status)) return;
     t = Object.assign({}, (prev && prev.task) || {}, t);
+    var justFinished = prev && taskIsRunning(prev.status) && !taskIsRunning(t.status) && t.brief_status !== 'delivered';
+    if (!taskCardInWindow(t) && !justFinished) {
+      if (prev && prev.el) {
+        if (prev.el._cbProgress) prev.el._cbProgress.remove();
+        prev.el.remove();
+      }
+      delete _cbTasks[t.id];
+      if (t.brief_status === 'delivered' && typeof clearBriefNotice === 'function') clearBriefNotice('brief-' + t.id);
+      return;
+    }
     if (!prev) {
       var card = el('div', 'cb-deleg');
       card.setAttribute('data-task-id', t.id);
@@ -1625,15 +1658,15 @@
     // Render only its durable result, after active local turns have settled.
     var turnUi = createPrimeTurnUi(null);
     var cfg = window.__HERMES_CONFIG__ || {};
-    var finish = function (reply, usage) {
+    var finish = function (reply, usage, messageIndex, historical) {
       if (turnUi.isClosed()) return;
-      if (_cbOwnTurnCount > 0 && reply) { setTimeout(function () { finish(reply, usage); }, 500); return; }
+      if (_cbOwnTurnCount > 0 && reply) { setTimeout(function () { finish(reply, usage, messageIndex, historical); }, 500); return; }
       reply = String(reply || '').trim();
       try {
         if (reply) {
-          renderPrimeHistoryMessage({role: 'assistant', content: reply,
-            brief_id: 'brief-' + t.id, task_id: t.id, usage: usage}, null);
-          if (userEngaged) speak(reply);
+          var rendered = renderPrimeHistoryMessage({role: 'assistant', content: reply,
+            brief_id: 'brief-' + t.id, task_id: t.id, usage: usage}, messageIndex);
+          if (userEngaged && !historical && (rendered || messageIndex == null)) speak(reply);
         }
       } finally {
         delete _cbBriefRequests[briefId];
@@ -1655,7 +1688,8 @@
     var acceptStatus = function (s) {
       if (turnUi.isClosed()) return;
       if (s && (s.state === 'done' || s.already_delivered || s.delivered || s.reply)) {
-        finish((s && s.reply) || '', s && s.usage); return;
+        finish((s && s.reply) || '', s && s.usage, s && s.message_index,
+          !!(s && s.already_delivered) || (s.message_index != null && s.message_index < _cbRenderedCount)); return;
       }
       if (hasDeliveredBrief(briefId)) { finish(''); return; }
       if (s && s.pending) {
@@ -2433,6 +2467,8 @@
     var log = $('cbLog'); if (!log || !m) return null;
     if (m.role === 'assistant' && m.brief_id && typeof clearBriefNotice === 'function') clearBriefNotice(String(m.brief_id));
     var hasIdx = idx != null && Number.isFinite(Number(idx));
+    if (hasIdx && m.brief_id && typeof _cbTaskWindow !== 'undefined' && _cbTaskWindow &&
+        !taskCardInWindow({status:'ok', brief_message_index:Number(idx)})) return null;
     if (hasIdx && log.querySelector('[data-cb-msg-index="' + Number(idx) + '"]')) return null;
     var node = null;
     if (m.stream_id) {
@@ -2480,6 +2516,14 @@
     node = node || primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '', null, true);
     if (node && briefId) node.setAttribute('data-cb-brief-id', briefId);
     if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
+    if (node && hasIdx && briefId) {
+      var ordered = log.querySelectorAll('[data-cb-msg-index]');
+      for (var o = 0; o < ordered.length; o++) {
+        if (ordered[o] !== node && Number(ordered[o].getAttribute('data-cb-msg-index')) > Number(idx)) {
+          log.insertBefore(node, ordered[o]); break;
+        }
+      }
+    }
     if (node && m.stream_id) {
       node.setAttribute('data-cb-stream-id', String(m.stream_id));
       node.setAttribute('data-cb-role', m.role);
@@ -2556,6 +2600,7 @@
     var log = $('cbLog'); if (!log || !data || !data.history_window) return;
     var floor = Number(data.history_window.start_index);
     if (!Number.isFinite(floor)) return;
+    _cbTaskWindow = data.history_window;
     var visible = data.history_window.visible_indexes;
     var sb = nearBottom(log), oldHeight = log.scrollHeight, oldTop = log.scrollTop;
     log.querySelectorAll('[data-cb-msg-index]').forEach(function (node) {

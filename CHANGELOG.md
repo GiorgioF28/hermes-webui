@@ -1,5 +1,14 @@
 ---
 
+## Unreleased — Delegation polling chronology
+
+- Reconcile compact task polling with durable recap indexes, including archived
+  deliveries, so stale pending flags cannot replay already delivered recaps.
+  Finished cards outside the active history window stay outside it on every
+  poll; running cards with older owners precede newer conversation rows.
+  Late recap status responses use their original transcript slot and cannot
+  append historical results below the latest user exchange.
+
 ## Unreleased — Reliable delegation recap notices
 
 - Command Bridge separates recaps waiting for Prime from recaps being prepared;

@@ -11198,8 +11198,8 @@ def _handle_bridge_tasks(handler, parsed):
         logger.debug("bridge tasks: delegation_store augmentation failed", exc_info=True)
         _sync_prime_delegation_records(session_id, ram_tasks)
     if parse_qs(parsed.query).get("compact", [""])[0] == "1":
-        from api.delegation_outcome import compact_delegation_card
-        tasks = [compact_delegation_card(task) for task in tasks]
+        from api.prime_session_store import get_prime_session_store
+        tasks = get_prime_session_store(session_id).project_task_cards(tasks)
     payload = {"ok": True, "tasks": tasks}
     # Multi-device sync piggy-backs on this 3 s poll instead of a new socket:
     # the tab compares message_count/delegations_rev with what it has rendered.

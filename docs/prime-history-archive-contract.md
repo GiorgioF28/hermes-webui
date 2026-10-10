@@ -40,6 +40,19 @@ message or brief and all running tasks; automatic model recovery remains
 card-free. Cold replay and repeated polls reuse one card per task ID and never
 regenerate a historical brief. Raw diagnostic retrieval through team tools remains available.
 
+Compact task polls retain all operational rows for agent activity, while
+`card_visible` selects the same anchored window as browser history. Transcript
+brief IDs (or archive index metadata) override stale `pending` delivery flags in
+this read-only projection; it never loads archived message bodies. Settled
+out-of-window cards cannot recreate themselves or trigger recap generation on
+polling. Their genuine undelivered queue entries remain available to existing
+queue recovery and explicit task inspection. Running cards remain visible and,
+when their owning row is outside the window, precede the first newer row.
+Recap status responses retain their absolute message index: historical results
+outside the window are ignored by the renderer, while retained results are
+inserted before newer messages. Historical status recovery does not speak old
+recaps. Current cards, state colors, timers and new recap delivery remain active.
+
 Codex receives the bounded window and the retrieval reminder. When old rows
 have left the window, Claude rotates its SDK client under the existing turn lock
 and seeds the new client with bounded recovery context; it cannot resume hidden
