@@ -19,9 +19,15 @@ JSON files are not read or parsed again. Stale pending rows cannot restore
 processed bodies after restart. A replay matching a receipt is skipped before
 an INSERT, including after outbox recovery and cleanup.
 
-The recap captures a UTC cutoff and snapshots the eligible queue keys in one
-SQLite transaction. Arrivals during AI analysis remain pending, even when their
-message date precedes the cutoff. Every non-noise snapshot row needs one valid
+The recap uses the latest completed civil window `[07:00 previous day, 07:00
+current day)` in `Europe/Rome` and records its UTC start/end. DST days naturally
+span 23 or 25 hours. The start is inclusive and the end exclusive, so a message
+at exactly 07:00 belongs to the next window. The queue snapshot selects only
+that interval in one SQLite transaction; older backlog and late arrivals stay
+pending for an explicit `windowStart`/`windowEnd` recovery request. A completed
+window returns the same persisted digest on retry rather than publishing a
+second recap. Arrivals during AI analysis remain pending. Every non-noise
+snapshot row needs one valid
 Prime result. Provider errors and partial replies return retryable HTTP 503 and
 retain the queue. After successful analysis, SQLite commits a prepared recap to
 an outbox, Hermes atomically publishes the same versioned digest read by the
@@ -39,7 +45,7 @@ Instagram remains a separate source.
 The authenticated `POST /api/cron/daily-brief/status` reports storage protocol
 and pending count without exposing message content. A workflow candidate must
 not be imported or activated until it reports `storage=sqlite`,
-`schemaVersion=1`, and `recapProtocol=outbox-v1`.
+`schemaVersion=2`, and `recapProtocol=outbox-v1`.
 
 ## Rollback
 
@@ -99,7 +105,7 @@ to three attempts; IMAP post-process remains `nothing`.
 
 1. Ask Giorgio to restart 8788 after reviewing the pushed commit; this runbook
    does not restart it.
-2. Call the authenticated status endpoint and confirm SQLite, schema 1,
+2. Call the authenticated status endpoint and confirm SQLite, schema 2,
    `outbox-v1`, and the pending count.
 3. Import/activate the candidate workflow and verify one synthetic or
    deduplicated intake returns HTTP 200 only after the pending count changes.

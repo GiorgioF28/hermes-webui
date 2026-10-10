@@ -15,7 +15,7 @@ from typing import Any
 
 
 BUSY_TIMEOUT_MS = 15_000
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def message_key(row: dict[str, Any]) -> str:
@@ -59,13 +59,22 @@ def connect(path: Path | str) -> sqlite3.Connection:
             batch_id TEXT NOT NULL, account TEXT NOT NULL, item_key TEXT NOT NULL,
             payload TEXT NOT NULL, PRIMARY KEY(batch_id, account, item_key)
         );
+        CREATE TABLE IF NOT EXISTS completed_digest_windows (
+            window_start TEXT NOT NULL, window_end TEXT NOT NULL,
+            digest_json TEXT NOT NULL, completed_at TEXT NOT NULL,
+            PRIMARY KEY(window_start, window_end)
+        );
         CREATE INDEX IF NOT EXISTS email_queue_received ON email_queue(received_at);
         """
     )
     receipt_columns = {row["name"] for row in db.execute("PRAGMA table_info(email_receipts)")}
     if "identity_payload" not in receipt_columns:
         db.execute("ALTER TABLE email_receipts ADD COLUMN identity_payload TEXT")
-    db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
+    db.execute(
+        "INSERT INTO meta(key,value) VALUES('schema_version',?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(SCHEMA_VERSION),),
+    )
     return db
 
 
@@ -182,10 +191,18 @@ def enqueue(db_path: Path | str, rows: list[dict[str, Any]]) -> dict[str, int]:
     return {"added": added, "skipped": skipped}
 
 
-def start_or_recover_batch(db_path: Path | str, cutoff: str, *, now: str) -> tuple[str, list[dict[str, Any]], str | None]:
+def start_or_recover_batch(db_path: Path | str, cutoff: str, *, now: str, start_after: str | None = None) -> tuple[str, list[dict[str, Any]], str | None]:
     db = connect(db_path)
     try:
         db.execute("BEGIN IMMEDIATE")
+        if start_after:
+            completed = db.execute(
+                "SELECT digest_json FROM completed_digest_windows WHERE window_start=? AND window_end=?",
+                (start_after, cutoff),
+            ).fetchone()
+            if completed:
+                db.commit()
+                return "completed:" + start_after, [], completed["digest_json"]
         prior = db.execute("SELECT * FROM digest_batch WHERE singleton=1").fetchone()
         if prior and prior["status"] == "prepared":
             rows = [json.loads(row["payload"]) for row in db.execute(
@@ -198,10 +215,16 @@ def start_or_recover_batch(db_path: Path | str, cutoff: str, *, now: str) -> tup
             db.execute("DELETE FROM digest_batch_items WHERE batch_id=?", (prior["batch_id"],))
             db.execute("DELETE FROM digest_batch WHERE singleton=1")
         batch_id = uuid.uuid4().hex
-        selected = list(db.execute(
-            "SELECT account,item_key,received_at,payload FROM email_queue WHERE received_at<=? ORDER BY received_at DESC",
-            (cutoff,),
-        ))
+        if start_after:
+            selected = list(db.execute(
+                "SELECT account,item_key,received_at,payload FROM email_queue WHERE received_at>=? AND received_at<? ORDER BY received_at DESC",
+                (start_after, cutoff),
+            ))
+        else:
+            selected = list(db.execute(
+                "SELECT account,item_key,received_at,payload FROM email_queue WHERE received_at<=? ORDER BY received_at DESC",
+                (cutoff,),
+            ))
         db.execute(
             "INSERT INTO digest_batch(singleton,batch_id,cutoff,started_at,status) VALUES(1,?,?,?,'analyzing')",
             (batch_id, cutoff, now),
@@ -246,6 +269,15 @@ def finish_batch(db_path: Path | str, batch_id: str, *, processed_at: str) -> in
         if not batch or batch["status"] != "prepared":
             raise RuntimeError("Daily Brief batch is not durably prepared")
         rows = list(db.execute("SELECT account,item_key,payload FROM digest_batch_items WHERE batch_id=?", (batch_id,)))
+        batch_row = db.execute("SELECT cutoff,digest_json FROM digest_batch WHERE singleton=1 AND batch_id=?", (batch_id,)).fetchone()
+        digest = json.loads(batch_row["digest_json"] or "{}") if batch_row else {}
+        window_start, window_end = digest.get("windowStart"), digest.get("windowEnd")
+        if window_start and window_end and batch_row:
+            db.execute(
+                "INSERT INTO completed_digest_windows(window_start,window_end,digest_json,completed_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(window_start,window_end) DO NOTHING",
+                (window_start, window_end, batch_row["digest_json"], processed_at),
+            )
         for row in rows:
             message = json.loads(row["payload"])
             identity = {key: message.get(key, "") for key in ("account", "messageId", "from", "subject", "receivedAt")}

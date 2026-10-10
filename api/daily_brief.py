@@ -101,6 +101,16 @@ def _today_local(value: datetime) -> date:
     return value.astimezone(ROME).date()
 
 
+def daily_brief_window(value: float | datetime | None = None) -> tuple[datetime, datetime]:
+    """Return the latest completed 07:00 Europe/Rome civil window as UTC."""
+    local = _now(value).astimezone(ROME)
+    end_day = local.date() if (local.hour, local.minute, local.second, local.microsecond) >= (7, 0, 0, 0) else local.date() - timedelta(days=1)
+    end_local = datetime.combine(end_day, datetime.min.time(), tzinfo=ROME).replace(hour=7)
+    start_day = end_day - timedelta(days=1)
+    start_local = datetime.combine(start_day, datetime.min.time(), tzinfo=ROME).replace(hour=7)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
 def _count(value: Any) -> int:
     try:
         return max(0, int(value))
@@ -522,7 +532,13 @@ def ingest_email_digest(
         raise DailyBriefValidationError("emails must be a list")
     current = _now(now)
     base_dir = Path(data_dir)
-    cutoff = current
+    window_start, cutoff = daily_brief_window(current)
+    requested_start = _parse_datetime(body.get("windowStart")) if body.get("windowStart") else None
+    requested_end = _parse_datetime(body.get("windowEnd")) if body.get("windowEnd") else None
+    if requested_start or requested_end:
+        if not requested_start or not requested_end or requested_start >= requested_end:
+            raise DailyBriefValidationError("windowStart and windowEnd must be valid ordered timestamps")
+        window_start, cutoff = requested_start, requested_end
     incoming = [_normalize_email_row(raw, index) for index, raw in enumerate(body["emails"])]
     _migrate_email_store(base_dir)
     from api.daily_brief_store import enqueue, prepare_batch, start_or_recover_batch, finish_batch, record_sources, source_statuses
@@ -552,12 +568,12 @@ def ingest_email_digest(
                     error = "acquisizione non verificata oggi"
                 accounts_payload.append({"label": row["label"], "count": row["last_count"], "error": error})
     batch_id, consumed, prepared = start_or_recover_batch(
-        database, _iso(cutoff), now=_iso(current),
+        database, _iso(cutoff), now=_iso(current), start_after=_iso(window_start),
     )
     if prepared is not None:
         digest = json.loads(prepared)
         _atomic_write_json(base_dir / "daily-email-digest.json", digest)
-        cleaned = finish_batch(database, batch_id, processed_at=_iso(current))
+        cleaned = 0 if batch_id.startswith("completed:") else finish_batch(database, batch_id, processed_at=_iso(current))
         update_run_status(base_dir, now=current, source="digest", last_error=_account_error(digest.get("accounts", [])))
         return {"ok": True, "stored": len(digest.get("emails", [])), "skipped": 0, "analysed": len(digest.get("emails", [])), "recovered": True, "cleaned": cleaned}
 
@@ -609,6 +625,8 @@ def ingest_email_digest(
         "emails": digest_rows,
         "analysisEngine": analysis_engine,
         "digestId": batch_id,
+        "windowStart": _iso(window_start),
+        "windowEnd": _iso(cutoff),
     }
     prepare_batch(database, batch_id, digest)
     # SQLite outbox is committed before publication. Repeating this atomic
@@ -726,14 +744,21 @@ def handle_cron_daily_brief(handler: Any, path: str, *, data_dir: Path | str = D
             result = accumulate_email_inbox(data_dir, _read_cron_body(handler))
         elif path == "/api/cron/daily-brief/status":
             _migrate_email_store(data_dir)
-            from api.daily_brief_store import pending_count
+            from api.daily_brief_store import connect, pending_count
+
+            database = _email_db_path(data_dir)
+            db = connect(database)
+            try:
+                schema_version = int(db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0])
+            finally:
+                db.close()
 
             result = {
                 "ok": True,
                 "storage": "sqlite",
-                "schemaVersion": 1,
+                "schemaVersion": schema_version,
                 "recapProtocol": "outbox-v1",
-                "pending": pending_count(_email_db_path(data_dir)),
+                "pending": pending_count(database),
             }
         elif path == "/api/cron/daily-brief/noise":
             result = merge_noise_list(data_dir, _read_cron_body(handler))

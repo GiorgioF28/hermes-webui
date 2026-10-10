@@ -18,6 +18,7 @@ from api.daily_brief import (
     build_daily_brief_payload,
     handle_cron_daily_brief,
     DailyBriefProcessingError,
+    daily_brief_window,
     ingest_email_digest,
     matches_noise,
     merge_noise_list,
@@ -39,7 +40,7 @@ def _email(**overrides):
         "from": "person@example.test",
         "fromName": "Persona",
         "subject": "Aggiornamento progetto",
-        "receivedAt": "2026-09-01T07:30:00Z",
+        "receivedAt": "2026-09-01T04:30:00Z",
     }
     row.update(overrides)
     return row
@@ -137,18 +138,50 @@ def test_accumulator_error_is_separate_from_digest_status(tmp_path: Path):
     assert payload["email"]["accumulatorStatus"] == "error"
 
 
-def test_ingest_filters_out_email_outside_current_rome_day(tmp_path: Path):
+def test_ingest_uses_completed_rome_07_window_and_preserves_late_backlog(tmp_path: Path):
     result = ingest_email_digest(tmp_path, {
         "accounts": [{"label": "gmail-personale"}],
         "emails": [
             _email(),
-            _email(**{"from": "old@example.test", "receivedAt": "2026-08-31T20:00:00Z"}),
+            _email(**{"from": "old@example.test", "receivedAt": "2026-08-31T04:00:00Z"}),
         ],
     }, now=NOW)
 
     stored = json.loads((tmp_path / "daily-email-digest.json").read_text(encoding="utf-8"))
-    assert result == {"ok": True, "stored": 2, "skipped": 0, "analysed": 2}
-    assert [row["from"] for row in stored["emails"]] == ["person@example.test", "old@example.test"]
+    assert result == {"ok": True, "stored": 1, "skipped": 0, "analysed": 1}
+    assert [row["from"] for row in stored["emails"]] == ["person@example.test"]
+    from api.daily_brief_store import connect
+    db = connect(tmp_path / "email-queue.sqlite3")
+    assert db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0] == 1
+    db.close()
+    assert stored["windowStart"] == "2026-08-31T05:00:00Z"
+    assert stored["windowEnd"] == "2026-09-01T05:00:00Z"
+
+
+def test_daily_window_boundaries_and_dst_lengths():
+    from datetime import timedelta
+    _before, end = daily_brief_window(datetime(2026, 9, 1, 4, 59, 59, tzinfo=timezone.utc))
+    assert end == datetime(2026, 8, 31, 5, tzinfo=timezone.utc)
+    exact_start, exact_end = daily_brief_window(datetime(2026, 9, 1, 5, tzinfo=timezone.utc))
+    assert (exact_start, exact_end) == (datetime(2026, 8, 31, 5, tzinfo=timezone.utc), datetime(2026, 9, 1, 5, tzinfo=timezone.utc))
+    spring_start, spring_end = daily_brief_window(datetime(2026, 3, 29, 5, tzinfo=timezone.utc))
+    autumn_start, autumn_end = daily_brief_window(datetime(2026, 10, 25, 6, tzinfo=timezone.utc))
+    assert spring_end.timestamp() - spring_start.timestamp() == timedelta(hours=23).total_seconds()
+    assert autumn_end.timestamp() - autumn_start.timestamp() == timedelta(hours=25).total_seconds()
+
+
+def test_queue_window_is_start_inclusive_and_end_exclusive(tmp_path: Path):
+    from api.daily_brief_store import enqueue, start_or_recover_batch
+    from api.daily_brief import _email_db_path
+    start, end = "2026-08-31T05:00:00Z", "2026-09-01T05:00:00Z"
+    rows = [
+        _email(messageId="at-start", receivedAt=start),
+        _email(messageId="before-end", receivedAt="2026-09-01T04:59:59Z"),
+        _email(messageId="at-end", receivedAt=end),
+    ]
+    enqueue(_email_db_path(tmp_path), rows)
+    _batch, selected, _prepared = start_or_recover_batch(_email_db_path(tmp_path), end, now="2026-09-01T05:00:00Z", start_after=start)
+    assert {item["messageId"] for item in selected} == {"at-start", "before-end"}
 
 
 def test_noise_list_filters_sender_after_three_hits(tmp_path: Path):
@@ -159,7 +192,7 @@ def test_noise_list_filters_sender_after_three_hits(tmp_path: Path):
 
     assert noise["senders"][0]["hits"] == 3
     assert matches_noise(_email(), noise) is True
-    result = ingest_email_digest(tmp_path, {"accounts": [], "emails": [_email()]}, now=NOW + timedelta(days=2))
+    result = ingest_email_digest(tmp_path, {"accounts": [], "emails": [_email()], "windowStart": "2026-08-31T05:00:00Z", "windowEnd": "2026-09-01T05:00:00Z"}, now=NOW + timedelta(days=2))
     assert result["stored"] == 0
     assert result["skipped"] == 1
     assert result["analysed"] == 0
@@ -189,7 +222,7 @@ def test_pending_archive_recovers_a_missing_queue_without_reprocessing_completed
     pending = db.execute("SELECT COUNT(*) FROM email_queue").fetchone()[0]
     db.close()
     assert first["stored"] == 1
-    assert second["stored"] == 0
+    assert second["stored"] == 1 and second.get("recovered") is True
     assert pending == 0
     assert len(receipts) == 1
 
@@ -256,7 +289,7 @@ def test_digest_merges_accumulator_and_flushes_only_consumed_items(tmp_path: Pat
     consumed = _email(
         account="yahoo-personale",
         messageId="consumed",
-        receivedAt="2026-09-01T07:00:00Z",
+        receivedAt="2026-09-01T04:00:00Z",
         bodyExcerpt="Dettaglio riservato alla sola analisi",
     )
     accumulate_email_inbox(tmp_path, {"emails": [consumed]}, now=NOW)
@@ -372,7 +405,7 @@ def test_replay_after_cleanup_and_while_prepared_never_recreates_pending(tmp_pat
     replay = accumulate_email_inbox(tmp_path, {"emails": [row]}, now=NOW + timedelta(minutes=1))
     assert replay["added"] == 0 and replay["skipped"] == 1 and replay["total"] == 0
 
-    second = _email(messageId="replay-prepared", bodyText="synthetic")
+    second = _email(messageId="replay-prepared", bodyText="synthetic", receivedAt="2026-09-01T08:00:00Z")
     accumulate_email_inbox(tmp_path, {"emails": [second]}, now=NOW)
     real_write = __import__("api.daily_brief", fromlist=["_atomic_write_json"])._atomic_write_json
 
@@ -384,7 +417,11 @@ def test_replay_after_cleanup_and_while_prepared_never_recreates_pending(tmp_pat
     with patch("api.email_analysis.analyse_emails", return_value=analysis), patch(
         "api.daily_brief._atomic_write_json", side_effect=fail_publish,
     ), pytest.raises(OSError):
-        ingest_email_digest(tmp_path, {"accounts": [], "emails": []}, now=NOW)
+        ingest_email_digest(
+            tmp_path,
+            {"accounts": [], "emails": [], "windowStart": "2026-09-01T05:00:00Z", "windowEnd": "2026-09-02T05:00:00Z"},
+            now=NOW,
+        )
     replay_prepared = accumulate_email_inbox(tmp_path, {"emails": [second]}, now=NOW + timedelta(minutes=1))
     db = connect(tmp_path / "email-queue.sqlite3")
     try:
@@ -619,7 +656,7 @@ def test_sqlite_status_endpoint_is_authenticated_and_confirms_protocol(tmp_path:
         handle_cron_daily_brief(handler, "/api/cron/daily-brief/status", data_dir=tmp_path)
     assert handler.status == 200
     response = json.loads(handler.wfile.getvalue().decode("utf-8"))
-    assert response == {"ok": True, "storage": "sqlite", "schemaVersion": 1, "recapProtocol": "outbox-v1", "pending": 0}
+    assert response == {"ok": True, "storage": "sqlite", "schemaVersion": 2, "recapProtocol": "outbox-v1", "pending": 0}
 
 
 def test_accumulation_storage_failure_never_returns_http_200(tmp_path: Path):
