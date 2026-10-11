@@ -1,5 +1,15 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime image upload regression: `pytest tests/test_prime_image_upload.py -q`
+covers 200 KB multipart parse/write, a real local HTTP upload and terminal SSE
+with an isolated provider substitute, simultaneous/repeated submissions,
+multiple attachments, oversized input, timeout/network/HTTP/JSON failure,
+removal and explicit retry. Set `HERMES_CAPTURE_UPLOAD_UI` to a destination
+directory for before/after evidence at 1200/650/360 pixels. Manual check: attach
+a photo and press Send before acceptance; see one message with the photo after
+acceptance, or a retained draft and retry control if saving fails. No upload
+status or error should enter the transcript.
+
 Recap re-entry regression: `pytest tests/test_prime_recap_reentry.py
 tests/test_prime_delegation_replay.py tests/test_prime_brief_recovery.py
 tests/test_prime_brief_notices.py tests/test_prime_recap_delivery.py -q` verifies

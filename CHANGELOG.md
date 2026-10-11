@@ -1,5 +1,14 @@
 ---
 
+## Unreleased — Command Bridge image upload recovery
+
+- Bound photo upload and response parsing to ten seconds, retain failed files
+  and previews for explicit retry, and cancel removed uploads. Errors remain
+  beside attachments in the composer instead of becoming conversation rows.
+- Sending while photos are being saved waits for every attachment to be
+  accepted and submits once. Failure or removal preserves the draft and cancels
+  that send intent; retrying an upload does not automatically send the message.
+
 ## Unreleased — Recap observation on re-entry
 
 - Opening the Command Bridge or polling an already completed delegation no

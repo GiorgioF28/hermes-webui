@@ -44,6 +44,15 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 ### Command Bridge Prime history window
 
+Prime photo uploads are composer state, separate from the durable transcript
+and provider turns. Each request has an abortable ten-second deadline covering
+response-body parsing too. Submit waits for all accepted paths before creating
+a user row or provider request; failure/removal cancels the waiting intent and
+preserves the draft. Upload retry is explicit and never sends a message by
+itself. Removal aborts the request and discards late responses. The upload
+handler only parses multipart and writes the private attachment inbox; it does
+not invoke a model. See [upload evidence](docs/ui-ux/prime-image-upload/README.md).
+
 The browser and automatic provider recovery consume a read-only 50-message
 projection from `api/prime_session_store.py`, with absolute cursors and an
 explicit retrieval reminder. Operational delegations retain their separate

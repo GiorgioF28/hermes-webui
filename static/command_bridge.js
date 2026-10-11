@@ -453,6 +453,8 @@
 '.cb-chip-name{font-family:var(--cb-mono);font-size:10px;color:var(--cb-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
 '.cb-chip-type{font-family:var(--cb-mono);font-size:9px;color:var(--cb-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
 '.cb-chip.cb-chip-up .cb-chip-type{font-style:italic;}',
+'.cb-chip[data-upload-state="error"]{max-width:100%;}',
+'.cb-chip[data-upload-state="error"] .cb-chip-type{white-space:normal;color:var(--cb-error);}',
 '.cb-chip button{background:none;border:none;color:var(--cb-faint);cursor:pointer;font-size:13px;line-height:1;padding:0 2px;flex:0 0 auto;}',
 '.cb-chip button:hover{color:var(--cb-accent);}',
 '.cb-msg.cb-from-user .cb-bubble img{width:min(10rem,100%);max-width:100%;border-radius:8px;margin-top:6px;display:inline-block;}',
@@ -2849,7 +2851,10 @@
     }).catch(function () {}).then(function () { _cbSyncBusy = false; });
   }
   /* ── Allegati foto per Hermes Prime ─────────────────────────────────────── */
-  var pendingAttachments = []; // { name, path, url, type, size }
+  var pendingAttachments = []; // composer-only: files, previews and upload state
+  var _cbAttachmentSubmitWaiting = false;
+  var _cbAttachmentNotice = '';
+  var PRIME_UPLOAD_TIMEOUT_MS = 10000;
 
   function humanSize(n) {
     n = Number(n) || 0;
@@ -2858,7 +2863,8 @@
     return (n / (1024 * 1024)).toFixed(1) + ' MB';
   }
   function typeLabel(a) {
-    if (!a.path) return 'caricamento…';
+    if (a.error) return a.error;
+    if (!a.path) return 'salvataggio… · ' + humanSize(a.size);
     var sub = String(a.type || '').split('/')[1] || 'immagine';
     var label = sub.toUpperCase();
     if (a.size) label += ' · ' + humanSize(a.size);
@@ -2868,26 +2874,51 @@
   function renderAttachments() {
     var bar = $('cbAtt'); if (!bar) return;
     bar.innerHTML = '';
-    pendingAttachments.forEach(function (a, i) {
-      var chip = el('div', 'cb-chip' + (a.path ? '' : ' cb-chip-up'));
-      var thumb = a.url ? '<img src="' + a.url + '" alt="">' : '';
+    pendingAttachments.forEach(function (a) {
+      var chip = el('div', 'cb-chip' + (a.state === 'uploading' ? ' cb-chip-up' : ''));
+      chip.setAttribute('data-upload-state', a.state || (a.path ? 'ready' : 'uploading'));
+      var thumb = a.url ? '<img src="' + esc(a.url) + '" alt="">' : '';
       chip.innerHTML = thumb +
         '<div class="cb-chip-info">' +
           '<span class="cb-chip-name">' + esc(a.name) + '</span>' +
-          '<span class="cb-chip-type">' + esc(typeLabel(a)) + '</span>' +
+          '<span class="cb-chip-type" title="' + esc(typeLabel(a)) + '"' + (a.error ? ' role="alert"' : '') + '>' + esc(typeLabel(a)) + '</span>' +
         '</div>' +
-        '<button type="button" aria-label="Rimuovi">×</button>';
-      chip.querySelector('button').addEventListener('click', function () {
-        pendingAttachments.splice(i, 1);
+        (a.error ? '<button type="button" data-upload-retry aria-label="Riprova allegato" title="Riprova">↻</button>' : '') +
+        '<button type="button" data-upload-remove aria-label="Rimuovi">×</button>';
+      var retry = chip.querySelector('[data-upload-retry]');
+      if (retry) retry.addEventListener('click', function () { startAttachmentUpload(a); });
+      chip.querySelector('[data-upload-remove]').addEventListener('click', function () {
+        var index = pendingAttachments.indexOf(a);
+        if (index < 0) return;
+        pendingAttachments.splice(index, 1);
+        if (a.cancelUpload) a.cancelUpload();
+        if (a.url) URL.revokeObjectURL(a.url);
         renderAttachments();
       });
       bar.appendChild(chip);
     });
+    if (_cbAttachmentNotice) {
+      var notice = el('div', 'cb-chip-type');
+      notice.setAttribute('role', 'alert');
+      notice.textContent = _cbAttachmentNotice;
+      bar.appendChild(notice);
+    }
+    var send = $('cbSend'); if (send) send.disabled = _cbAttachmentSubmitWaiting;
+    var input = $('cbInput'); if (input) input.readOnly = _cbAttachmentSubmitWaiting;
+    var attach = $('cbAttachBtn'); if (attach) attach.disabled = _cbAttachmentSubmitWaiting;
   }
 
   function uploadAttachment(file) {
+    if (_cbAttachmentSubmitWaiting) return;
     if (!file || !/^image\//.test(file.type || '')) {
-      sysNote('Posso allegare solo immagini.');
+      _cbAttachmentNotice = 'Posso allegare solo immagini.';
+      renderAttachments();
+      return;
+    }
+    var cfg = window.__HERMES_CONFIG__ || {};
+    if (file.size > (Number(cfg.maxUploadBytes) || 20 * 1024 * 1024)) {
+      _cbAttachmentNotice = 'Immagine troppo grande: ' + humanSize(file.size) + '.';
+      renderAttachments();
       return;
     }
     // Le immagini incollate (Ctrl+V) spesso arrivano senza nome/estensione: il
@@ -2897,38 +2928,58 @@
       var ext = (String(file.type || '').split('/')[1] || 'png').replace('jpeg', 'jpg');
       name = (name || ('incolla-' + Date.now())) + '.' + ext;
     }
-    var entry = { name: name, path: null, url: null, type: file.type || '', size: file.size || 0 };
+    var entry = { name: name, path: null, url: null, type: file.type || '', size: file.size || 0, file: file };
     try { entry.url = URL.createObjectURL(file); } catch (_e) {}
     pendingAttachments.push(entry);
-    renderAttachments();
-    var form = new FormData();
-    form.append('file', file, name);
-    var cfg = window.__HERMES_CONFIG__ || {};
-    fetch(new URL('api/bridge/prime/upload', document.baseURI || location.href).href, {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'X-CSRF-Token': cfg.csrfToken || '' },
-      body: form
-    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
-      .then(function (res) {
-        if (!res.ok || !res.d || !res.d.path) {
-          var idx = pendingAttachments.indexOf(entry);
-          if (idx >= 0) pendingAttachments.splice(idx, 1);
+    startAttachmentUpload(entry);
+  }
+
+  function startAttachmentUpload(entry) {
+    if (entry.state === 'uploading' || pendingAttachments.indexOf(entry) < 0) return;
+    _cbAttachmentNotice = '';
+    entry.state = 'uploading'; entry.error = ''; entry.path = null;
+    var controller = new AbortController();
+    entry.promise = new Promise(function (resolve) {
+      var finished = false;
+      function finish(error, data) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        entry.cancelUpload = null;
+        if (pendingAttachments.indexOf(entry) >= 0) {
+          entry.error = error || '';
+          entry.state = error ? 'error' : 'ready';
+          if (data) {
+            entry.path = data.path;
+            entry.name = data.filename || entry.name;
+            entry.type = data.mime || entry.type;
+            if (data.size != null) entry.size = data.size;
+            entry.file = null;
+          }
           renderAttachments();
-          sysNote((res.d && res.d.error) ? ('Allegato: ' + res.d.error) : 'Non sono riuscito a caricare l’immagine.');
-          return;
         }
-        entry.path = res.d.path;
-        entry.name = res.d.filename || entry.name;
-        entry.type = res.d.mime || entry.type;
-        if (res.d.size) entry.size = res.d.size;
-        renderAttachments();
-      })
-      .catch(function () {
-        var idx = pendingAttachments.indexOf(entry);
-        if (idx >= 0) pendingAttachments.splice(idx, 1);
-        renderAttachments();
-        sysNote('Non sono riuscito a caricare l’immagine.');
-      });
+        resolve(!error && !!data);
+      }
+      entry.cancelUpload = function () { controller.abort(); finish('Allegato rimosso.'); };
+      var timer = setTimeout(function () {
+        controller.abort();
+        finish('Salvataggio non riuscito entro 10 s. Riprova.');
+      }, PRIME_UPLOAD_TIMEOUT_MS);
+      var form = new FormData();
+      form.append('file', entry.file, entry.name);
+      var cfg = window.__HERMES_CONFIG__ || {};
+      fetch(new URL('api/bridge/prime/upload', document.baseURI || location.href).href, {
+        method: 'POST', credentials: 'same-origin', signal: controller.signal,
+        headers: { 'X-CSRF-Token': cfg.csrfToken || '' }, body: form
+      }).then(function (r) {
+        return r.json().then(function (data) {
+          if (!r.ok || !data || !data.path) {
+            finish((data && data.error) || ('Salvataggio fallito (HTTP ' + r.status + '). Riprova.'));
+          } else finish('', data);
+        });
+      }).catch(function () { finish('Salvataggio fallito. Riprova.'); });
+    });
+    renderAttachments();
   }
 
   function onPrimePaste(e) {
@@ -2950,8 +3001,9 @@
     });
   }
 
-  function onPrimeSubmit(e) {
+  async function onPrimeSubmit(e) {
     if (e && e.preventDefault) e.preventDefault();
+    if (_cbAttachmentSubmitWaiting) return;
     userEngaged = true;
     var inp = $('cbInput'); if (!inp) return;
     var v = inp.value.trim();
@@ -2961,19 +3013,27 @@
       if (window.__cbAutoGrow) window.__cbAutoGrow();
       return;
     }
-    var ready = pendingAttachments.filter(function (a) { return !!a.path; });
-    var stillUp = pendingAttachments.some(function (a) { return !a.path; });
-    if (!v && !ready.length) {
-      if (stillUp) sysNote('Aspetta che l’immagine finisca di caricare…');
-      return;
+    if (!v && !pendingAttachments.length) return;
+    if (pendingAttachments.some(function (a) { return a.state === 'error'; })) return;
+    if (pendingAttachments.some(function (a) { return a.state === 'uploading'; })) {
+      var waiting = pendingAttachments.slice();
+      _cbAttachmentSubmitWaiting = true;
+      renderAttachments();
+      var outcomes;
+      try { outcomes = await Promise.all(waiting.map(function (a) { return a.promise; })); }
+      finally { _cbAttachmentSubmitWaiting = false; renderAttachments(); }
+      // Removing a photo cancels this send intent; failures keep the draft.
+      if (!outcomes.every(Boolean) || waiting.some(function (a) { return pendingAttachments.indexOf(a) < 0; })) return;
     }
-    if (stillUp) { sysNote('Aspetta che l’immagine finisca di caricare…'); return; }
+    var ready = pendingAttachments.filter(function (a) { return !!a.path; });
+    if (ready.length !== pendingAttachments.length) return;
     inp.value = '';
     inp.style.height = 'auto';
     if (window.__cbAutoGrow) window.__cbAutoGrow();
     var attachments = ready.map(function (a) { return { name: a.name, path: a.path }; });
     var thumbs = ready.map(function (a) { return a.url; }).filter(Boolean);
     pendingAttachments = [];
+    _cbAttachmentNotice = '';
     renderAttachments();
     var userNode = primeSay('user', v, thumbs);
     _cbOwnTurnCount += 1;
