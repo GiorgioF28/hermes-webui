@@ -1,5 +1,16 @@
 ---
 
+## Unreleased — Recap observation on re-entry
+
+- Opening the Command Bridge or polling an already completed delegation no
+  longer starts a backlog of Prime recap turns. Automatic generation requires
+  an observed live running-to-terminal transition; hydrated running history
+  alone cannot arm it. Offline results remain durably queued for normal
+  recovery on a subsequent user turn or an explicit retry.
+- Recap recovery checks durable transcript/archive delivery before stale worker
+  reservations or model generation, preventing lost acknowledgements from
+  replaying an old task.
+
 ## Unreleased — Command Bridge timestamps and ordering
 
 - Show original date/time with seconds on every conversation row and delegation,

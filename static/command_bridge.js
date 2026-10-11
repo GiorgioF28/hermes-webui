@@ -1617,7 +1617,7 @@
     // A delayed running snapshot cannot undo an observed terminal outcome.
     if (prev && !taskIsRunning(prev.status) && taskIsRunning(t.status)) return;
     t = Object.assign({}, (prev && prev.task) || {}, t);
-    var justFinished = prev && taskIsRunning(prev.status) && !taskIsRunning(t.status) && t.brief_status !== 'delivered';
+    var justFinished = prev && prev.observedRunning && taskIsRunning(prev.status) && !taskIsRunning(t.status) && t.brief_status !== 'delivered';
     if (!taskCardInWindow(t) && !justFinished) {
       if (prev && prev.el) {
         if (prev.el._cbProgress) prev.el._cbProgress.remove();
@@ -1651,12 +1651,15 @@
       '<div class="cb-deleg-summary">' + esc(prev.task.summary) + '</div>';
     stampPrimeNode(prev.el, prev.task.started, 'assistant');
     prev.status = t.status;
+    // Hydrated running state is history, not evidence of a live completion.
+    // Only an actual running observation can arm automatic recap generation.
+    if (taskIsRunning(t.status) && !(opts && opts.replay)) prev.observedRunning = true;
     repositionPrimeTaskCards();
     if (sb && !_cbHistoryBatch) log.scrollTop = log.scrollHeight;
-    // Brief automatico: a delega finita, Prime riparte da solo con la sintesi (una volta per task).
-    // Le card idratate dallo storico non rilanciano MAI il brief: il testo e'
-    // gia' nel transcript (zero regressione su iss-prime-brief-replay-dopo-riavvio).
-    if ((t.status === 'ok' || t.status === 'errore' || t.status === 'done' || t.status === 'failed' || t.status === 'parziale' || t.status === 'interrotta') &&
+    // A terminal snapshot on entry/poll is observation, never a command to
+    // replay the backlog. Preserve automatic delivery for a live transition;
+    // genuinely pending offline results remain in the durable queue.
+    if (justFinished && (t.status === 'ok' || t.status === 'errore' || t.status === 'done' || t.status === 'failed' || t.status === 'parziale' || t.status === 'interrotta') &&
         !_cbTasks[t.id].briefed && !(opts && opts.replay)) {
       _cbTasks[t.id].briefed = true;
       requestBrief(t);
@@ -1664,6 +1667,7 @@
   }
   function requestBrief(t) {
     var briefId = 'brief-' + t.id;
+    if (hasDeliveredBrief(briefId)) { clearBriefNotice(briefId); return; }
     if (_cbBriefRequests[briefId]) return;
     _cbBriefRequests[briefId] = true;
     clearBriefNotice(briefId);

@@ -392,6 +392,16 @@ class PrimeBriefQueue:
                 self._delivered.add(brief_id)
                 return True
 
+        # The transcript (including archived identity slots) is delivery truth.
+        # A lost queue ack must never pay for another model turn or reapply an
+        # old task's instructions while recovering a stale queue entry.
+        from api.prime_session_store import get_prime_session_store
+        store = get_prime_session_store(str(brief.get("session_id") or "hermes-prime"))
+        delivery = store.brief_delivery(brief_id)
+        if isinstance(delivery, dict):
+            self.mark_delivered(brief_id)
+            return True
+
         # Attempt LLM brief (outside lock to avoid blocking)
         llm_delivered = False
         if try_llm and hermes_prime_reply_fn is not None:

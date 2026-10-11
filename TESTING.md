@@ -1,5 +1,24 @@
 # Hermes Web UI: Browser Testing Plan
 
+Recap re-entry regression: `pytest tests/test_prime_recap_reentry.py
+tests/test_prime_delegation_replay.py tests/test_prime_brief_recovery.py
+tests/test_prime_brief_notices.py tests/test_prime_recap_delivery.py -q` verifies
+50 finished but genuinely unbriefed cards inside the current history window,
+20 polls and cold re-entry at 1200/650/360 pixels without any recap POST or
+queued notices. Hydrated running history cannot launch a recap; a running task
+actually observed live still generates one when it completes. A saved recap
+precedes a stale queued job, and lost queue acknowledgements recover without
+another model call or transcript rewrite, including archived identity slots.
+Set `HERMES_CAPTURE_REENTRY_UI=docs/ui-ux/prime-recap-reentry` to regenerate
+before/after evidence from the fixed baseline `76dda5c4`.
+
+After operator-controlled activation, leave and reopen the Command Bridge:
+existing terminal cards must not start Prime turns or produce queued notices.
+Finish a task that was observed running and check its recap appears once;
+repeat on another device. Offline unbriefed results stay queued and can be
+recovered on the next user turn (the bounded no-model drain) or explicit retry.
+Re-entry does not mean delivery or authorize re-executing a historical task.
+
 Command Bridge timestamp regression: `pytest tests/test_prime_timestamps.py
 tests/test_prime_delegation_replay.py tests/test_prime_delegation_timeline.py
 tests/test_prime_brief_dedup.py tests/test_prime_transport_continuity.py -q`

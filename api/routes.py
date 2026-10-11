@@ -12946,6 +12946,12 @@ def _handle_bridge_prime_brief(handler, body):
     task_session_id = str(t.get("anchor_session_id") or t.get("session_id") or "hermes-prime")
     if task_session_id != session_id:
         return j(handler, {"error": "Delegation not found"}, status=404)
+    # Durable delivery wins even over a stale queued/running reservation.
+    brief_id = f"brief-{task_id}"
+    delivery = _prime_brief_delivery(session_id, brief_id)
+    if delivery is not None:
+        return j(handler, {"already_delivered": True, "brief_id": brief_id, **delivery},
+                 extra_headers={"Cache-Control": "no-store"})
     existing = _brief_job_get(task_id)
     if existing and existing.get("state") in ("queued", "running"):
         # job gia' in corso: non duplicare il turno LLM
@@ -12956,11 +12962,6 @@ def _handle_bridge_prime_brief(handler, body):
         )
     workspace = Path(str(DEFAULT_WORKSPACE))
     # Enqueue brief (idempotent via brief_id=brief-<task_id>)
-    brief_id = f"brief-{task_id}"
-    delivery = _prime_brief_delivery(session_id, brief_id)
-    if delivery is not None:
-        return j(handler, {"already_delivered": True, "brief_id": brief_id, **delivery},
-                 extra_headers={"Cache-Control": "no-store"})
     already_delivered = False
     try:
         from api.prime_brief_queue import get_brief_queue
