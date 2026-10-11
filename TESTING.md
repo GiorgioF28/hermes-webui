@@ -1,5 +1,16 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime recap FIFO regression: `pytest tests/test_prime_recap_fifo.py
+tests/test_prime_recap_overlap_ui.py tests/test_prime_brief_recovery.py
+tests/test_prime_transport_continuity.py -q` checks reverse worker dispatch,
+interleaved user/recap reservations, ownership through persistence, startup
+failure, worker exceptions and dead-worker recovery with isolated state.
+Set `HERMES_CAPTURE_RECAP_FIFO_UI=docs/ui-ux/prime-recap-fifo` for browser
+before/after evidence at 1200/650/360 pixels. After operator-controlled
+activation, finish multiple observed delegations during a user turn: recaps
+wait their turn, each saved result clears its notice immediately, and history
+and reload show each result once. No historical task should run again.
+
 Prime image upload regression: `pytest tests/test_prime_image_upload.py -q`
 covers 200 KB multipart parse/write, a real local HTTP upload and terminal SSE
 with an isolated provider substitute, simultaneous/repeated submissions,

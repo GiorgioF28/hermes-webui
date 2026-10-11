@@ -470,13 +470,15 @@ class PrimeBriefQueue:
         workspace: Path | str | None = None,
         max_briefs: int = 5,
         session_id: str | None = None,
+        exclude_brief_ids: set[str] | None = None,
     ) -> int:
         """Attempt delivery of up to max_briefs pending briefs.
 
         Returns the count of briefs successfully delivered.
         Best-effort: exceptions per brief are swallowed to not abort the drain.
         """
-        pending = self.get_pending(session_id=session_id)[:max_briefs]
+        pending = [brief for brief in self.get_pending(session_id=session_id)
+                   if brief.get("brief_id") not in (exclude_brief_ids or set())][:max_briefs]
         delivered = 0
         for brief in pending:
             bid = str(brief.get("brief_id") or "")

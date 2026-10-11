@@ -1679,21 +1679,28 @@
     var cfg = window.__HERMES_CONFIG__ || {};
     var finish = function (reply, usage, messageIndex, historical, createdAt) {
       if (turnUi.isClosed()) return;
-      if (_cbOwnTurnCount > 0 && reply) { setTimeout(function () { finish(reply, usage, messageIndex, historical, createdAt); }, 500); return; }
-      reply = String(reply || '').trim();
-      try {
-        if (reply) {
-          var rendered = renderPrimeHistoryMessage({role: 'assistant', content: reply,
-            brief_id: 'brief-' + t.id, task_id: t.id, usage: usage, created_at: createdAt}, messageIndex);
-          if (userEngaged && !historical && (rendered || messageIndex == null)) speak(reply);
+      // Delivery is already settled even when its rendering waits for our turn.
+      // Never leave a running notice on a saved recap. Keep retry deduplication
+      // until its row is adopted so a local turn cannot trigger another POST.
+      clearBriefNotice(briefId);
+      turnUi.close();
+      var render = function () {
+        if (_cbOwnTurnCount > 0 && reply) { setTimeout(render, 500); return; }
+        reply = String(reply || '').trim();
+        try {
+          if (reply) {
+            var rendered = renderPrimeHistoryMessage({role: 'assistant', content: reply,
+              brief_id: 'brief-' + t.id, task_id: t.id, usage: usage, created_at: createdAt}, messageIndex);
+            if (userEngaged && !historical && (rendered || messageIndex == null)) speak(reply);
+          }
+        } finally {
+          delete _cbBriefRequests[briefId];
+          clearBriefNotice(briefId);
+          // The next history poll adopts this result by brief_id without skipping
+          // any other transcript entries or changing the active turn's state.
         }
-      } finally {
-        delete _cbBriefRequests[briefId];
-        clearBriefNotice(briefId);
-        turnUi.close();
-        // The next history poll adopts this result by brief_id without skipping
-        // any other transcript entries or changing the active turn's state.
-      }
+      };
+      render();
     };
     // Il brief gira in background lato server: qui si fa solo polling leggero,
     // cosi' nessuna connessione resta appesa per minuti (spam "Request timed out").
@@ -1743,6 +1750,7 @@
       .then(acceptStatus)
       .catch(function () {
         // The POST can succeed server-side even when its response is lost.
+        if (turnUi.isClosed()) return;
         showBriefNotice(briefId, 'Recap ' + t.id + ': verifica connessione in corso');
         setTimeout(pollStatus, BRIEF_POLL_MS);
       });

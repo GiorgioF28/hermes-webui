@@ -44,6 +44,16 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 ### Command Bridge Prime history window
 
+Prime user turns and asynchronous recaps share a per-session FIFO ownership
+queue (`api/prime_turn_queue.py`). Recaps reserve arrival order in their POST
+handler before dispatch; user turns reserve before beginning the durable turn.
+The owner retains the slot through provider execution and transcript persistence.
+Unexpected worker errors release the slot, failed thread starts cancel it,
+and tracked dead workers expose recovery. Existing durable brief identity and
+bounded offline fallback recovery remain unchanged. Browser recap delivery
+settles its notice immediately; rendering can wait for a local user turn without
+keeping a false running notice. See [FIFO evidence](docs/ui-ux/prime-recap-fifo/README.md).
+
 Prime photo uploads are composer state, separate from the durable transcript
 and provider turns. Each request has an abortable ten-second deadline covering
 response-body parsing too. Submit waits for all accepted paths before creating

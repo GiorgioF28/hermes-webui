@@ -11543,7 +11543,7 @@ def _estimate_prime_history_tokens(session_id: str = "hermes-prime") -> int:
 
 _PRIME_TURN_LOCKS: dict[str, threading.Lock] = {}
 _PRIME_TURN_LOCKS_GUARD = threading.Lock()
-_PRIME_BRIDGE_TURN_LOCKS: dict[str, threading.Lock] = {}
+_PRIME_BRIDGE_TURN_LOCKS: dict[str, object] = {}
 _PRIME_ACTIVE_LOCK = threading.RLock()
 _PRIME_ACTIVE_TURNS: dict[str, dict[str, object]] = {}
 
@@ -11553,11 +11553,12 @@ def _prime_turn_lock(session_id: str) -> threading.Lock:
         return _PRIME_TURN_LOCKS.setdefault(session_id, threading.Lock())
 
 
-def _prime_bridge_turn_lock(session_id: str) -> threading.Lock:
+def _prime_bridge_turn_lock(session_id: str):
     # Own the durable pending turn from begin through settlement. Provider locks
     # are acquired later and cannot protect begin_turn against concurrent POSTs.
     with _PRIME_TURN_LOCKS_GUARD:
-        return _PRIME_BRIDGE_TURN_LOCKS.setdefault(session_id, threading.Lock())
+        from api.prime_turn_queue import PrimeTurnQueue
+        return _PRIME_BRIDGE_TURN_LOCKS.setdefault(session_id, PrimeTurnQueue())
 
 
 def _sync_prime_delegation_records(session_id: str, tasks: list[dict]) -> None:
@@ -12606,9 +12607,10 @@ def _handle_bridge_prime(handler, body):
     heartbeat_thread.start()
 
     request_lock = _prime_bridge_turn_lock(session_id)
-    if not request_lock.acquire(blocking=False):
+    request_ticket = request_lock.reserve()
+    if not request_lock.acquire_reserved(request_ticket, blocking=False):
         emit("status", {"state": "queued"})
-        request_lock.acquire()
+        request_lock.acquire_reserved(request_ticket)
     try:
         # live() carries message_count, so the anchor no longer copies the whole
         # transcript (~2 MB) on every turn start just to count it.
@@ -12704,10 +12706,17 @@ def _handle_bridge_prime(handler, body):
             # Fase 1: drain pending briefs (fallback no-LLM only; LLM cost already paid)
             try:
                 from api.prime_brief_queue import get_brief_queue
+                with _BRIEF_JOBS_LOCK:
+                    reserved_briefs = {
+                        job.get("brief_id") for job in _BRIEF_JOBS.values()
+                        if job.get("state") in ("queued", "running")
+                        and str(job.get("session_id") or "hermes-prime") == session_id
+                    }
                 get_brief_queue(workspace).drain_pending(
                     try_llm=False,
                     workspace=workspace,
                     session_id=session_id,
+                    exclude_brief_ids=reserved_briefs,
                 )
             except Exception:
                 logger.debug("bridge prime: brief drain failed", exc_info=True)
@@ -12818,6 +12827,8 @@ def _handle_bridge_prime_lead(handler, body):
 _BRIEF_JOBS = {}
 _BRIEF_JOBS_LOCK = threading.Lock()
 _BRIEF_JOBS_MAX = 50
+_BRIEF_WORKERS = {}
+_BRIEF_RESERVATIONS = {}
 
 
 def _brief_job_set(task_id, **fields):
@@ -12829,17 +12840,25 @@ def _brief_job_set(task_id, **fields):
             done = [
                 (k, v.get("finished_at") or 0.0)
                 for k, v in _BRIEF_JOBS.items()
-                if v.get("state") in ("done", "error")
+                if v.get("state") in ("done", "error", "failed_retryable", "pending_recovery")
             ]
             done.sort(key=lambda kv: kv[1])
             for k, _ in done[: max(0, len(_BRIEF_JOBS) - _BRIEF_JOBS_MAX)]:
                 _BRIEF_JOBS.pop(k, None)
+                _BRIEF_WORKERS.pop(k, None)
+                _BRIEF_RESERVATIONS.pop(k, None)
         return dict(rec)
 
 
 def _brief_job_get(task_id):
     with _BRIEF_JOBS_LOCK:
         rec = _BRIEF_JOBS.get(task_id)
+        worker = _BRIEF_WORKERS.get(task_id)
+        if rec and rec.get("state") in ("queued", "running") and worker is not None and not worker.is_alive():
+            reservation = _BRIEF_RESERVATIONS.pop(task_id, None)
+            if reservation:
+                reservation[0].cancel(reservation[1])
+            rec.update(state="pending_recovery", finished_at=time.time())
         return dict(rec) if rec else None
 
 
@@ -13021,11 +13040,15 @@ def _handle_bridge_prime_brief(handler, body):
     )
     # Atomically reserve a worker even when two browsers retry at once.
     pending_state = None
+    turn_queue = _prime_bridge_turn_lock(session_id)
+    ticket = None
     with _BRIEF_JOBS_LOCK:
         existing = _BRIEF_JOBS.get(task_id)
         if existing and existing.get("state") in ("queued", "running"):
             pending_state = existing["state"]
         else:
+            ticket = turn_queue.reserve()
+            _BRIEF_RESERVATIONS[task_id] = (turn_queue, ticket)
             _BRIEF_JOBS[task_id] = {
                 "state": "queued", "reply": "", "brief_id": brief_id,
                 "queued_at": time.time(), "started_at": None,
@@ -13035,13 +13058,22 @@ def _handle_bridge_prime_brief(handler, body):
         return j(handler, {"reply": "", "pending": True, "async": True,
                            "state": pending_state, "brief_id": brief_id},
                  extra_headers={"Cache-Control": "no-store"})
-    worker = threading.Thread(
-        target=_run_prime_brief_job,
-        args=(task_id, brief_id, brief_msg, workspace, session_id, identity.user),
-        name="prime-brief-" + task_id[:12],
-        daemon=True,
-    )
-    worker.start()
+    try:
+        worker = threading.Thread(
+            target=_run_prime_brief_job,
+            args=(task_id, brief_id, brief_msg, workspace, session_id, identity.user, ticket),
+            name="prime-brief-" + task_id[:12],
+            daemon=True,
+        )
+        with _BRIEF_JOBS_LOCK:
+            _BRIEF_WORKERS[task_id] = worker
+            worker.start()
+    except Exception:
+        turn_queue.cancel(ticket)
+        _brief_job_set(task_id, state="failed_retryable", finished_at=time.time())
+        logger.exception("Prime brief worker could not start: %s", task_id)
+        return j(handler, {"pending": False, "state": "failed_retryable", "brief_id": brief_id},
+                 extra_headers={"Cache-Control": "no-store"})
     return j(
         handler,
         {"reply": "", "pending": True, "async": True, "state": "queued", "brief_id": brief_id},
@@ -13049,10 +13081,19 @@ def _handle_bridge_prime_brief(handler, body):
     )
 
 
-def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace, session_id="hermes-prime", user="giorgio"):
+def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace, session_id="hermes-prime", user="giorgio", ticket=None):
     # Keep background replies outside a user's durable begin/finish boundary.
     # Provider-only locking ends before persistence and leaves a replay race.
-    with _prime_bridge_turn_lock(session_id):
+    turn_queue = _prime_bridge_turn_lock(session_id)
+    if ticket is None:
+        ticket = turn_queue.reserve()
+    try:
+        turn_queue.acquire_reserved(ticket)
+    except Exception:
+        turn_queue.cancel(ticket)
+        _brief_job_set(task_id, state="failed_retryable", finished_at=time.time())
+        raise
+    try:
         # Another recovery path may have persisted the brief while we waited.
         delivery = _prime_brief_delivery(session_id, brief_id)
         if delivery is not None:
@@ -13062,6 +13103,16 @@ def _run_prime_brief_job(task_id, brief_id, brief_msg, workspace, session_id="he
         _brief_job_set(task_id, state="running", started_at=time.time(),
                        session_id=session_id, brief_id=brief_id)
         return _run_prime_brief_job_owned(task_id, brief_id, brief_msg, workspace, session_id, user)
+    except Exception:
+        _brief_job_set(task_id, state="failed_retryable", reply="", finished_at=time.time())
+        logger.exception("Prime brief worker failed: %s", task_id)
+        return ""
+    finally:
+        turn_queue.release()
+        with _BRIEF_JOBS_LOCK:
+            reservation = _BRIEF_RESERVATIONS.get(task_id)
+            if reservation and reservation[1] is ticket:
+                _BRIEF_RESERVATIONS.pop(task_id, None)
 
 
 def _run_prime_brief_job_owned(task_id, brief_id, brief_msg, workspace, session_id="hermes-prime", user="giorgio"):

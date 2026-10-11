@@ -1,5 +1,14 @@
 ---
 
+## Unreleased — Prime recap FIFO and settled notices
+
+- Queue user turns and delegation recaps in arrival order per Prime session,
+  reserving a recap before its thread starts. Ownership spans provider work
+  and durable persistence. Worker startup/errors release their reservation;
+  a dead worker reports recovery instead of an endless running state.
+- Remove a saved recap's running notice immediately even while a local user
+  turn delays rendering. Keep retry deduplication until the saved row is adopted.
+
 ## Unreleased — Command Bridge image upload recovery
 
 - Bound photo upload and response parsing to ten seconds, retain failed files

@@ -77,6 +77,17 @@ os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 
 
 @pytest.fixture(autouse=True)
+def _isolate_prime_turn_workers(monkeypatch):
+    # Thread substitutes deliberately do not consume FIFO reservations. Keep
+    # those test-only tickets and worker registries out of the next test.
+    routes = sys.modules.get('api.routes')
+    if routes is not None:
+        for name in ('_PRIME_BRIDGE_TURN_LOCKS', '_BRIEF_WORKERS', '_BRIEF_JOBS', '_BRIEF_RESERVATIONS'):
+            if hasattr(routes, name):
+                monkeypatch.setattr(routes, name, {})
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hermes_config_path():
     """Keep profile/.env side effects from leaking the live config path across tests."""
     isolated_config_path = str(TEST_STATE_DIR / 'config.yaml')
