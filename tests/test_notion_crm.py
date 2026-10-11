@@ -3,6 +3,37 @@ import pytest
 from api.notion_crm import NotionCRM, NotionIdentityConflict, NotionSchemaError
 
 
+def test_handle_lookup_matches_notion_title_with_at_and_casefolded():
+    existing = {
+        "id": "known-page",
+        "properties": {
+            "Handle IG": {"type": "title", "title": [{"plain_text": "@Creator"}]},
+            "Stato": {"type": "status", "status": {"name": "In trattativa"}},
+        },
+    }
+    patches = []
+
+    def transport(method, path, payload):
+        if method == "GET":
+            return 200, {}, schema()
+        if path.endswith("/query"):
+            prop = payload["filter"]["property"]
+            kind = next(key for key in payload["filter"] if key not in {"property"})
+            value = payload["filter"][kind]["equals"]
+            if prop == "Handle IG" and value == "@creator":
+                return 200, {}, {"results": [existing]}
+            return 200, {}, {"results": []}
+        if method == "PATCH":
+            patches.append((path, payload))
+            return 200, {}, {"id": "known-page"}
+        raise AssertionError((method, path))
+
+    result = NotionCRM("token", "db", transport=transport).upsert(event(), extraction())
+    assert result.page_id == "known-page"
+    assert result.action == "updated"
+    assert len(patches) == 1
+
+
 def schema():
     from api.notion_crm import EXPECTED_PROPERTIES
 
@@ -84,15 +115,11 @@ def test_agent_cannot_promote_response_without_verified_thread_link():
 
 
 def test_conflicting_identity_matches_stop_write():
-    counter = 0
-
     def transport(method, path, payload):
-        nonlocal counter
         if method == "GET":
             return 200, {}, schema()
         if path.endswith("/query"):
-            counter += 1
-            return 200, {}, {"results": [{"id": f"page-{counter}"}] if counter < 3 else []}
+            return 200, {}, {"results": [{"id": "page-a"}, {"id": "page-b"}]}
         raise AssertionError("write should not happen")
 
     with pytest.raises(NotionIdentityConflict):

@@ -123,7 +123,7 @@ class NotionCRM:
 
     def query_identity_pages(self, prop: str, kind: str, value: str) -> list[dict]:
         """Return every exact People match; callers review conflicts explicitly."""
-        if prop not in {"Email", "Handle IG"} or not value:
+        if prop not in {"External ID", "Email", "Handle IG"} or not value:
             return []
         body = {"filter": {"property": prop, kind: {"equals": value}}, "page_size": 100}
         results: list[dict] = []
@@ -154,10 +154,20 @@ class NotionCRM:
         return ""
 
     def _find_identity(self, external_id: str, email: str, handle_title: str) -> dict | None:
+        normalized = handle_title.strip().lstrip("@").casefold()
+        handle_matches = []
+        # Notion's equality filter is exact and case-sensitive. Query both
+        # persisted title spellings, then normalize and compare locally.
+        for candidate in dict.fromkeys((normalized, f"@{normalized}")):
+            handle_matches.extend(
+                page for page in self.query_identity_pages("Handle IG", "title", candidate)
+                if ((page.get("properties", {}).get("Handle IG") or {}).get("title") or [{}])[0]
+                .get("plain_text", "").strip().lstrip("@").casefold() == normalized
+            )
         groups = [
             self._query("External ID", "rich_text", external_id),
             self._query("Email", "email", email),
-            self._query("Handle IG", "title", handle_title),
+            handle_matches,
         ]
         matches = {page["id"]: page for group in groups for page in group}
         if len(matches) > 1:
