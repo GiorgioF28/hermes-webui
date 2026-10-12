@@ -1,5 +1,16 @@
 ---
 
+## Unreleased — Prime model capacity recovery
+
+- Recognize Codex model capacity separately from generic CLI exit, quota and
+  authentication failures. Retry once with the worker Codex profile only when
+  the chief model rejects the turn before assistant text or tool activity.
+  Keep the original prompt, session ownership and configured chief profile;
+  report the actual fallback model in usage and the live status.
+- Cancellation, partial output and observed tool activity prevent automatic
+  replay. A second capacity rejection retains the request and reports the
+  specific cause without a retry loop.
+
 ## Unreleased — Prime recap FIFO and settled notices
 
 - Queue user turns and delegation recaps in arrival order per Prime session,

@@ -3071,6 +3071,7 @@
         started: 'in corso',
         queued: 'in coda\u2026',
         reasoning: 'sto ragionando\u2026',
+        capacity_fallback: 'modello Prime saturo: recupero con Codex Luna\u2026',
         tool: 'uso lo strumento ' + (tool || '') + '\u2026',
         responding: 'sta scrivendo\u2026',
         done: '\u2713 completato',

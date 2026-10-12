@@ -67,7 +67,7 @@ def test_codex_memory_budget_overrides_large_runtime_setting(monkeypatch, tmp_pa
     monkeypatch.setenv("HERMES_PRIME_MEMORY_MAX_CHARS", "120000")
     monkeypatch.setattr(prime_lean_preset, "prime_context_profile", lambda: "unlocked")
     monkeypatch.setattr(routes, "_prime_system_prompt_for_user", lambda *args: "PERSONA")
-    monkeypatch.setattr(prime_session_store, "get_prime_session_store", lambda sid: type("Store", (), {"history": lambda self: {"messages": []}})())
+    monkeypatch.setattr(prime_session_store, "get_prime_session_store", lambda sid: type("Store", (), {"history": lambda self, **kwargs: {"messages": []}})())
     observed = []
     def memory(*args, **kwargs):
         observed.append(kwargs["max_chars"])

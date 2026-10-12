@@ -1,5 +1,15 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime capacity regression: `pytest tests/test_prime_codex_capacity.py
+tests/test_prime_capacity_ui.py tests/test_prime_codex_watchdog.py
+tests/test_prime_recap_fifo.py -q` checks bounded pre-action fallback, cancellation,
+MCP activity guards, actual usage and one durable response. Set
+`HERMES_CAPTURE_CAPACITY_UI=docs/ui-ux/prime-capacity-recovery` to capture
+synthetic before/after/delivered views at 1200/650/360 pixels. After operator
+activation, a genuine chief-model capacity rejection should either complete
+once with worker-model usage or report `codex_capacity`, preserving the request.
+Do not force provider failures or replay operational delegations for this check.
+
 Prime recap FIFO regression: `pytest tests/test_prime_recap_fifo.py
 tests/test_prime_recap_overlap_ui.py tests/test_prime_brief_recovery.py
 tests/test_prime_transport_continuity.py -q` checks reverse worker dispatch,

@@ -44,6 +44,16 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 ### Command Bridge Prime history window
 
+Codex Prime capacity recovery stays inside the existing turn owner. A rejected
+chief-model attempt may retry once with the worker profile before any observed
+assistant text or tool activity, including activity signalled by the MCP facade.
+It uses the same prompt/session and fresh, revoked-per-attempt MCP credentials.
+The configured chief profile remains unchanged; usage records the actual model
+and the capacity fallback reason. No transcript, delegation or queue entry is
+created for the extra provider attempt. Cancellation and any observed work
+disable replay; a second rejection surfaces `codex_capacity`. See
+[capacity recovery evidence](docs/ui-ux/prime-capacity-recovery/README.md).
+
 Prime user turns and asynchronous recaps share a per-session FIFO ownership
 queue (`api/prime_turn_queue.py`). Recaps reserve arrival order in their POST
 handler before dispatch; user turns reserve before beginning the durable turn.

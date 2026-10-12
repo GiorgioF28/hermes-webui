@@ -23,6 +23,12 @@ class PrimeHardCapError(TimeoutError):
     """The provider exceeded the absolute turn budget despite activity."""
 
 
+class CodexCapacityError(RuntimeError):
+    def __init__(self, message, *, safe_to_retry=False):
+        super().__init__(message)
+        self.safe_to_retry = safe_to_retry
+
+
 def build_tools(session_id, workspace):
     from claude_agent_sdk import tool
     from api.ask_user_tool import _ask_user_handler_for
@@ -194,15 +200,42 @@ def stop_process(proc):
 
 
 def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status=None, on_tool=None):
+    """Recover one pre-action capacity rejection without changing the chief profile."""
+    from api.codex_profiles import profile
+    callbacks = dict(session_id=session_id, cancel=cancel, on_token=on_token,
+                     on_status=on_status, on_tool=on_tool)
+    try:
+        return _run_prime_once(prompt, workspace, selected_profile=profile(chief=True), **callbacks)
+    except CodexCapacityError as exc:
+        fallback = profile(chief=False)
+        if not exc.safe_to_retry or cancel.is_set() or fallback == profile(chief=True):
+            raise
+        if on_status:
+            on_status({"state": "capacity_fallback", "model": fallback["model"]})
+        if cancel.is_set():
+            return {"reply": "", "cancelled": True, "usage": {}}
+        result = _run_prime_once(prompt, workspace, selected_profile=fallback, **callbacks)
+        result["usage"] = {**result.get("usage", {}), "fallback_reason": "codex_capacity",
+                           "requested_model": profile(chief=True)["model"]}
+        return result
+
+
+def _run_prime_once(prompt, workspace, *, session_id, cancel, selected_profile,
+                    on_token=None, on_status=None, on_tool=None):
     from api.prime_delegation import _resolve_codex_executable, _CODEX_TIMEOUT
     from api.config import DEFAULT_WORKSPACE
     from api.routes import get_clarify_pending_count
     runtime = get_runtime()
-    token = runtime.register(build_tools(session_id, DEFAULT_WORKSPACE), cancel, on_tool)
+    work_started = threading.Event()
+    def track_tool(name):
+        work_started.set()
+        if on_tool:
+            on_tool(name)
+    token = runtime.register(build_tools(session_id, DEFAULT_WORKSPACE), cancel, track_tool)
     env = os.environ.copy()
     env["HERMES_PRIME_TOOL_TOKEN"] = token
-    from api.codex_profiles import cli_args
-    command = [_resolve_codex_executable(), "exec", *cli_args(chief=True), "--json",
+    command = [_resolve_codex_executable(), "exec", "--model", selected_profile["model"],
+               "-c", 'model_reasoning_effort="' + selected_profile["reasoning_effort"] + '"', "--json",
                "--sandbox", "danger-full-access", "-c", 'approval_policy="never"',
                "--skip-git-repo-check", "-C", str(workspace),
                "-c", "mcp_servers.hermes_prime.url=" + json.dumps(runtime.url),
@@ -265,6 +298,8 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             except ValueError:
                 continue
             kind, item = event.get("type"), event.get("item") or {}
+            if kind in {"item.started", "item.updated", "item.completed"} and item.get("type") not in {None, "reasoning"}:
+                work_started.set()
             if kind in {"thread.started", "turn.started", "turn.completed", "item.started", "item.updated", "item.completed"}:
                 idle_started = time.monotonic()
             if kind == "item.completed" and item.get("type") == "agent_message":
@@ -281,9 +316,8 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
             elif kind == "item.started" and on_status:
                 on_status({"state": "tool" if "tool" in item.get("type", "") else "reasoning"})
             elif kind == "turn.completed":
-                from api.codex_profiles import profile
                 usage = {**(event.get("usage") or {}), "provider": "codex",
-                         **profile(chief=True), "usage_scope": "turn",
+                         **selected_profile, "usage_scope": "turn",
                          "input_includes_cache": True}
             elif kind in {"error", "turn.failed"}:
                 err = event.get("error") or {}
@@ -292,7 +326,11 @@ def run_prime(prompt, workspace, *, session_id, cancel, on_token=None, on_status
                     turn_errors.append(str(detail))
         if proc.wait(timeout=10) != 0 or not final_reply:
             from api.helpers import _redact_text
-            raise RuntimeError("Codex Prime: " + _redact_text("\n".join(turn_errors or errors)[-3000:]))
+            from api import bridge_errors
+            detail = "Codex Prime: " + _redact_text("\n".join(turn_errors or errors)[-3000:])
+            if bridge_errors.classify_branch(detail) == bridge_errors.CODEX_CAPACITY:
+                raise CodexCapacityError(detail, safe_to_retry=not parts and not work_started.is_set())
+            raise RuntimeError(detail)
         return {"reply": final_reply, "usage": usage}
     finally:
         runtime.revoke(token)

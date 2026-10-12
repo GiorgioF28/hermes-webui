@@ -24,6 +24,7 @@ CODEX_TIMEOUT = "codex_timeout"
 CODEX_NOT_FOUND = "codex_not_found"
 CODEX_AUTH = "codex_auth"
 CODEX_EXIT = "codex_exit"
+CODEX_CAPACITY = "codex_capacity"
 PRIME_IDLE_TIMEOUT = "prime_idle_timeout"
 PRIME_HARDCAP = "prime_hardcap"
 CLI_STARTUP = "cli_startup"
@@ -32,6 +33,10 @@ UNKNOWN = "unknown"
 
 # ramo -> (messaggio utente, hint operativo)
 _MESSAGES = {
+    CODEX_CAPACITY: (
+        "Il modello Codex scelto è temporaneamente saturo.",
+        "La richiesta è conservata. Riprova tra poco: non è un errore della delega né del login.",
+    ),
     CODEX_QUOTA: (
         "Codex ha raggiunto il limite di utilizzo disponibile.",
         "Attendi il ripristino della quota indicato da Codex, poi riprova. Il CLI è installato; non serve modificare il PATH.",
@@ -115,6 +120,11 @@ def classify_branch(exc) -> str:
         return TRANSPORT_CUT
 
     codexy = "codex" in text
+
+    if codexy and any(k in text for k in (
+        "selected model is at capacity", "model is at capacity", "model_capacity_exceeded",
+    )):
+        return CODEX_CAPACITY
 
     # 1-bis) CLI di Prime morto all'avvio (connect/initialize): ProcessError del
     # SDK ("Command failed with exit code N"), --session-id non UUID, flag rotti.
