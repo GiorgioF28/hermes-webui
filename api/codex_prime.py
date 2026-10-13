@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import os
 import queue
+import re
 import secrets
 import subprocess
 import threading
@@ -189,7 +190,10 @@ def stop_process(proc):
     if proc.poll() is not None:
         return
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
     else:
         proc.terminate()
     try:
@@ -229,6 +233,7 @@ def _run_prime_once(prompt, workspace, *, session_id, cancel, selected_profile,
     work_started = threading.Event()
     def track_tool(name):
         work_started.set()
+        status({"state": "tool", "tool": re.sub(r"[^a-zA-Z0-9_. -]", "", str(name))[:80]})
         if on_tool:
             on_tool(name)
     token = runtime.register(build_tools(session_id, DEFAULT_WORKSPACE), cancel, track_tool)
@@ -257,7 +262,18 @@ def _run_prime_once(prompt, workspace, *, session_id, cancel, selected_profile,
         hard_cap = 3600.0
     elapsed, last = 0.0, time.monotonic()
     idle_started = last
+    started = last
+    next_status = last
+    current_status = {"state": "starting"}
+    def status(value):
+        nonlocal current_status
+        current_status = value
+        if on_status:
+            on_status(value)
     try:
+        if cancel.is_set():
+            return {"reply": "", "cancelled": True, "usage": {}}
+        status(current_status)
         proc = subprocess.Popen(command, cwd=str(workspace), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         def read_stdout():
@@ -268,10 +284,18 @@ def _run_prime_once(prompt, workspace, *, session_id, cancel, selected_profile,
             for line in proc.stderr:
                 errors.append(line)
                 del errors[:-20]
+                if re.search(r"reconnecting|retrying|stream disconnected|connection.*(?:failed|error)", line, re.I):
+                    events.put(json.dumps({"type": "prime.connection_retry"}))
         threading.Thread(target=read_stdout, daemon=True).start()
         threading.Thread(target=read_stderr, daemon=True).start()
-        proc.stdin.write(prompt)
-        proc.stdin.close()
+        # A blocked pipe write must not prevent Stop from reaching the runner.
+        def write_prompt():
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except (OSError, ValueError):
+                events.put(json.dumps({"type": "prime.input_error"}))
+        threading.Thread(target=write_prompt, daemon=True).start()
         while True:
             if cancel.is_set():
                 return {"reply": "".join(parts), "cancelled": True, "usage": usage}
@@ -283,6 +307,11 @@ def _run_prime_once(prompt, workspace, *, session_id, cancel, selected_profile,
                 # provider watchdog. Resume with a fresh inactivity budget.
                 idle_started = now
             last = now
+            if now >= next_status:
+                if on_status:
+                    on_status({**current_status, "elapsed_seconds": round(now - started),
+                               "idle_seconds": round(now - idle_started), "waiting_user": bool(get_clarify_pending_count(session_id))})
+                next_status = now + 5
             if elapsed > hard_cap:
                 raise PrimeHardCapError(f"Codex Prime ha superato il tetto del turno ({hard_cap:g}s)")
             if now - idle_started > _CODEX_TIMEOUT:
@@ -311,10 +340,27 @@ def _run_prime_once(prompt, workspace, *, session_id, cancel, selected_profile,
                     final_reply = text
                 delta = ("\n\n" if parts else "") + text
                 parts.append(delta)
+                status({"state": "responding"})
                 if on_token:
                     on_token(delta)
-            elif kind == "item.started" and on_status:
-                on_status({"state": "tool" if "tool" in item.get("type", "") else "reasoning"})
+            elif kind in {"item.started", "item.updated", "item.completed"}:
+                item_type = item.get("type")
+                if item_type == "reasoning":
+                    status({"state": "reasoning"})
+                elif item_type == "command_execution":
+                    status({"state": "reasoning"} if kind == "item.completed" else {"state": "tool", "tool": "comando locale"})
+                elif item_type in {"mcp_tool_call", "web_search", "file_change", "collab_tool_call"}:
+                    # Display names only; commands, arguments and output can hold secrets.
+                    name = item.get("tool") if item_type == "mcp_tool_call" else {"web_search": "ricerca web", "file_change": "modifica file", "collab_tool_call": "collaborazione"}.get(item_type)
+                    name = re.sub(r"[^a-zA-Z0-9_. -]", "", str(name or "strumento"))[:80]
+                    status({"state": "reasoning"} if kind == "item.completed" else {"state": "tool", "tool": name})
+            elif kind == "turn.started":
+                status({"state": "reasoning"})
+            elif kind == "prime.connection_retry":
+                status({"state": "connection_retry"})
+            elif kind == "prime.input_error":
+                if not cancel.is_set():
+                    raise RuntimeError("Codex Prime: invio al processo non riuscito")
             elif kind == "turn.completed":
                 usage = {**(event.get("usage") or {}), "provider": "codex",
                          **selected_profile, "usage_scope": "turn",

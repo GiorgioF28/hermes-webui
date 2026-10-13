@@ -16,14 +16,22 @@ class PrimeTurnQueue:
             self._waiting.append(ticket)
             return ticket
 
-    def acquire_reserved(self, ticket, blocking=True):
+    def acquire_reserved(self, ticket, blocking=True, cancel_event=None):
         with self._condition:
             if ticket not in self._waiting:
                 raise RuntimeError("Prime turn reservation no longer exists")
             if not blocking and (self._owner is not None or self._waiting[0] is not ticket):
                 return False
             while self._owner is not None or self._waiting[0] is not ticket:
-                self._condition.wait()
+                if cancel_event is not None and cancel_event.is_set():
+                    self._waiting.remove(ticket)
+                    self._condition.notify_all()
+                    return False
+                self._condition.wait(timeout=0.25)
+            if cancel_event is not None and cancel_event.is_set():
+                self._waiting.remove(ticket)
+                self._condition.notify_all()
+                return False
             self._waiting.popleft()
             self._owner = ticket
             return True

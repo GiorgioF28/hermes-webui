@@ -27,7 +27,7 @@ def scene(page, source=None):
     function $(id){return document.getElementById(id)}
     function el(tag,cls){var n=document.createElement(tag);n.className=cls;return n}
     function esc(s){var n=el('span','');n.textContent=String(s||'');return n.innerHTML}
-    var userEngaged=false,_cbOwnTurnCount=0,_ttsActive=false,posts=[],uploads=[],notes=[];
+    var _primeBrowserTurns=[],userEngaged=false,_cbOwnTurnCount=0,_ttsActive=false,posts=[],uploads=[],notes=[];
     window.__HERMES_CONFIG__={csrfToken:'test-token',maxUploadBytes:20971520};
     function sysNote(s){notes.push(s);var n=el('div','cb-sysnote');n.textContent=s;$('cbLog').append(n)}
     function handlePrimeSlashCommand(){return false}

@@ -165,7 +165,7 @@ def test_bridge_prime_post_streams_tokens_then_done(monkeypatch, tmp_path):
     events = _events(handler)
     assert events[0][0] == "started" and events[0][1]["stream_id"]
     assert events[1:] == [
-        ("status", {"state": "reasoning"}),
+        ("status", {"state": "reasoning", "stream_id": events[0][1]["stream_id"]}),
         ("token", {"text": "Prima "}),
         ("token", {"text": "parte"}),
         ("status", {"state": "done"}),
@@ -609,16 +609,17 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
 
     assert "function streamPrimeResponse(response, handlers)" in source
     assert "response.body.getReader()" in source
-    assert "status: function (d) { showStatus(d && d.state, d && d.tool); }" in source
+    assert "showStatus(d && d.state, d && d.tool);" in source
+    assert "idle_seconds" in source
     assert "token: function (d) { showToken(d && d.text); }" in source
     assert "usage: function (d) { showUsage(d && d.usage); }" in source
-    assert "approval: function (d) { renderBridgeApprovalCard(d); }" in source
+    assert "approval: function (d) { if (!settled) renderBridgeApprovalCard(d); }" in source
     assert "clarify: function (d)" in source
     assert "renderBridgeClarifyCard(d, {" in source
     assert "onResolved: function ()" in source
     assert "done: function (d)" in source
     assert "if (d && d.usage) showUsage(d.usage);" in source
-    assert "if (!settled) fail('Connessione interrotta [transport_cut]." in source
+    assert "if (!settled) { fail('Connessione interrotta [transport_cut]." in source
     assert "if (!reply && ph && ph.parentNode)" in source
     assert "api('api/bridge/tasks?compact=1')" in source
     assert "setInterval(pollTasks, 3000)" in source
@@ -663,7 +664,7 @@ def test_command_bridge_frontend_always_clears_streaming_after_final_render():
     assert "node.textContent = raw" in render
 
     # EOF without done is degraded observation, never proof of completion.
-    assert "if (!settled) fail('Connessione interrotta [transport_cut]." in source
+    assert "if (!settled) { fail('Connessione interrotta [transport_cut]." in source
     assert "if (!settled && reply) finish(" not in source
 
 
@@ -892,7 +893,8 @@ def test_command_bridge_frontend_p1_controls_and_slash_commands():
 
     assert 'id="cbStop"' in source
     assert "function cancelPrimeTurn()" in source
-    assert "apiPost('/api/bridge/prime/cancel'" in source
+    assert "new URL('api/bridge/prime/cancel'" in source
+    assert "X-CSRF-Token" in source
     assert "api('/api/bridge/prime/live')" in source
     assert "function handlePrimeSlashCommand(text)" in source
     assert "cmd === '/compact'" in source

@@ -82,7 +82,7 @@ def _isolate_prime_turn_workers(monkeypatch):
     # those test-only tickets and worker registries out of the next test.
     routes = sys.modules.get('api.routes')
     if routes is not None:
-        for name in ('_PRIME_BRIDGE_TURN_LOCKS', '_BRIEF_WORKERS', '_BRIEF_JOBS', '_BRIEF_RESERVATIONS'):
+        for name in ('_PRIME_BRIDGE_TURN_LOCKS', '_BRIEF_WORKERS', '_BRIEF_JOBS', '_BRIEF_RESERVATIONS', '_PRIME_BROWSER_REQUESTS', '_PRIME_BROWSER_CANCELS'):
             if hasattr(routes, name):
                 monkeypatch.setattr(routes, name, {})
 

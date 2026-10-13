@@ -1,5 +1,11 @@
 ---
 
+## Unreleased - Prime Stop and activity visibility
+
+- Prime Stop authenticates its request, cancels only its owned queued/running turn, closes the matching browser stream after acknowledgement, and remains retryable on connection failure.
+- Native Codex tools and commands, reconnect attempts, elapsed time and inactivity appear as live status; transport heartbeat and provider progress remain distinct.
+
+
 ## Unreleased — Prime model capacity recovery
 
 - Recognize Codex model capacity separately from generic CLI exit, quota and

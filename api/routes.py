@@ -11546,6 +11546,8 @@ _PRIME_TURN_LOCKS_GUARD = threading.Lock()
 _PRIME_BRIDGE_TURN_LOCKS: dict[str, object] = {}
 _PRIME_ACTIVE_LOCK = threading.RLock()
 _PRIME_ACTIVE_TURNS: dict[str, dict[str, object]] = {}
+_PRIME_BROWSER_REQUESTS = {}
+_PRIME_BROWSER_CANCELS = {}
 
 
 def _prime_turn_lock(session_id: str) -> threading.Lock:
@@ -11632,6 +11634,21 @@ def _prime_active_clear(stream_id: str | None = None, session_id: str = "hermes-
         active = _PRIME_ACTIVE_TURNS.get(session_id) or {}
         if stream_id is None or active.get("stream_id") == stream_id:
             _PRIME_ACTIVE_TURNS.pop(session_id, None)
+
+
+def _prime_cancel_event(session_id, stream_id):
+    with _PRIME_ACTIVE_LOCK:
+        active = _PRIME_ACTIVE_TURNS.get(session_id) or {}
+        if stream_id and active.get("stream_id") == stream_id and active.get("cancel_event") is not None:
+            return active["cancel_event"]
+    return threading.Event()
+
+
+def _prime_progress_set(session_id, stream_id, status):
+    with _PRIME_ACTIVE_LOCK:
+        active = _PRIME_ACTIVE_TURNS.get(session_id) or {}
+        if active.get("stream_id") == stream_id:
+            active["progress"] = {k: status[k] for k in ("state", "tool", "elapsed_seconds", "idle_seconds", "waiting_user") if k in status}
 
 
 def _request_prime_cancel(stream_id: str | None = None, session_id: str = "hermes-prime") -> bool:
@@ -11803,7 +11820,7 @@ def _hermes_prime_reply_codex(message, workspace, attachments=None, on_token=Non
     from api.prime_session_store import get_prime_session_store
 
     with _prime_turn_lock(session_id):
-        cancel_event = threading.Event()
+        cancel_event = _prime_cancel_event(session_id, stream_id)
         _prime_active_set(session_id=session_id, stream_id=stream_id, cancel_event=cancel_event,
                           workspace=str(workspace), model=_prime_lead_model_id("codex"), started_at=time.time())
         try:
@@ -11867,7 +11884,9 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
     final = {"text": ""}
     final_usage = {"usage": {}}
     last_state = [None]
-    cancel_event = threading.Event()
+    cancel_event = _prime_cancel_event(session_id, stream_id)
+    if cancel_event.is_set():
+        return {"reply": "", "cancelled": True, "usage": {}}
     model_state = dict(
         model_state
         or _resolve_prime_model_state(_prime_store_settings(session_id))
@@ -11935,6 +11954,8 @@ def _hermes_prime_reply_claude(message, workspace, attachments=None, on_token=No
         logger.debug("prime turn: memory retrieval failed", exc_info=True)
 
     async def _drive(client):
+        if cancel_event.is_set():
+            return
         _sid = getattr(client, "_hermes_sdk_session_id", None) or "default"
         await client.query(prompt_text, session_id=_sid)
         async for m in client.receive_response():
@@ -12211,6 +12232,7 @@ def _handle_bridge_prime_live(handler):
             payload["started_at"] = active.get("started_at")
             payload["model"] = active.get("model")
             payload["profile"] = active.get("profile")
+            payload["progress"] = active.get("progress") or {}
         elif payload.get("pending_turn"):
             payload["stream_id"] = payload["pending_turn"].get("stream_id")
         return j(handler, payload, extra_headers={"Cache-Control": "no-store"}) or True
@@ -12225,14 +12247,37 @@ def _handle_bridge_prime_cancel(handler, body):
 
     session_id = _request_prime_session_id(handler)
     requested = str((body or {}).get("stream_id") or "").strip() or None
+    request_id = str((body or {}).get("request_id") or "")
+    if request_id:
+        with _PRIME_ACTIVE_LOCK:
+            request = _PRIME_BROWSER_REQUESTS.get((session_id, request_id))
+            if request is not None:
+                request["cancel_event"].set()
+                requested = request.get("stream_id")
+        if request is None:
+            # Stop may beat the original HTTP POST. Retain only a bounded,
+            # short-lived intent; a late request must not launch a provider.
+            with _PRIME_ACTIVE_LOCK:
+                now = time.monotonic()
+                for key, ts in list(_PRIME_BROWSER_CANCELS.items()):
+                    if now - ts > 300:
+                        _PRIME_BROWSER_CANCELS.pop(key, None)
+                if len(_PRIME_BROWSER_CANCELS) >= 256:
+                    _PRIME_BROWSER_CANCELS.pop(next(iter(_PRIME_BROWSER_CANCELS)))
+                _PRIME_BROWSER_CANCELS[(session_id, request_id)] = now
+            return j(handler, {"ok": True, "cancelled": True, "pending_start": True})
+        if not requested:
+            return j(handler, {"ok": True, "cancelled": True, "queued": True})
     live = get_prime_session_store(session_id).live()
     pending = live.get("pending_turn") or {}
     stream_id = requested or pending.get("stream_id")
     if not stream_id:
         return j(handler, {"ok": True, "cancelled": False, "reason": "idle"})
     signalled = _request_prime_cancel(stream_id, session_id)
+    if not signalled and pending.get("stream_id") != stream_id:
+        return j(handler, {"ok": True, "cancelled": False, "reason": "settled"})
     cancelled = get_prime_session_store(session_id).cancel_turn(stream_id, "cancelled by user")
-    return j(handler, {"ok": True, "cancelled": True, "signalled": signalled, **cancelled})
+    return j(handler, {"ok": True, "cancelled": bool(signalled or pending.get("stream_id") == stream_id), "signalled": signalled, **cancelled})
 
 
 def _handle_bridge_prime_compact(handler, body):
@@ -12577,6 +12622,14 @@ def _handle_bridge_prime(handler, body):
     write_lock = threading.Lock()
     observer_gone = threading.Event()
     stop_heartbeat = threading.Event()
+    request_id = str((body or {}).get("request_id") or uuid.uuid4().hex)[:100]
+    cancel_event = threading.Event()
+    request = {"cancel_event": cancel_event, "stream_id": None}
+    with _PRIME_ACTIVE_LOCK:
+        stopped_at = _PRIME_BROWSER_CANCELS.pop((session_id, request_id), None)
+        if stopped_at is not None and time.monotonic() - stopped_at <= 300:
+            cancel_event.set()
+        _PRIME_BROWSER_REQUESTS[(session_id, request_id)] = request
 
     def emit(event, payload):
         with write_lock:
@@ -12600,6 +12653,9 @@ def _handle_bridge_prime(handler, body):
     def heartbeat():
         while not stop_heartbeat.wait(_SSE_HEARTBEAT_INTERVAL_SECONDS):
             emit(None, None)
+            active = _prime_active_snapshot(session_id)
+            progress = active.get("progress") if stream_id and active.get("stream_id") == stream_id else {}
+            emit("heartbeat", {"stream_id": stream_id, "progress": progress or {}})
             if observer_gone.is_set():
                 break
 
@@ -12608,10 +12664,15 @@ def _handle_bridge_prime(handler, body):
 
     request_lock = _prime_bridge_turn_lock(session_id)
     request_ticket = request_lock.reserve()
-    if not request_lock.acquire_reserved(request_ticket, blocking=False):
-        emit("status", {"state": "queued"})
-        request_lock.acquire_reserved(request_ticket)
+    acquired = False
     try:
+        acquired = request_lock.acquire_reserved(request_ticket, blocking=False, cancel_event=cancel_event)
+        if not acquired and not cancel_event.is_set():
+            emit("status", {"state": "queued"})
+            acquired = request_lock.acquire_reserved(request_ticket, cancel_event=cancel_event)
+        if not acquired:
+            emit("done", {"reply": "", "cancelled": True})
+            return True
         # live() carries message_count, so the anchor no longer copies the whole
         # transcript (~2 MB) on every turn start just to count it.
         try:
@@ -12620,6 +12681,10 @@ def _handle_bridge_prime(handler, body):
             anchor_message_index = int((store.history() or {}).get("message_count") or 0)
         anchor_created_at = time.time()
         stream_id = store.begin_turn(msg, attachments)
+        with _PRIME_ACTIVE_LOCK:
+            request["stream_id"] = stream_id
+        _prime_active_set(session_id=session_id, stream_id=stream_id, cancel_event=cancel_event,
+                          started_at=time.time(), progress={"state": "starting"})
         try:
             from api.prime_delegation import set_delegation_anchor_context
             set_delegation_anchor_context(
@@ -12634,6 +12699,10 @@ def _handle_bridge_prime(handler, body):
         def _token(text):
             store.append_token(stream_id, text)
             emit("token", {"text": text})
+
+        def _status(status):
+            _prime_progress_set(session_id, stream_id, status)
+            emit("status", {**status, "stream_id": stream_id})
 
         def _on_tool_call(tool_name: str, result_summary: str = "") -> None:
             """Emit SSE tool event and journal the tool call (P2-C)."""
@@ -12656,7 +12725,7 @@ def _handle_bridge_prime(handler, body):
                     workspace,
                     attachments=attachments,
                     on_token=_token,
-                    on_status=lambda status: emit("status", status),
+                    on_status=_status,
                     model_state=model_state,
                     stream_id=stream_id,
                     session_id=session_id,
@@ -12669,7 +12738,7 @@ def _handle_bridge_prime(handler, body):
                         workspace,
                         attachments=attachments,
                         on_token=_token,
-                        on_status=lambda status: emit("status", status),
+                        on_status=_status,
                         model_state=model_state,
                         stream_id=stream_id,
                         session_id=session_id,
@@ -12733,6 +12802,10 @@ def _handle_bridge_prime(handler, body):
                 },
             )
         except Exception as exc:
+            if cancel_event.is_set():
+                store.cancel_turn(stream_id, "cancelled by user")
+                emit("done", {"reply": "", "cancelled": True, "stream_id": stream_id})
+                return True
             # emit() already isolates HTTP writer failures. Exceptions here
             # belong to the provider/persistence path, including TimeoutError;
             # preserve and log their cause rather than inventing a disconnect.
@@ -12772,7 +12845,14 @@ def _handle_bridge_prime(handler, body):
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=1.0)
-        request_lock.release()
+        if stream_id:
+            _prime_active_clear(stream_id, session_id)
+        with _PRIME_ACTIVE_LOCK:
+            _PRIME_BROWSER_REQUESTS.pop((session_id, request_id), None)
+        if acquired:
+            request_lock.release()
+        else:
+            request_lock.cancel(request_ticket)
 
 
 def _prime_lead_model_id(lead: str) -> str:

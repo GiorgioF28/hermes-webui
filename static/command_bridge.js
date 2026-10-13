@@ -1212,19 +1212,44 @@
 
   function setPrimeStreaming(active, streamId) {
     _primeStreaming = !!active;
-    _primeStreamId = active ? (streamId || _primeStreamId || null) : null;
+    var local = typeof _primeBrowserTurns !== 'undefined' && _primeBrowserTurns.find(function (t) { return t.streamId; });
+    _primeStreamId = active ? (streamId || (local && local.streamId) || null) : null;
     var stop = $('cbStop'); if (stop) stop.hidden = !_primeStreaming;
   }
 
+  var _primeBrowserTurns = [];
+
   function cancelPrimeTurn() {
     if (!_primeStreaming && !_primeStreamId) return;
+    var owner = _primeBrowserTurns.find(function (t) { return t.streamId && t.streamId === _primeStreamId; }) ||
+      (!_primeStreamId ? _primeBrowserTurns[0] : null);
+    var streamId = owner ? owner.streamId : _primeStreamId;
     var stop = $('cbStop'); if (stop) stop.disabled = true;
-    apiPost('/api/bridge/prime/cancel', { stream_id: _primeStreamId || '' })
-      .then(function (d) {
-        sysNote((d && d.promoted) ? 'Turno interrotto: ho salvato il parziale.' : 'Stop inviato a Hermes Prime.');
-      })
-      .catch(function (e) { sysNote('Stop fallito: ' + (e && e.message ? e.message : 'errore')); })
-      .then(function () { if (stop) stop.disabled = false; setPrimeStreaming(false, null); });
+    if (owner) owner.status('stop_requested');
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 5000);
+    var cfg = window.__HERMES_CONFIG__ || {};
+    fetch(new URL('api/bridge/prime/cancel', document.baseURI || location.href).href, {
+      method: 'POST', credentials: 'same-origin', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+      body: JSON.stringify({ stream_id: streamId || '', request_id: owner ? owner.requestId : '' })
+    }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (d) {
+      if (!d || !d.ok) throw new Error('Stop non confermato');
+      if (!d.cancelled && d.reason !== 'settled' && d.reason !== 'idle') throw new Error('Turno diverso: Stop non applicato');
+      if (owner) { owner.finish('interrotto'); owner.controller.abort(); }
+      else {
+        if (_primeLiveTimer) clearInterval(_primeLiveTimer);
+        _primeLiveTimer = null; ++_primeLiveGeneration;
+        setPrimeStreaming(false, null);
+        loadPrimeHistory();
+      }
+    }).catch(function (e) {
+      if (owner) owner.status('stop_failed');
+      sysNote('Stop non confermato: ' + (e && e.message ? e.message : 'connessione assente') + '. Puoi riprovare.');
+    }).then(function () { clearTimeout(timer); if (stop) stop.disabled = false; });
   }
 
   function startPrimeLivePolling(node) {
@@ -1239,6 +1264,7 @@
           if (_primeLiveTimer) clearInterval(_primeLiveTimer);
           _primeLiveTimer = null;
           setPrimeStreaming(false, null);
+          loadPrimeHistory();
           return;
         }
         setPrimeStreaming(true, pending.stream_id || data.stream_id || null);
@@ -1256,8 +1282,22 @@
           else node.textContent = partial;
           node.classList.add('cb-recovered');
         }
+        var progress = data.progress || {};
+        if (replyNode && progress.state) {
+          var label = progress.state === 'tool' ? 'uso lo strumento ' + (progress.tool || '') :
+            progress.state === 'connection_retry' ? 'problema di connessione: riconnessione in corso' :
+            progress.state === 'responding' ? 'sta scrivendo' : 'sto ragionando';
+          if (progress.waiting_user) label = 'In attesa della tua scelta';
+          else if (progress.idle_seconds >= 60) label = 'Nessun progresso dal modello da ' + progress.idle_seconds + ' s. Stop disponibile.';
+          if (progress.elapsed_seconds) label += ' \u00b7 ' + progress.elapsed_seconds + ' s';
+          createPrimeTurnUi(replyNode).updateStatus(label, !!partial);
+        }
         repositionPrimeTaskCards();
-      }).catch(function () {});
+      }).catch(function () {
+        var replyNode = node && node.closest ? node.closest('.cb-msg') : null;
+        if (replyNode && replyNode.getAttribute('data-prime-settled') !== 'true')
+          createPrimeTurnUi(replyNode).updateStatus('Connessione di stato non disponibile. Stop disponibile.', true);
+      });
     };
     tick();
     _primeLiveTimer = setInterval(tick, 2000);
@@ -1929,6 +1969,7 @@
         if (line.indexOf('event:') === 0) event = line.slice(6).trim();
         else if (line.indexOf('data:') === 0) data += line.slice(5).trimStart();
       });
+      if (handlers.activity) handlers.activity();
       if (!data) return;
       var payload = JSON.parse(data);
       if (handlers[event]) handlers[event](payload);
@@ -3054,6 +3095,12 @@
     var liveUsage = $('cbLiveUsage');
     if (liveUsage) { liveUsage.hidden = true; liveUsage.textContent = ''; }
     var reply = '', settled = false, speech = { spokenLen: 0 }, finalUsage = null;
+    var requestId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+    var controller = new AbortController();
+    var owner = { requestId: requestId, streamId: null, controller: controller };
+    _primeBrowserTurns.push(owner);
+    var startedAt = Date.now(), lastSignal = startedAt, idleSeconds = 0, waitingUser = false;
+    var lastState = 'starting', lastTool = '', progressTimer;
     setPrimeStreaming(true, null);
     var showUsage = function (usage) {
       if (!_hasBridgeUsage(usage)) return;
@@ -3067,8 +3114,14 @@
     };
     var showStatus = function (state, tool) {
       if (settled) return;
+      lastState = state || lastState; lastTool = tool || '';
+      lastSignal = Date.now();
       var labels = {
         started: 'in corso',
+        starting: 'avvio del modello\u2026',
+        stop_requested: 'interruzione richiesta\u2026',
+        stop_failed: 'Stop non confermato: puoi riprovare',
+        connection_retry: 'problema di connessione del modello: riconnessione in corso\u2026',
         queued: 'in coda\u2026',
         reasoning: 'sto ragionando\u2026',
         capacity_fallback: 'modello Prime saturo: recupero con Codex Luna\u2026',
@@ -3078,13 +3131,18 @@
         cancelled: 'interrotto'
       };
       var label = labels[state]; if (!label) return;
+      var seconds = Math.floor((Date.now() - startedAt) / 1000);
+      if (seconds > 0) label += ' \u00b7 ' + seconds + ' s';
       turnUi.updateStatus(label, !!reply);
       if (state === 'done' && bubble && !reply) bubble.textContent = 'Ricevuto.';
     };
     var finish = function (label) {
       if (settled) return;
       settled = true;
+      clearInterval(progressTimer);
+      _primeBrowserTurns = _primeBrowserTurns.filter(function (t) { return t !== owner; });
       try {
+        if (bubble && !reply) bubble.textContent = label || 'interrotto';
         if (bubble && reply) { bubble.removeAttribute('style'); renderRich(bubble, reply); }
         if (finalUsage) showUsage(finalUsage);
         flushSpokenSentences(reply, speech, true);
@@ -3113,6 +3171,7 @@
         bubble.removeAttribute('style');
         updatePrimeLiveText(ph, reply);
       }
+      lastState = 'responding'; lastSignal = Date.now(); idleSeconds = 0;
       turnUi.updateStatus('sta scrivendo\u2026', true);
       flushSpokenSentences(reply, speech, false); // legge le frasi gia' complete
       if (_sb && log) log.scrollTop = log.scrollHeight;
@@ -3120,6 +3179,8 @@
     var fail = function (text) {
       if (settled) return;
       settled = true;
+      clearInterval(progressTimer);
+      _primeBrowserTurns = _primeBrowserTurns.filter(function (t) { return t !== owner; });
       try {
         if (!reply && ph && ph.parentNode) ph.parentNode.removeChild(ph);
         turnUi.close();
@@ -3133,15 +3194,33 @@
         setOrb('idle', 0);
       }
     };
+    owner.finish = finish; owner.status = showStatus;
+    showStatus('starting');
+    progressTimer = setInterval(function () {
+      if (settled) return;
+      var silence = Math.floor((Date.now() - lastSignal) / 1000);
+      var total = Math.floor((Date.now() - startedAt) / 1000);
+      if (silence >= 45) turnUi.updateStatus('Connessione senza segnali da ' + silence + ' s. Stop disponibile.', !!reply);
+      else if (waitingUser) turnUi.updateStatus('In attesa della tua scelta \u00b7 ' + total + ' s', !!reply);
+      else if (idleSeconds >= 60) turnUi.updateStatus('Nessun progresso dal modello da ' + idleSeconds + ' s. Ultima attivit\u00e0: ' + (lastTool || lastState) + '. Stop disponibile.', !!reply);
+    }, 1000);
     var cfg = window.__HERMES_CONFIG__ || {};
     fetch(new URL('api/bridge/prime', document.baseURI || location.href).href, {
-      method: 'POST', credentials: 'same-origin',
+      method: 'POST', credentials: 'same-origin', signal: controller.signal,
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
-      body: JSON.stringify({ message: v, attachments: attachments })
+      body: JSON.stringify({ message: v, attachments: attachments, request_id: requestId })
     }).then(function (r) {
       return streamPrimeResponse(r, {
+        activity: function () { lastSignal = Date.now(); },
+        heartbeat: function (d) {
+          lastSignal = Date.now();
+          var p = d && d.progress;
+          if (p && p.state) { idleSeconds = p.idle_seconds || 0; waitingUser = !!p.waiting_user; showStatus(p.state, p.tool); }
+        },
         started: function (d) {
-          if (!d || !d.stream_id) return;
+          if (settled || !d || !d.stream_id) return;
+          owner.streamId = d.stream_id;
+          setPrimeStreaming(true, d.stream_id);
           stampPrimeNode(userNode, d.created_at, 'user');
           stampPrimeNode(ph, d.created_at, 'assistant');
           if (userNode) { userNode.setAttribute('data-cb-stream-id', d.stream_id); userNode.setAttribute('data-cb-role', 'user'); }
@@ -3150,11 +3229,15 @@
           if (ph && d.user_message_index != null) ph.setAttribute('data-cb-reply-to-index', String(d.user_message_index));
           repositionPrimeTaskCards();
         },
-        status: function (d) { showStatus(d && d.state, d && d.tool); },
+        status: function (d) {
+          idleSeconds = (d && d.idle_seconds) || 0; waitingUser = !!(d && d.waiting_user);
+          showStatus(d && d.state, d && d.tool);
+        },
         token: function (d) { showToken(d && d.text); },
         usage: function (d) { showUsage(d && d.usage); },
-        approval: function (d) { renderBridgeApprovalCard(d); },
+        approval: function (d) { if (!settled) renderBridgeApprovalCard(d); },
         clarify: function (d) {
+          if (settled) return;
           renderBridgeClarifyCard(d, {
             onResolved: function () {
               // The assistant placeholder was inserted before ask_user opened
@@ -3171,9 +3254,10 @@
             }
           });
         },
-        todo: function (d) { renderTodos(d); },
-        tool: function (d) { if (d && d.tool) renderToolCard(d.tool, d.summary || ''); },
+        todo: function (d) { if (!settled) renderTodos(d); },
+        tool: function (d) { if (!settled && d && d.tool) renderToolCard(d.tool, d.summary || ''); },
         done: function (d) {
+          if (settled) return;
           if (d && d.usage) showUsage(d.usage);
           if (ph && d) stampPrimeNode(ph, d.created_at, 'assistant');
           // The canonical final answer replaces interim process text.
@@ -3205,13 +3289,15 @@
     }).then(function () {
       // EOF without `done` proves only that the observer lost its stream.
       // The server may still be working; partial tokens are not a final answer.
-      if (!settled) fail('Connessione interrotta [transport_cut]. Il lavoro sul server può continuare: ricarica la chat per recuperarne lo stato.');
+      if (!settled) { fail('Connessione interrotta [transport_cut]. Il lavoro sul server può continuare: recupero lo stato automaticamente.'); startPrimeLivePolling(null); }
     })
       .catch(function (e) {
+        if (settled) return;
         // Ramo trasporto: la fetch/stream SSE e' caduta a livello di rete. Diamo
         // comunque il motivo (perche') invece del generico "non riesco a contattare".
         var why = (e && e.message) ? (' (' + e.message + ')') : '';
-        fail('Connessione con Hermes Prime interrotta [transport_cut]' + why + '. Il lavoro sul server può continuare: ricarica la chat per recuperarne lo stato.');
+        fail('Connessione con Hermes Prime interrotta [transport_cut]' + why + '. Il lavoro sul server può continuare: recupero lo stato automaticamente.');
+        startPrimeLivePolling(null);
       });
   }
 

@@ -67,7 +67,7 @@ def run_timed(monkeypatch, frames, *, pending=None, cancel=None):
         return result, streamed
     finally:
         assert runtime.revoked
-        assert len(stopped) == 1
+        assert len(stopped) == (0 if cancel is not None and cancel.is_set() else 1)
 
 
 def activity(seconds=600):
