@@ -18,6 +18,8 @@ def test_project_for_keyword_mapping():
     assert worklog.project_for("vending shaker proteici Up Level Sicilia") == "Vending Machine"
     assert worklog.project_for("trading smart money trap") == "Trading"
     assert worklog.project_for("ebook cucina Amazon KDP") == "Ebook Cucina Amazon"
+    assert worklog.project_for("sicilia-crm mappa clienti AI") == "CRM Sicilia"
+    assert worklog.project_for("Hermes CRM territoriale Sicilia integration") == "CRM Sicilia"
     assert worklog.project_for("Suno album rap") == "Altro"
     assert worklog.project_for("pay bills") == "Altro"
 
@@ -97,6 +99,7 @@ def test_tracked_project_payload_matches_widget_contract():
         ("Vending Machine", "Vending"),
         ("Trading", "Trading"),
         ("Ebook Cucina Amazon", "Ebook Amazon"),
+        ("CRM Sicilia", "CRM Sicilia"),
     ]
     js = (Path(__file__).parents[1] / "static" / "command_bridge.js").read_text(encoding="utf-8")
     assert "data.tracked_projects" in js

@@ -51,6 +51,16 @@ PROJECTS = (
         "keywords": ("ebook cucina amazon", "ebook amazon", "ricettario amazon", "amazon kdp", "kdp"),
         "tracking_pattern": r"\b(ebook cucina amazon|ebook amazon|ricettario amazon|amazon kdp|kdp)\b",
     },
+    {
+        "id": "sicilia-crm",
+        "name": "CRM Sicilia",
+        "counter_label": "CRM Sicilia",
+        "priority": 2,
+        "app_path": "/static/sicilia_crm/index.html",
+        "stem_keywords": ("crm territoriale sicilia", "sicilia crm", "sicilia-crm", "crm sicilia"),
+        "keywords": ("crm territoriale sicilia", "sicilia crm", "sicilia-crm", "crm sicilia", "crm contatti mappa"),
+        "tracking_pattern": r"\b(sicilia[- ]crm|crm(?: territoriale)? sicilia|crm contatti mappa)\b",
+    },
 )
 
 PROJECT_BY_ID = {project["id"]: project for project in PROJECTS}
@@ -58,6 +68,7 @@ PROJECT_BY_ID = {project["id"]: project for project in PROJECTS}
 # Specific business lines must win before broader VisionBuilts keywords such as
 # "ebook" and "console". Hermes stays last because its vocabulary is broad.
 ATTRIBUTION_ORDER = (
+    "sicilia-crm",
     "vending-machine",
     "trading",
     "ebook-cucina-amazon",
@@ -69,6 +80,7 @@ ATTRIBUTION_ORDER = (
 # mentioned both. Keep that invariant while letting the three specific new
 # businesses win before the generic VisionBuilts "ebook" keyword.
 TRACKING_ATTRIBUTION_ORDER = (
+    "sicilia-crm",
     "vending-machine",
     "trading",
     "ebook-cucina-amazon",

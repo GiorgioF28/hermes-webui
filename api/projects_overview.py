@@ -1,7 +1,7 @@
 """Per-project overview for the Command Bridge "Projects Strip".
 
 Reads project notes from ``<vault>/01-Projects/*.md`` (direct fs) and rolls them
-up into the five configured Command Bridge family cards. Each single note in
+up into the configured Command Bridge family cards. Each single note in
 01-Projects is a *sub-project* of one family; the card aggregates them.
 
 For each family the payload returns:
@@ -295,6 +295,7 @@ def _build_families(vault: Path, project_notes, stem_map) -> list[dict]:
         families.append({
             "id": fid,
             "name": fam["name"],
+            "app_path": fam.get("app_path") or "",
             "primary_path": _rel(primary, vault) if primary else "",
             "children": children,
             "tasks": tasks,

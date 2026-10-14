@@ -79,6 +79,7 @@ def test_command_bridge_family_cards_use_exact_tracked_set_and_clients(tmp_path)
         "vending-machine",
         "trading",
         "ebook-cucina-amazon",
+        "sicilia-crm",
     ]
     families = {row["id"]: row for row in family_rows}
 
@@ -91,3 +92,23 @@ def test_command_bridge_family_cards_use_exact_tracked_set_and_clients(tmp_path)
     task = families["visionbuilts"]["tasks"][0]
     assert task["subproject_id"] == "01-projects-visionbuilts-ebook-platform"
     assert task["subproject"] == "VisionBuilts Ebook Platform"
+
+
+def test_sicilia_crm_has_own_card_and_keeps_instagram_crm_separate(tmp_path):
+    v = _vault(tmp_path)
+    (v / "01-Projects" / "CRM territoriale Sicilia.md").write_text(
+        "# CRM territoriale Sicilia\n## Next\n- [ ] Provare inserimento cliente\n",
+        encoding="utf-8",
+    )
+    (v / "03-Areas" / "CRM territoriale Sicilia AI.md").write_text(
+        "- [ ] CRM territoriale Sicilia: verificare GPS\n", encoding="utf-8",
+    )
+    families = {f["id"]: f for f in projects_overview.build_projects_overview(v)["families"]}
+    crm = families["sicilia-crm"]
+    assert crm["app_path"] == "/static/sicilia_crm/index.html"
+    assert crm["primary_path"] == "01-Projects/CRM territoriale Sicilia.md"
+    assert {t["text"] for t in crm["tasks"]} == {
+        "Provare inserimento cliente", "CRM territoriale Sicilia: verificare GPS",
+    }
+    assert projects_overview._family_for_text("CRM instagram console") == "visionbuilts"
+    assert families["visionbuilts"]["app_path"] == ""

@@ -617,7 +617,8 @@
 '.cb-drag{flex:0 0 auto;color:var(--cb-faint);font-size:15px;line-height:1;letter-spacing:1px;cursor:grab;padding:2px 2px 6px;opacity:.55;transition:opacity .15s,color .15s;}',
 '.cb-card:hover .cb-drag{opacity:.95;color:var(--cb-accent);}',
 '.cb-subs{display:flex;flex-wrap:wrap;gap:6px;margin-top:13px;}',
-'.cb-sub{font-family:var(--cb-mono);font-size:10.5px;color:var(--cb-text);border:1px solid var(--cb-line);border-radius:999px;padding:4px 10px;background:rgba(255,255,255,.03);cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:border-color .15s,background .15s,color .15s;}',
+'.cb-sub,.cb-app-launch{font-family:var(--cb-mono);font-size:10.5px;color:var(--cb-text);border:1px solid var(--cb-line);border-radius:999px;padding:4px 10px;background:rgba(255,255,255,.03);cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:border-color .15s,background .15s,color .15s;}',
+'.cb-app-launch{display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;text-decoration:none;margin-top:10px;padding:8px 14px;}',
 '.cb-sub:hover{border-color:rgba(255,138,61,.55);background:rgba(255,138,61,.08);color:#fff;}',
 '.cb-sub.cb-active{border-color:var(--cb-accent);background:rgba(255,106,0,.14);color:#fff;}',
 '.cb-task[hidden]{display:none;}',
@@ -3433,6 +3434,12 @@
     }
   }
 
+  function projectAppHtml(family) {
+    var path = String(family.app_path || '');
+    if (!/^\/static\/[a-z0-9_\/-]+\.html$/.test(path)) return '';
+    return '<a class="cb-app-launch" href="' + esc(path) + '" target="_blank" rel="noopener" aria-label="Apri ' + esc(family.name) + '">Apri app</a>';
+  }
+
   function renderFamiliesV3(grid, families) {
     var order = loadProjOrder();
     families = families.slice().sort(function (a, b) {
@@ -3455,6 +3462,7 @@
             '<span class="cb-drag" title="Tieni premuto e trascina per riordinare" aria-hidden="true">::</span>' +
           '</div>' +
           '<div class="cb-subs">' + subs + '</div>' +
+          projectAppHtml(f) +
           '<button type="button" class="cb-sub cb-low-toggle">Espandi card</button>' +
           '<div class="cb-card-block"><div class="cb-block-h">Latest changes</div>' + latestHtml(f.latest) + '</div>' +
           clientsHtml(f.clients_active) +
