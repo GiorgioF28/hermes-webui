@@ -112,7 +112,9 @@ for pending-owner protection, Claude client rotation, rollback and state layers.
       updates.py           Self-update check and release notes
       upload.py            Multipart parser, file upload handler
       workspace.py         File ops: list_dir, read_file_content, git detection, workspace helpers
+      sicilia_crm.py       Optional personal CRM API; SQLite under STATE_DIR and server-side AI drafts
     static/
+      sicilia_crm/         Standalone territorial CRM page (HTML, CSS, vanilla JS)
       index.html           HTML template
       style.css            All CSS incl. mobile responsive, themes + skins, KaTeX
       ui.js                DOM helpers, renderMd, tool cards, context indicator, file tree

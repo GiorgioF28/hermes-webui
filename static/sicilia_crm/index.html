@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>CRM territoriale Sicilia</title>
+  <link rel="stylesheet" href="app.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">S</span><div><h1>CRM Sicilia</h1><p>Registro personale di visite</p></div></div>
+      <div class="top-actions"><span class="privacy-note">Dati inseriti esplicitamente</span><button class="button secondary" id="demo-toggle" type="button" aria-pressed="false">Mostra demo sintetica</button><button class="button primary" id="new-record" type="button">＋ Nuovo record</button></div>
+    </header>
+    <section class="workspace" aria-label="Mappa e record CRM">
+      <section class="map-panel" aria-label="Mappa clienti">
+        <div class="map-toolbar">
+          <div class="breadcrumbs"><span>Sicilia</span><span class="crumb-sep">/</span><span id="map-place">Esplora territorio</span></div>
+          <div class="map-controls"><button id="zoom-out" class="icon-button" type="button" aria-label="Riduci zoom">−</button><button id="zoom-in" class="icon-button" type="button" aria-label="Aumenta zoom">+</button><button id="center-map" class="icon-button locate" type="button" aria-label="Centra sulla Sicilia">⌖</button></div>
+        </div>
+        <div id="map" class="map" role="application" aria-label="Mappa interattiva. Trascina per spostarti, usa i controlli per lo zoom.">
+          <div id="map-world" class="map-world" aria-hidden="true"></div>
+          <svg id="map-markers" class="map-markers" aria-label="Record sulla mappa"></svg>
+          <div id="tile-status" class="tile-status" role="status">Caricamento cartografia…</div>
+          <div class="map-empty" id="map-empty"><span class="empty-pin">⌖</span><strong>La mappa si popola con i tuoi record</strong><span>Nessun cliente o residente viene dedotto dal territorio.</span></div>
+          <button id="map-add-pin" type="button" class="map-pin-action" hidden>Imposta pin dichiarato qui</button>
+          <div class="map-attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors</div>
+        </div>
+        <div class="map-footer"><span><i class="legend-dot"></i> Record salvati</span><span id="record-count">0 record</span><button id="open-ai" class="ai-launch" type="button"><span class="mini-orb" aria-hidden="true"></span> Apri AI</button></div>
+      </section>
+      <aside class="side-panel" aria-label="Elenco e dettaglio record">
+        <div class="side-heading"><div><h2>Attività registrate</h2><p id="list-caption">Dati personali · nessun filtro</p></div><button id="refresh" class="icon-button refresh" type="button" aria-label="Aggiorna elenco">↻</button></div>
+        <label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Cerca nome o indirizzo" autocomplete="off"></label>
+        <div class="record-list" id="record-list" aria-live="polite"></div>
+        <div id="record-detail" class="record-detail" hidden></div>
+        <div class="list-note"><span class="note-icon">i</span><span>La mappa mostra solo record inseriti. Non certifica visite o presenza.</span></div>
+      </aside>
+    </section>
+    <footer class="app-footer"><span id="connection-state">Connessione al CRM…</span><span>Posizione GPS solo su richiesta · OSM riceve l’area mappa visibile</span></footer>
+  </main>
+
+  <dialog id="record-dialog" class="dialog record-dialog" aria-labelledby="record-title">
+    <form id="record-form" method="dialog" novalidate>
+      <div class="dialog-head"><div><span class="eyebrow">NUOVO RECORD</span><h2 id="record-title">Registra contatto e visita</h2><p>Inserisci solo ciò che hai raccolto sul campo.</p></div><button class="icon-button close-dialog" type="button" aria-label="Chiudi">×</button></div>
+      <div class="form-scroll">
+        <div class="form-grid">
+          <label class="field full"><span>Nome <b>*</b></span><input name="name" maxlength="160" required autocomplete="name" placeholder="Nome della persona incontrata"></label>
+          <label class="field"><span>Recapito <small>facoltativo</small></span><input name="phone" maxlength="80" autocomplete="tel" placeholder="Telefono"></label>
+          <label class="field"><span>Indirizzo <small>facoltativo</small></span><input name="address" maxlength="240" placeholder="Via e numero civico"></label>
+          <label class="field"><span>Scala <small>facoltativo</small></span><input name="staircase" maxlength="60" placeholder="Es. A"></label>
+          <label class="field"><span>Interno <small>facoltativo</small></span><input name="unit" maxlength="60" placeholder="Es. 4"></label>
+          <label class="field"><span>Piano <small>detto o confermato</small></span><input name="floor" maxlength="60" placeholder="Lascia vuoto se sconosciuto"></label>
+          <label class="field"><span>Esito visita</span><select name="outcome"><option value="non_indicato">Non indicato</option><option value="assente">Assente</option><option value="non_interessato">Non interessato</option><option value="potenziale">Contatto potenziale</option><option value="altro">Altro</option></select></label>
+          <label class="field full"><span>Modello aspirapolvere <small>dato dichiarato, separato dall'esito</small></span><input name="vacuum_model" maxlength="120" placeholder="Facoltativo"></label>
+          <label class="field full"><span>Note <small>facoltative</small></span><textarea name="notes" rows="2" maxlength="2000" placeholder="Informazioni essenziali della visita"></textarea></label>
+          <div class="field full appointment-block"><div><strong>Appuntamento</strong><small>Solo se concordato · data, ora e fuso espliciti</small></div><label class="field"><span>Data e ora</span><input name="appointment_at" type="datetime-local"></label><span class="timezone-hint">Ora locale Europe/Rome; prima di salvare potrai rivederla.</span></div>
+          <section class="location-card full" aria-labelledby="location-title"><div class="location-heading"><div><strong id="location-title">Posizione</strong><small id="location-state">Nessuna posizione acquisita</small></div><button id="capture-location" class="button secondary small-button" type="button">⌖ Registra posizione</button></div>
+            <p id="gps-message" class="gps-message" role="status">La posizione viene acquisita una sola volta, solo dopo aver premuto il pulsante.</p>
+            <div id="captured-fix" class="captured-fix" hidden></div>
+            <div class="coordinates"><label class="field"><span>Latitudine pin</span><input name="pin_latitude" inputmode="decimal" placeholder="es. 37.50"></label><label class="field"><span>Longitudine pin</span><input name="pin_longitude" inputmode="decimal" placeholder="es. 14.20"></label></div>
+            <div id="declared-note" class="declared-note" hidden>Pin dichiarato o corretto manualmente. Il fix originale resta conservato separatamente.</div>
+            <label class="field correction-field" id="correction-field" hidden><span>Motivo correzione pin</span><input name="correction_reason" maxlength="240" placeholder="Facoltativo"></label>
+          </section>
+          <p id="form-error" class="form-error full" role="alert" hidden></p>
+        </div>
+      </div>
+      <div class="dialog-actions"><button class="button secondary cancel-dialog" type="button">Annulla</button><button class="button primary" id="save-record" type="submit">Salva record</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="ai-dialog" class="dialog ai-dialog" aria-labelledby="ai-title">
+    <section class="ai-content"><div class="dialog-head"><div><span class="eyebrow">BOZZA ASSISTITA</span><h2 id="ai-title">Aggiungi con AI</h2><p>La trascrizione viene inviata al provider configurato solo quando premi “Crea bozza”.</p></div><button class="icon-button close-ai" type="button" aria-label="Chiudi">×</button></div>
+      <div class="ai-orb-wrap"><div class="ai-orb" id="ai-orb" aria-hidden="true"><i></i><i></i><i></i><span></span></div><p id="mic-state" role="status">Microfono inattivo. Puoi scrivere qui sotto.</p></div>
+      <div class="ai-controls"><button class="button secondary" id="start-voice" type="button">♩ Parla</button><button class="button secondary" id="stop-voice" type="button" disabled>Termina ascolto</button><span id="speech-support"></span></div>
+      <label class="field transcript-field"><span>Trascrizione modificabile</span><textarea id="transcript" maxlength="2000" rows="5" placeholder="Es. Ho incontrato…"></textarea></label>
+      <p class="ai-disclaimer">L’AI prepara una bozza, non salva record. Controlla ogni campo e conferma con “Salva record”.</p>
+      <p id="ai-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button class="button secondary cancel-ai" type="button">Annulla</button><button class="button primary" id="make-draft" type="button">Crea bozza</button></div>
+    </section>
+  </dialog>
+</body>
+</html>

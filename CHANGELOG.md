@@ -8426,3 +8426,12 @@ Critical regressions introduced during the server.py split, caught by users and 
 # Unreleased
 
 - Hardens verified inbound CRM reply sync: preserves multi-segment Notion notes, normalizes Notion readback timestamps, reconciles applied retries, keeps equal-time distinct messages, closes SQLite handles, and adds a command-line consumer with a reviewed identity-to-page mapping and real Notion API client.
+
+## Unreleased — Sicilia territorial CRM MVP module
+
+- Add an optional standalone personal CRM page with an OpenStreetMap view,
+  explicit record entry, one-shot geolocation, and editable AI drafts that only
+  persist after a separate Save action. Store idempotent records in SQLite under
+  the WebUI state directory. Prime still owns the card and route-dispatch
+  integration; team roles, tenant isolation, offline sync, and retention remain
+  out of scope.

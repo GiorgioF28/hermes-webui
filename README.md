@@ -213,6 +213,11 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Right panel is drag-resizable
 - Syntax highlighted code preview (Prism.js)
 
+### CRM territoriale Sicilia (MVP personale)
+- Optional standalone mobile-first page at `/static/sicilia_crm/index.html`, with OpenStreetMap, explicit client records, one-shot geolocation and AI-assisted editable drafts.
+- Requires the CRM API dispatch integration documented in [`docs/sicilia-crm-mvp.md`](docs/sicilia-crm-mvp.md); it does not add a Prime card or modify Command Bridge.
+- Records are stored in SQLite under `STATE_DIR`; the feature is personal-only and does not implement team roles, tenant isolation, offline sync or retention controls.
+
 ### Voice input
 - Microphone button in the composer (Web Speech API)
 - Tap to record, tap again or send to stop
@@ -558,6 +563,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 **Start here**
 - [`docs/why-hermes.md`](docs/why-hermes.md) — why Hermes, the mental model, and a detailed comparison to Claude Code / Codex / OpenCode / Cursor
 - [`docs/onboarding.md`](docs/onboarding.md) — first-run wizard, provider setup, local model server Base URLs, and safe re-runs
+- [`docs/sicilia-crm-mvp.md`](docs/sicilia-crm-mvp.md) — optional personal Sicilia CRM module, API dispatch contract, storage, and verification
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — diagnostic flows for common failures (e.g. "AIAgent not available")
 
 **Using & customizing**

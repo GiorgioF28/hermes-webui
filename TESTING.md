@@ -1,5 +1,14 @@
 # Hermes Web UI: Browser Testing Plan
 
+Sicilia CRM module: `python -m pytest tests/test_sicilia_crm.py -q` exercises
+isolated SQLite persistence/idempotency, validation, corrected-pin provenance,
+AI draft allowlisting/no-write behavior, CSRF rejection, and handler fallthrough.
+`node --check static/sicilia_crm/app.js` checks the standalone client syntax.
+The tests use no server, browser, real GPS, live state, or external provider.
+For responsive screenshots and manual interaction, follow
+[`docs/sicilia-crm-mvp.md`](docs/sicilia-crm-mvp.md) after Prime's dispatcher
+integration is available.
+
 Prime capacity regression: `pytest tests/test_prime_codex_capacity.py
 tests/test_prime_capacity_ui.py tests/test_prime_codex_watchdog.py
 tests/test_prime_recap_fifo.py -q` checks bounded pre-action fallback, cancellation,
