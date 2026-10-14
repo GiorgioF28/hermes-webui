@@ -1,13 +1,15 @@
 # Hermes Web UI: Browser Testing Plan
 
-Sicilia CRM module: `python -m pytest tests/test_sicilia_crm.py -q` exercises
-isolated SQLite persistence/idempotency, validation, corrected-pin provenance,
-AI draft allowlisting/no-write behavior, CSRF rejection, and handler fallthrough.
-`node --check static/sicilia_crm/app.js` checks the standalone client syntax.
-The tests use no server, browser, real GPS, live state, or external provider.
-For responsive screenshots and manual interaction, follow
-[`docs/sicilia-crm-mvp.md`](docs/sicilia-crm-mvp.md) after Prime's dispatcher
-integration is available.
+Sicilia CRM: `python -m pytest tests/test_sicilia_crm.py
+tests/test_sicilia_crm_ui.py tests/test_sicilia_crm_dispatch.py
+tests/test_sicilia_crm_http.py tests/test_sicilia_crm_card.py
+tests/test_projects_overview.py tests/test_worklog.py -q` covers temporary SQLite,
+AI draft/no-write behavior, request gates, real browser-to-API save/readback,
+lost acknowledgements, stale GPS/AI/save results, unknown coordinates and Rome
+daylight-saving ambiguity. Chromium runs at 1200/650/360 pixels with synthetic
+inputs; the bounded HTTP harness shuts down without launching `server.py`.
+No live state, physical GPS or external model is used. See
+[`docs/sicilia-crm-mvp.md`](docs/sicilia-crm-mvp.md) for operator verification.
 
 Prime capacity regression: `pytest tests/test_prime_codex_capacity.py
 tests/test_prime_capacity_ui.py tests/test_prime_codex_watchdog.py

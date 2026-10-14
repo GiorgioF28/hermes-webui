@@ -71,13 +71,13 @@
   </dialog>
 
   <dialog id="ai-dialog" class="dialog ai-dialog" aria-labelledby="ai-title">
-    <section class="ai-content"><div class="dialog-head"><div><span class="eyebrow">BOZZA ASSISTITA</span><h2 id="ai-title">Aggiungi con AI</h2><p>La trascrizione viene inviata al provider configurato solo quando premi “Crea bozza”.</p></div><button class="icon-button close-ai" type="button" aria-label="Chiudi">×</button></div>
+    <section class="ai-content"><div class="dialog-head"><div><span class="eyebrow">BOZZA ASSISTITA</span><h2 id="ai-title">Aggiungi con AI</h2><p>Premi “Conferma” per aprire la scheda precompilata.</p></div><button class="icon-button close-ai" type="button" aria-label="Chiudi">×</button></div>
       <div class="ai-orb-wrap"><div class="ai-orb" id="ai-orb" aria-hidden="true"><i></i><i></i><i></i><span></span></div><p id="mic-state" role="status">Microfono inattivo. Puoi scrivere qui sotto.</p></div>
       <div class="ai-controls"><button class="button secondary" id="start-voice" type="button">♩ Parla</button><button class="button secondary" id="stop-voice" type="button" disabled>Termina ascolto</button><span id="speech-support"></span></div>
       <label class="field transcript-field"><span>Trascrizione modificabile</span><textarea id="transcript" maxlength="2000" rows="5" placeholder="Es. Ho incontrato…"></textarea></label>
       <p class="ai-disclaimer">L’AI prepara una bozza, non salva record. Controlla ogni campo e conferma con “Salva record”.</p>
       <p id="ai-error" class="form-error" role="alert" hidden></p>
-      <div class="dialog-actions"><button class="button secondary cancel-ai" type="button">Annulla</button><button class="button primary" id="make-draft" type="button">Crea bozza</button></div>
+      <div class="dialog-actions"><button class="button secondary cancel-ai" type="button">Annulla</button><button class="button primary" id="make-draft" type="button">Conferma</button></div>
     </section>
   </dialog>
 </body>

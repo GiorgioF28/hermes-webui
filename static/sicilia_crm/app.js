@@ -7,7 +7,7 @@
   const world = $('#map-world');
   const markers = $('#map-markers');
   const state = { records: [], demo: false, selected: null, query: '', csrf: '', center: { lat: 37.45, lon: 14.05 }, zoom: 7,
-    drag: null, tilesFailed: false, pin: null, fix: null, recognition: null, transcript: '', pendingRequestId: null, saveFailed: false };
+    drag: null, tilesFailed: false, pin: null, fix: null, recognition: null, transcript: '', pendingRequestId: null, saveFailed: false, formGeneration: 0, aiGeneration: 0 };
   const fakeRecords = [
     { id: 'demo-1', name: 'Esempio Contatto A', address: 'Via dimostrativa 12 · Catania', outcome: 'potenziale', created_at: '2026-10-12T09:35:00Z', latitude: 37.5079, longitude: 15.0830, location_source: 'declared', phone: '', floor: '', staircase: '', unit: '', notes: 'Record sintetico illustrativo.', author: 'demo' },
     { id: 'demo-2', name: 'Esempio Contatto B', address: 'Indirizzo sintetico · Palermo', outcome: 'assente', created_at: '2026-10-10T14:10:00Z', latitude: 38.1157, longitude: 13.3615, location_source: 'declared', phone: '', floor: '', staircase: '', unit: '', notes: 'Record sintetico illustrativo.', author: 'demo' },
@@ -65,7 +65,7 @@
       });
     });
     markers.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
-    const pinRecords = visibleRecords().filter((r) => Number.isFinite(Number(r.pin_latitude ?? r.latitude)) && Number.isFinite(Number(r.pin_longitude ?? r.longitude)));
+    const pinRecords = visibleRecords().filter((r) => Number.isFinite(r.pin_latitude ?? r.latitude) && Number.isFinite(r.pin_longitude ?? r.longitude));
     markers.innerHTML = pinRecords.map((record, index) => {
       const p = project(Number(record.pin_latitude ?? record.latitude), Number(record.pin_longitude ?? record.longitude));
       const x = p.x - left;
@@ -101,7 +101,7 @@
     details.hidden = false;
     const pinLat = record.pin_latitude ?? record.latitude; const pinLon = record.pin_longitude ?? record.longitude;
     const originalFix = record.location_source === 'pin_correction' && record.captured_at && Number.isFinite(Number(record.latitude));
-    details.innerHTML = `<div class="detail-heading"><h3>Dettaglio record</h3><button class="detail-close" type="button">Chiudi</button></div><div class="detail-grid"><div class="detail-item"><small>Nome</small><span>${esc(record.name || '—')}</span></div><div class="detail-item"><small>Esito visita</small><span>${esc(outcomeLabel(record.outcome))}</span></div><div class="detail-item"><small>Recapito</small><span>${esc(record.phone || 'Non indicato')}</span></div><div class="detail-item"><small>Indirizzo</small><span>${esc(record.address || 'Non indicato')}</span></div><div class="detail-item"><small>Scala · interno · piano</small><span>${esc([record.staircase, record.unit, record.floor].filter(Boolean).join(' · ') || 'Non specificati')}</span></div><div class="detail-item"><small>Modello aspirapolvere</small><span>${esc(record.vacuum_model || 'Non indicato')}</span></div><div class="detail-item"><small>Posizione / pin</small><span>${Number.isFinite(Number(pinLat)) ? `${Number(pinLat).toFixed(5)}, ${Number(pinLon).toFixed(5)} · pin ${esc(record.location_source || 'non indicato')}${originalFix ? ` · fix originale ${Number(record.latitude).toFixed(5)}, ${Number(record.longitude).toFixed(5)}` : ''}` : 'Non acquisita'}</span></div><div class="detail-item"><small>Autore · salvato</small><span>${esc(record.author || '—')} · ${esc(relativeDate(record.created_at))}</span></div><div class="detail-item"><small>Appuntamento</small><span>${esc(record.appointment_at || 'Nessuno indicato')}</span></div><div class="detail-item"><small>Note</small><span>${esc(record.notes || 'Nessuna')}</span></div></div>`;
+    details.innerHTML = `<div class="detail-heading"><h3>Dettaglio record</h3><button class="detail-close" type="button">Chiudi</button></div><div class="detail-grid"><div class="detail-item"><small>Nome</small><span>${esc(record.name || '—')}</span></div><div class="detail-item"><small>Esito visita</small><span>${esc(outcomeLabel(record.outcome))}</span></div><div class="detail-item"><small>Recapito</small><span>${esc(record.phone || 'Non indicato')}</span></div><div class="detail-item"><small>Indirizzo</small><span>${esc(record.address || 'Non indicato')}</span></div><div class="detail-item"><small>Scala · interno · piano</small><span>${esc([record.staircase, record.unit, record.floor].filter(Boolean).join(' · ') || 'Non specificati')}</span></div><div class="detail-item"><small>Modello aspirapolvere</small><span>${esc(record.vacuum_model || 'Non indicato')}</span></div><div class="detail-item"><small>Posizione / pin</small><span>${Number.isFinite(pinLat) && Number.isFinite(pinLon) ? `${Number(pinLat).toFixed(5)}, ${Number(pinLon).toFixed(5)} · pin ${esc(record.location_source || 'non indicato')}${originalFix ? ` · fix originale ${Number(record.latitude).toFixed(5)}, ${Number(record.longitude).toFixed(5)}` : ''}` : 'Non acquisita'}</span></div><div class="detail-item"><small>Autore · salvato</small><span>${esc(record.author || '—')} · ${esc(relativeDate(record.created_at))}</span></div><div class="detail-item"><small>Appuntamento</small><span>${esc(record.appointment_at || 'Nessuno indicato')}</span></div><div class="detail-item"><small>Note</small><span>${esc(record.notes || 'Nessuna')}</span></div></div>`;
     details.querySelector('.detail-close').addEventListener('click', () => { state.selected = null; details.hidden = true; renderList(); });
   }
   function renderDetail() {
@@ -127,6 +127,7 @@
   const formDialog = $('#record-dialog');
   const form = $('#record-form');
   function resetForm() {
+    state.formGeneration += 1;
     form.reset();
     state.pin = null;
     state.fix = null;
@@ -138,13 +139,31 @@
     $('#location-state').textContent = 'Nessuna posizione acquisita';
     $('#gps-message').textContent = 'La posizione viene acquisita una sola volta, solo dopo aver premuto il pulsante.';
     $('#form-error').hidden = true;
+    $('#capture-location').disabled = false;
+    $('#save-record').disabled = false; $('#save-record').textContent = 'Salva record';
+  }
+  function requestId() {
+    if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+    const hex = [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+  }
+  function romeLocal(iso) {
+    const date = new Date(iso);
+    if (!Number.isFinite(date.getTime())) return '';
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(date).map(part => [part.type, part.value]));
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
   }
   function openRecord(draft = null) {
     resetForm();
-    state.pendingRequestId = crypto.randomUUID();
+    state.pendingRequestId = requestId();
     if (draft) Object.entries(draft).forEach(([key, value]) => {
       const field = form.elements.namedItem(key);
-      if (field && typeof value === 'string') field.value = value;
+      if (field && typeof value === 'string') field.value = key === 'appointment_at' && value ? romeLocal(value) : value;
     });
     formDialog.showModal();
   }
@@ -189,8 +208,12 @@
     const message = $('#gps-message');
     if (!window.isSecureContext) { message.textContent = 'Geolocalizzazione non disponibile: serve un contesto HTTPS o localhost. Puoi inserire le coordinate manualmente.'; return; }
     if (!navigator.geolocation) { message.textContent = 'Questo browser non supporta la geolocalizzazione. Puoi inserire le coordinate manualmente.'; return; }
+    const generation = state.formGeneration;
+    $('#capture-location').disabled = true;
     message.textContent = 'Richiesta posizione in corso…';
     navigator.geolocation.getCurrentPosition((position) => {
+      if (generation !== state.formGeneration || !formDialog.open) return;
+      $('#capture-location').disabled = false;
       state.fix = { latitude: position.coords.latitude, longitude: position.coords.longitude,
         accuracy_m: position.coords.accuracy, altitude_m: Number.isFinite(position.coords.altitude) ? position.coords.altitude : null,
         altitude_accuracy_m: Number.isFinite(position.coords.altitudeAccuracy) ? position.coords.altitudeAccuracy : null,
@@ -201,6 +224,8 @@
       $('#captured-fix').textContent = `Fix originale: ${state.fix.latitude.toFixed(6)}, ${state.fix.longitude.toFixed(6)} · precisione ${Math.round(state.fix.accuracy_m)} m · ${state.fix.altitude_m === null ? 'altitudine non disponibile' : `altitudine ${Math.round(state.fix.altitude_m)} m (non usata per dedurre il piano)`}`;
       message.textContent = 'Posizione acquisita una volta. Nessun tracciamento attivo.';
     }, (error) => {
+      if (generation !== state.formGeneration || !formDialog.open) return;
+      $('#capture-location').disabled = false;
       const messages = { 1: 'Permesso posizione negato. Puoi inserire un pin dichiarato o continuare senza posizione.', 2: 'Posizione non disponibile. Puoi inserire un pin dichiarato o continuare senza posizione.', 3: 'Tempo scaduto durante la richiesta posizione. Riprova oppure inserisci le coordinate manualmente.' };
       message.textContent = messages[error.code] || 'Geolocalizzazione non riuscita. Puoi inserire la posizione manualmente.';
     }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
@@ -208,26 +233,31 @@
 
   function romeIso(localValue) {
     if (!localValue) return '';
-    const [datePart, timePart] = localValue.split('T');
-    const probe = new Date(`${datePart}T${timePart}:00Z`);
-    const offsetText = new Intl.DateTimeFormat('en', { timeZone: 'Europe/Rome', timeZoneName: 'shortOffset' }).formatToParts(probe).find((p) => p.type === 'timeZoneName')?.value || 'GMT+1';
-    const match = offsetText.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
-    const offset = match ? `${match[1]}${String(match[2]).padStart(2, '0')}:${match[3] || '00'}` : '+01:00';
-    return `${datePart}T${timePart}:00${offset}`;
+    const candidates = ['+01:00', '+02:00'].map(offset => `${localValue}:00${offset}`)
+      .filter(iso => romeLocal(iso) === localValue);
+    if (candidates.length !== 1) throw new Error('Questo orario coincide con il cambio dell’ora: scegli un orario non ambiguo.');
+    return candidates[0];
   }
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    const generation = state.formGeneration;
     const errorBox = $('#form-error');
     errorBox.hidden = true;
     const save = $('#save-record'); save.disabled = true; save.textContent = 'Salvataggio…';
     const data = new FormData(form);
+    let appointmentAt;
+    try { appointmentAt = romeIso(data.get('appointment_at')); }
+    catch (error) {
+      errorBox.textContent = error.message; errorBox.hidden = false;
+      save.disabled = false; save.textContent = 'Salva record'; return;
+    }
     const pinLat = data.get('pin_latitude') ? Number(String(data.get('pin_latitude')).replace(',', '.')) : null;
     const pinLon = data.get('pin_longitude') ? Number(String(data.get('pin_longitude')).replace(',', '.')) : null;
     const isCorrected = !!(state.fix && state.pin && (state.pin.lat !== state.fix.latitude || state.pin.lon !== state.fix.longitude));
     const payload = {
-      client_request_id: state.pendingRequestId || crypto.randomUUID(), name: data.get('name'), phone: data.get('phone'), address: data.get('address'),
+      client_request_id: state.pendingRequestId || requestId(), name: data.get('name'), phone: data.get('phone'), address: data.get('address'),
       staircase: data.get('staircase'), unit: data.get('unit'), floor: data.get('floor'), outcome: data.get('outcome'),
-      vacuum_model: data.get('vacuum_model'), notes: data.get('notes'), appointment_at: romeIso(data.get('appointment_at')),
+      vacuum_model: data.get('vacuum_model'), notes: data.get('notes'), appointment_at: appointmentAt,
       location_source: state.fix ? (isCorrected ? 'pin_correction' : 'device') : (state.pin ? 'declared' : 'none'),
       latitude: state.fix?.latitude ?? pinLat, longitude: state.fix?.longitude ?? pinLon,
       accuracy_m: state.fix?.accuracy_m ?? null, altitude_m: state.fix?.altitude_m ?? null,
@@ -240,28 +270,38 @@
       const result = await api('/api/sicilia-crm/records', { method: 'POST', body: JSON.stringify(payload) });
       const previous = state.records.find((record) => record.id === result.record.id);
       if (!previous) state.records.unshift(result.record);
-      state.selected = result.record.id;
-      state.saveFailed = false;
-      formDialog.close();
+      if (generation === state.formGeneration) {
+        state.selected = result.record.id;
+        state.saveFailed = false;
+        formDialog.close();
+      }
       renderList();
     } catch (error) {
+      if (generation !== state.formGeneration) return;
       state.saveFailed = true;
       errorBox.textContent = `Salvataggio non riuscito: ${error.message}. Il modulo resta aperto; puoi riprovare senza perdere i dati.`;
       errorBox.hidden = false;
-    } finally { save.disabled = false; save.textContent = 'Salva record'; }
+    } finally {
+      if (generation === state.formGeneration) { save.disabled = false; save.textContent = 'Salva record'; }
+    }
   });
 
   const aiDialog = $('#ai-dialog');
-  $('#open-ai').addEventListener('click', () => aiDialog.showModal());
+  $('#open-ai').addEventListener('click', () => { state.aiGeneration += 1; aiDialog.showModal(); });
   $('.close-ai').addEventListener('click', () => stopSpeech(true));
   $('.cancel-ai').addEventListener('click', () => stopSpeech(true));
-  aiDialog.addEventListener('close', () => { stopSpeech(true); $('#ai-error').hidden = true; });
+  aiDialog.addEventListener('close', () => {
+    state.aiGeneration += 1;
+    stopSpeech(true); $('#ai-error').hidden = true;
+    $('#make-draft').disabled = false; $('#make-draft').textContent = 'Conferma';
+  });
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (SpeechRecognition) {
     const recognition = new SpeechRecognition(); state.recognition = recognition;
     recognition.lang = 'it-IT'; recognition.interimResults = true; recognition.continuous = true;
     recognition.onstart = () => { $('#mic-state').textContent = 'Registrazione attiva · parla ora'; $('#ai-orb').classList.add('listening'); $('#start-voice').disabled = true; $('#stop-voice').disabled = false; };
     recognition.onresult = (event) => {
+      if (!aiDialog.open) return;
       let value = $('#transcript').value;
       const start = Number($('#transcript').dataset.voiceStart || value.length);
       value = value.slice(0, start);
@@ -282,6 +322,7 @@
     if (close && aiDialog.open) aiDialog.close();
   }
   $('#make-draft').addEventListener('click', async () => {
+    const generation = state.aiGeneration;
     const text = $('#transcript').value.trim();
     const error = $('#ai-error'); error.hidden = true;
     if (!text) { error.textContent = 'Scrivi o trascrivi i dettagli prima di creare la bozza.'; error.hidden = false; return; }
@@ -289,6 +330,7 @@
     const button = $('#make-draft'); button.disabled = true; button.textContent = 'Elaborazione…';
     try {
       const result = await api('/api/sicilia-crm/drafts', { method: 'POST', body: JSON.stringify({ transcript: text }) });
+      if (generation !== state.aiGeneration || !aiDialog.open) return;
       aiDialog.close();
       openRecord(result.draft);
       if (result.draft.clarification) {
@@ -296,9 +338,12 @@
         $('#form-error').hidden = false;
       }
     } catch (failure) {
+      if (generation !== state.aiGeneration || !aiDialog.open) return;
       error.textContent = `AI non disponibile: ${failure.message}. Il testo resta qui; puoi copiare i dati nel modulo manuale.`;
       error.hidden = false;
-    } finally { button.disabled = false; button.textContent = 'Crea bozza'; }
+    } finally {
+      if (generation === state.aiGeneration) { button.disabled = false; button.textContent = 'Conferma'; }
+    }
   });
 
   $('#search').addEventListener('input', (event) => { state.query = event.target.value; renderList(); });

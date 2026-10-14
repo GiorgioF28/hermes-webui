@@ -22,24 +22,13 @@ conservazione non sono stati valutati.
   IP, ma non inviano record CRM. La pagina lo segnala; `referrerpolicy="origin"`
   evita di includere path o query personali nel Referer.
 
-## Dispatch da integrare in `api/routes.py`
+## Card e API
 
-Il modulo resta isolato dal Command Bridge. Il dispatcher condiviso deve
-instradare le richieste CRM alle funzioni dedicate e mantenere il middleware
-esistente:
-
-```python
-# In handle_get(handler, parsed), prima del fallback finale `return False`:
-if parsed.path.startswith("/api/sicilia-crm/"):
-    from api.sicilia_crm import handle_get as handle_sicilia_crm_get
-    return handle_sicilia_crm_get(handler, parsed)
-
-# In handle_post(handler, parsed), solo dopo _authorize_request(handler),
-# _check_csrf(handler) e la lettura JSON in `body`:
-if parsed.path.startswith("/api/sicilia-crm/"):
-    from api.sicilia_crm import handle_post as handle_sicilia_crm_post
-    return handle_sicilia_crm_post(handler, parsed, body)
-```
+La card **CRM Sicilia**, registrata in `api/command_bridge_projects.py`, apre
+`/static/sicilia_crm/index.html` in una nuova scheda senza inviare messaggi Prime.
+`api/routes.py` instrada GET e POST `/api/sicilia-crm/` alle funzioni dedicate
+dopo i controlli esistenti di identità e, sulle POST, CSRF e lettura JSON.
+I percorsi CRM sconosciuti restituiscono 404.
 
 Entrambi gli handler restituiscono `False` per endpoint non propri. Non creare
 una route pubblica, non saltare `check_auth`, autorizzazione Hermes o CSRF. Il
@@ -50,9 +39,10 @@ modulo verifica anche CSRF sulle POST come difesa in profondità. Endpoint:
   `client_request_id` UUID e risponde `{record}` (201).
 - `POST /api/sicilia-crm/drafts` → `{draft}`; non scrive record.
 
-La UI è `/static/sicilia_crm/index.html`; una card Prime può aprire direttamente
-questa pagina. Prime deve integrare route e card nel branch operativo. Il
-presente worktree non modifica `api/routes.py`, card o bridge.
+La card cambia soltanto registro progetti, payload overview e DOM delle card;
+non cambia pianeta, voce, transcript o delega asincrona Prime. Le API scrivono
+solo il database CRM dedicato. Per rimuovere la funzione, togliere card e dispatch;
+il database non viene eliminato.
 
 ## Dati e confini
 
@@ -62,10 +52,13 @@ precisione, timestamp e altitudine facoltativa; `declared_latitude`/
 `declared_longitude` conservano il pin corretto/dichiarato. La mappa usa il pin
 dichiarato quando presente e altrimenti il fix. Altitudine non determina piano.
 L'appuntamento accetta solo ISO 8601 con timezone esplicito, costruito per
-Europe/Rome.
+Europe/Rome. La bozza AI conserva l'orario locale nella scheda; gli orari ambigui
+o inesistenti al cambio dell'ora richiedono correzione prima del salvataggio.
+Una risposta GPS, AI o di salvataggio tardiva non modifica una nuova scheda.
+Il retry della stessa richiesta conserva l'UUID, evitando record duplicati.
 
 L'AI riusa l'adapter server-side `api.intake_agent._run_hermes_agent`, senza
-toolset, chat Prime, transcript condiviso o scritture. Le risposte devono essere
+toolset, chat Prime, transcript condiviso o scritture CRM. Le risposte devono essere
 JSON e passare una allowlist/validazione; output ambiguo o non conforme mostra
 errore, lasciando disponibile l'inserimento manuale. Il provider configurato e
 la rete non sono garantiti: la UI non simula l'AI.
@@ -73,11 +66,15 @@ la rete non sono garantiti: la UI non simula l'AI.
 ## Verifica
 
 ```powershell
-python -m pytest tests/test_sicilia_crm.py -q
+python -m pytest tests/test_sicilia_crm.py tests/test_sicilia_crm_ui.py tests/test_sicilia_crm_dispatch.py tests/test_sicilia_crm_http.py tests/test_sicilia_crm_card.py tests/test_projects_overview.py tests/test_worklog.py -q
 node --check static/sicilia_crm/app.js
 git diff --check
 ```
 
-Test backend isolati usano SQLite temporaneo e callback AI finta; non contattano
-provider o server Hermes. Verificare poi gli screenshot desktop 1200, narrow 650
-e mobile 360. Un test browser non equivale a GPS fisico o provider reale.
+I test usano SQLite temporaneo e risposte AI sintetiche. Il test HTTP collega
+browser, dispatcher e database reali con un server di prova effimero, chiuso a
+fine test; non avvia Hermes. Le prove UI coprono 1200/650/360 pixel, errori,
+permessi negati e risultati tardivi. Un test browser non equivale a GPS fisico
+o provider reale. Dopo attivazione decisa dall'operatore, verificare sul telefono
+HTTPS: posizione e precisione, voce se supportata, Conferma → scheda → Salva e
+rilettura. Non dedurre il piano dall'altitudine; può rimanere sconosciuto.

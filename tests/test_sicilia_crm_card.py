@@ -5,7 +5,9 @@ import subprocess
 
 import pytest
 
-from tests.test_prime_brief_dedup import browser  # noqa: F401
+from tests import test_prime_brief_dedup as browser_support
+
+browser = browser_support.browser
 
 ROOT = Path(__file__).resolve().parents[1]
 

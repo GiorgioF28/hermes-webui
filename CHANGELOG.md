@@ -8432,6 +8432,8 @@ Critical regressions introduced during the server.py split, caught by users and 
 - Add an optional standalone personal CRM page with an OpenStreetMap view,
   explicit record entry, one-shot geolocation, and editable AI drafts that only
   persist after a separate Save action. Store idempotent records in SQLite under
-  the WebUI state directory. Prime still owns the card and route-dispatch
-  integration; team roles, tenant isolation, offline sync, and retention remain
-  out of scope.
+  the WebUI state directory. Launch it from the dedicated CRM Sicilia card in
+  the Command Bridge, with API dispatch behind the existing request gates.
+  Preserve appointment time in AI drafts, discard stale GPS/AI/form results,
+  keep missing coordinates unknown, and reject ambiguous daylight-saving times.
+  Team roles, tenant isolation, offline sync, and retention remain out of scope.

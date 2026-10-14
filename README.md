@@ -215,7 +215,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 
 ### CRM territoriale Sicilia (MVP personale)
 - Optional standalone mobile-first page at `/static/sicilia_crm/index.html`, with OpenStreetMap, explicit client records, one-shot geolocation and AI-assisted editable drafts.
-- Requires the CRM API dispatch integration documented in [`docs/sicilia-crm-mvp.md`](docs/sicilia-crm-mvp.md); it does not add a Prime card or modify Command Bridge.
+- Open **CRM Sicilia → Apri app** in the Command Bridge project strip. Its dedicated API shares WebUI authentication and CSRF controls; see [`docs/sicilia-crm-mvp.md`](docs/sicilia-crm-mvp.md).
 - Records are stored in SQLite under `STATE_DIR`; the feature is personal-only and does not implement team roles, tenant isolation, offline sync or retention controls.
 
 ### Voice input
