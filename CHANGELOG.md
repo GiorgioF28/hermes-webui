@@ -5,8 +5,9 @@
 - Prime accepts raster images, PDF, TXT, MD, CSV, JSON, DOCX, XLSX and PPTX
   through the authenticated composer upload. Text extraction stays bounded;
   binary documents remain references unless a compatible reader is available.
-- Codex Prime can register a produced workspace/inbox file with
-  `prime_deliver_file`. Its opaque, session-scoped artifact ID, digest and
+- Prime Codex and Claude can register a produced workspace/inbox file, or an
+  exact path named in a completed delegation result, with `prime_deliver_file`.
+  Its opaque, session-scoped artifact ID, digest and
   transcript card survive refresh. Downloads require normal WebUI auth and
   use sandbox headers for inline previews; HTML/JS is never executed in the
   privileged chat origin. ZIP site/app deliveries require instructions.
