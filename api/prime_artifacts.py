@@ -6,7 +6,7 @@ import json
 import mimetypes
 import re
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from api.config import MAX_UPLOAD_BYTES
 from api.upload import _looks_like_secret_name, _session_attachment_dir
@@ -28,12 +28,46 @@ def _public(row: dict) -> dict:
     return {key: row[key] for key in ("id", "name", "size", "mime", "sha256") if key in row}
 
 
+def _private_path_component(value: str) -> bool:
+    return value.lower() in {".git", ".ssh", ".hermes"} or _looks_like_secret_name(value)
+
+
+def _validate_zip(path: Path) -> None:
+    import stat
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = []
+            for info in archive.infolist():
+                member = info.filename.replace("\\", "/")
+                posix = PurePosixPath(member)
+                windows = PureWindowsPath(info.filename)
+                parts = tuple(part for part in posix.parts if part not in {"", "."})
+                if (not member or posix.is_absolute() or windows.is_absolute() or windows.drive
+                        or ".." in parts or any(_private_path_component(part) for part in parts)):
+                    raise ValueError("ZIP contains an unsafe path or private file")
+                mode = (info.external_attr >> 16) & 0o170000
+                if stat.S_ISLNK(mode):
+                    raise ValueError("ZIP symbolic links are not supported")
+                names.append(member)
+            if not any(PurePosixPath(part).name.lower().startswith(("readme", "instructions", "istruzioni"))
+                       for part in names):
+                raise ValueError("A site/app ZIP must include README or instructions")
+    except zipfile.BadZipFile:
+        raise ValueError("The ZIP artifact is invalid") from None
+
+
 def register_artifact(session_id: str, path: str, *, name: str | None = None) -> dict:
     """Register a real, bounded file in the Prime workspace or private inbox."""
     from api.routes import _prime_workspace_from_settings
     from api.prime_session_store import get_prime_session_store
 
     source = Path(path).expanduser().absolute()
+    # Check the supplied spelling too: resolving first could hide a private
+    # source component behind an alias or a symlink target.
+    if any(_private_path_component(part) for part in re.split(r"[\\/]", str(path))):
+        raise ValueError("Credential or private files cannot be delivered")
     if source.is_symlink() or not source.is_file():
         raise ValueError("Artifact is missing or is a symlink")
     resolved = source.resolve(strict=True)
@@ -59,7 +93,7 @@ def register_artifact(session_id: str, path: str, *, name: str | None = None) ->
             delegated_file = False
     if not trusted_workspace_file and not delegated_file:
         raise ValueError("Artifact must be inside this Prime workspace or attachment inbox")
-    if {part.lower() for part in resolved.parts} & {".git", ".ssh", ".hermes"}:
+    if any(_private_path_component(part) for part in resolved.parts):
         raise ValueError("Private configuration paths cannot be delivered")
     if resolved.stat().st_size > MAX_UPLOAD_BYTES:
         raise ValueError("Artifact exceeds the configured upload size limit")
@@ -68,30 +102,13 @@ def register_artifact(session_id: str, path: str, *, name: str | None = None) ->
         raise ValueError("Invalid artifact name")
     if _looks_like_secret_name(safe):
         raise ValueError("Credential or key files cannot be delivered")
+    if resolved.suffix.lower() == ".zip" or safe.lower().endswith(".zip"):
+        _validate_zip(resolved)
     data = resolved.read_bytes()
     artifact_id = uuid.uuid4().hex
     artifact = {"id": artifact_id, "name": safe, "size": len(data),
                 "mime": mimetypes.guess_type(safe)[0] or "application/octet-stream",
                 "sha256": hashlib.sha256(data).hexdigest(), "source_path": str(resolved)}
-    if safe.lower().endswith(".zip"):
-        import zipfile
-        try:
-            with zipfile.ZipFile(resolved) as archive:
-                names = []
-                for info in archive.infolist():
-                    member = info.filename.replace("\\", "/")
-                    parts = Path(member).parts
-                    if member.startswith("/") or ".." in parts or any(_looks_like_secret_name(part) for part in parts):
-                        raise ValueError("ZIP contains an unsafe path or private file")
-                    mode = (info.external_attr >> 16) & 0o170000
-                    if mode == 0o120000:
-                        raise ValueError("ZIP symbolic links are not supported")
-                    names.append(member)
-                if not any(Path(part).name.lower().startswith(("readme", "instructions", "istruzioni"))
-                           for part in names):
-                    raise ValueError("A site/app ZIP must include README or instructions")
-        except zipfile.BadZipFile:
-            raise ValueError("The ZIP artifact is invalid") from None
     target = _registry(sid)
     target.parent.mkdir(parents=True, exist_ok=True)
     prior = next((row for row in _read(sid) if row.get("source_path") == str(resolved)

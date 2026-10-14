@@ -111,9 +111,9 @@ def _sanitize_upload_name(filename: str) -> str:
 
 
 def _looks_like_secret_name(filename: str) -> bool:
-    name = Path(filename).name.lower()
+    name = Path(filename.replace('\\', '/')).name.rstrip(' .').lower()
     return (name in {"auth.json", "credentials.json", "secrets.json", "id_rsa", "id_ed25519"}
-            or name.startswith(".env") or name.startswith("secrets.")
+            or name == ".env" or name.endswith(".env") or name.startswith(".env.") or name.startswith("secrets.")
             or name.endswith((".pem", ".p12", ".pfx", ".key")))
 
 
@@ -353,6 +353,8 @@ def handle_prime_upload(handler):
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _looks_like_secret_name(filename):
+            return j(handler, {'error': 'File di credenziali o chiavi non supportato'}, status=400)
         safe_name = _sanitize_upload_name(filename)
         if _looks_like_secret_name(safe_name):
             return j(handler, {'error': 'File di credenziali o chiavi non supportato'}, status=400)

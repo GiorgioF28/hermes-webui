@@ -37,6 +37,19 @@ def test_prime_upload_accepts_document_and_rejects_active_svg(tmp_path, monkeypa
     assert answers[-1][0] == 413
 
 
+@pytest.mark.parametrize("filename", ["auth.json", "auth.json ", "cloudflare.env", "service.prod.env", ".env"])
+def test_prime_upload_rejects_sensitive_source_names_without_copy(tmp_path, monkeypatch, filename):
+    from api import upload
+    from api.identity import HermesIdentity
+    monkeypatch.setattr(upload, "_attachment_root", lambda: tmp_path.resolve())
+    monkeypatch.setattr("api.identity.resolve_request_identity", lambda handler: HermesIdentity("giorgio", "prime-a"))
+    answers = []
+    monkeypatch.setattr(upload, "j", lambda handler, body, status=200: answers.append((status, body)))
+    upload.handle_prime_upload(_UploadHandler(filename, b"synthetic secret fixture"))
+    assert answers[-1][0] == 400
+    assert not list(tmp_path.rglob(filename))
+
+
 def test_registered_artifact_digest_download_and_transcript_persist(tmp_path, monkeypatch):
     from api import prime_artifacts, prime_session_store
     monkeypatch.setattr(prime_artifacts, "_session_attachment_dir", lambda sid: tmp_path / sid)
@@ -169,6 +182,87 @@ def test_site_zip_requires_readme_instructions(tmp_path, monkeypatch):
         zf.writestr("index.html", "<script>bad()</script>")
     with pytest.raises(ValueError, match="README"):
         prime_artifacts.register_artifact("prime-a", str(archive))
+
+
+def _artifact_fixture(tmp_path, monkeypatch):
+    from api import prime_artifacts, prime_session_store
+    monkeypatch.setattr(prime_artifacts, "_session_attachment_dir", lambda sid: tmp_path / sid)
+    store = prime_session_store.PrimeSessionStore(tmp_path / "prime.json", session_id="prime-a")
+    monkeypatch.setattr("api.prime_session_store.get_prime_session_store", lambda sid: store)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr("api.routes._prime_workspace_from_settings", lambda settings: workspace)
+    return prime_artifacts, store, workspace
+
+
+def test_artifact_rejects_secret_source_even_with_innocent_alias_before_card(tmp_path, monkeypatch):
+    prime_artifacts, store, workspace = _artifact_fixture(tmp_path, monkeypatch)
+    source = workspace / "auth.json"
+    source.write_text('{"synthetic":true}')
+    with pytest.raises(ValueError, match="Credential"):
+        prime_artifacts.register_artifact("prime-a", str(source), name="report.txt")
+    assert not (tmp_path / "prime-a" / "delivered").exists()
+    assert not store.history()["messages"]
+
+
+@pytest.mark.parametrize("member", ["cloudflare.env", "nested/service.prod.env", "C:/private.txt",
+                                      "\\\\server\\share\\private.txt", "../escape.txt", "bundle/.ssh/key"])
+def test_zip_sensitive_names_paths_and_private_directories_rejected(tmp_path, monkeypatch, member):
+    import zipfile
+    prime_artifacts, store, workspace = _artifact_fixture(tmp_path, monkeypatch)
+    archive = workspace / "site.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("README.md", "synthetic instructions")
+        zf.writestr(member, "synthetic payload")
+    with pytest.raises(ValueError, match="unsafe path or private file"):
+        prime_artifacts.register_artifact("prime-a", str(archive))
+    assert not (tmp_path / "prime-a" / "delivered").exists()
+    assert not store.history()["messages"]
+
+
+def test_safe_zip_and_document_remain_deliverable(tmp_path, monkeypatch):
+    import zipfile
+    prime_artifacts, _, workspace = _artifact_fixture(tmp_path, monkeypatch)
+    doc = workspace / "report.txt"
+    doc.write_text("synthetic document")
+    doc_result = prime_artifacts.register_artifact("prime-a", str(doc))
+    assert prime_artifacts.artifact_bytes("prime-a", doc_result["id"])[1] == b"synthetic document"
+    archive = workspace / "site.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("README.md", "synthetic instructions")
+        zf.writestr("index.html", "<p>synthetic</p>")
+    zip_result = prime_artifacts.register_artifact("prime-a", str(archive))
+    assert prime_artifacts.artifact_bytes("prime-a", zip_result["id"])[1] == archive.read_bytes()
+
+
+def test_zip_symlink_member_is_rejected(tmp_path, monkeypatch):
+    import stat
+    import zipfile
+    prime_artifacts, store, workspace = _artifact_fixture(tmp_path, monkeypatch)
+    archive = workspace / "site.zip"
+    link = zipfile.ZipInfo("linked.txt")
+    link.create_system = 3
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("README.md", "synthetic instructions")
+        zf.writestr(link, "target.txt")
+    with pytest.raises(ValueError, match="symbolic links"):
+        prime_artifacts.register_artifact("prime-a", str(archive))
+    assert not (tmp_path / "prime-a" / "delivered").exists()
+    assert not store.history()["messages"]
+
+
+def test_zip_source_cannot_bypass_member_filter_with_public_alias(tmp_path, monkeypatch):
+    import zipfile
+    prime_artifacts, store, workspace = _artifact_fixture(tmp_path, monkeypatch)
+    archive = workspace / "site.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("README.md", "synthetic instructions")
+        zf.writestr("cloudflare.env", "synthetic secret")
+    with pytest.raises(ValueError, match="unsafe path or private file"):
+        prime_artifacts.register_artifact("prime-a", str(archive), name="package.txt")
+    assert not (tmp_path / "prime-a" / "delivered").exists()
+    assert not store.history()["messages"]
 
 
 @pytest.mark.parametrize("width", [1440, 768, 390])
