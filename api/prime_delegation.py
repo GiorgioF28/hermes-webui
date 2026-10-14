@@ -1797,7 +1797,22 @@ def build_prime_delegation_tools(session_id: str, workspace: str):
             "Segnato '" + nome + "' come " + stato + ". Salvo l'essenziale in memoria "
             "(Librarian) e tengo il contesto pulito."}]}
 
-    return [delega, task_done]
+    @tool(
+        "prime_deliver_file",
+        "Registra un file prodotto nella workspace/inbox Prime oppure citato nel risultato di una delega completata di questa sessione; crea una card persistente con link autenticato. Non cercare file e non registrare segreti. ZIP sito/app deve includere README o istruzioni.",
+        {"type": "object", "properties": {"path": {"type": "string"}, "name": {"type": "string"}}, "required": ["path"]},
+    )
+    async def deliver_file(args):
+        try:
+            from api.prime_artifacts import register_artifact
+            artifact = register_artifact(session_id, str(args.get("path") or ""), name=args.get("name"))
+            artifact["url"] = "/api/bridge/prime/artifacts/" + artifact["id"]
+            artifact["open_url"] = artifact["url"] + "?inline=1"
+            return {"content": [{"type": "text", "text": json.dumps({"ok": True, "artifact": artifact}, ensure_ascii=False)}]}
+        except (OSError, ValueError) as exc:
+            return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
+
+    return [delega, task_done, deliver_file]
 
 
 def build_prime_delegation_server(session_id: str, workspace: str):

@@ -200,9 +200,16 @@ def test_bridge_prime_post_streams_tokens_then_done(monkeypatch, tmp_path):
     ]
 
 
-def test_bridge_prime_forwards_image_attachments(monkeypatch):
+def test_bridge_prime_forwards_image_attachments(monkeypatch, tmp_path):
     handler = _Handler()
     monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+    from api.identity import HermesIdentity
+    from api import upload
+    monkeypatch.setattr(routes, "_request_identity", lambda _handler: HermesIdentity("giorgio", "hermes-prime"))
+    monkeypatch.setattr(upload, "_session_attachment_dir", lambda sid: tmp_path / sid)
+    photo = tmp_path / "hermes-prime" / "foto.png"
+    photo.parent.mkdir(parents=True)
+    photo.write_bytes(b"\x89PNG\r\n")
     seen = {}
 
     def fake_reply(message, workspace, attachments=None, on_token=None, on_status=None):
@@ -214,10 +221,11 @@ def test_bridge_prime_forwards_image_attachments(monkeypatch):
 
     # Solo foto, nessun testo: il messaggio diventa un placeholder e l'allegato
     # viene comunque inoltrato a Prime.
-    body = {"message": "", "attachments": [{"name": "foto.png", "path": "C:/x/foto.png"}]}
+    body = {"message": "", "attachments": [{"name": "foto.png", "path": str(photo)}]}
     assert routes._handle_bridge_prime(handler, body) is True
     assert handler.status == 200
-    assert seen["attachments"] == [{"name": "foto.png", "path": "C:/x/foto.png"}]
+    assert seen["attachments"][0]["path"] == str(photo.resolve())
+    assert seen["attachments"][0]["mime"] == "image/png"
     assert seen["message"]  # placeholder non vuoto
 
 
