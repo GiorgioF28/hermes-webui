@@ -60,3 +60,12 @@ Dopo il commit applicativo, prima di aggiungere questo report:
 ```
 
 Il report viene salvato con commit docs separato. Stato finale del worktree riportato nella ricevuta di consegna dopo quel commit.
+
+## Recupero mirato D687 — filtro file sensibili (2026-10-14)
+
+- **Patch:** commit `c25f41222b7d2005ca8fa87b65ab7b3998a3bff7` sul branch isolato `feat/prime-file-exchange-20261014` (base `e8e9523db394fac124a483a9bf22f7fa4a1f10c3`). Controlla il basename originale prima della copia upload, anche con alias innocuo in consegna, e riconosce `.env`, `*.env` e nomi con spazi/punti finali. La validazione ZIP applica lo stesso filtro a sorgente e alias, compresi membri e directory private; rifiuta percorsi assoluti POSIX/Windows/UNC, traversal e symlink prima di leggere i byte dell'artefatto.
+- **Regressioni sintetiche:** alias di `auth.json`; `.env`/`*.env` upload e ZIP; directory `.ssh`; path ZIP Windows assoluto, UNC e traversal; symlink ZIP; alias innocuo di ZIP. Verificano rifiuto senza snapshot/registro/card/transcript. Documento e ZIP legittimi continuano a essere consegnabili.
+- **Verifiche rieseguite:** suite README (`pytest -q -rs tests/test_prime_file_exchange.py tests/test_prime_pdf_attachments.py tests/test_prime_image_upload.py tests/test_command_bridge_reload_sync.py tests/test_prime_session_store_buffer.py tests/test_prime_stop_progress.py tests/test_prime_stop_progress_ui.py tests/test_command_bridge_prime_streaming.py`): **126 passed, 4 skipped** in 24.97 s. Skip: symlink filesystem non disponibile con privilegi Windows e 3 prove UI evidence-only preesistenti. `node --check static/command_bridge.js`, `python -m py_compile api/upload.py api/prime_artifacts.py`, `git diff --check`: PASS. Nessuna nuova prova UI né E2E live.
+- **Graphify:** aggiornamento AST senza estrazione LLM; 31.335 nodi, 53.761 archi, 2.051 community. HTML non generato perché il grafo supera il limite automatico di 5.000 nodi.
+- **File D687:** `api/upload.py`, `api/prime_artifacts.py`, `tests/test_prime_file_exchange.py`; questo README aggiorna il report.
+- **Stato:** **NON INTEGRATO, NON LIVE**. Tutte le prove usano file sintetici, mock/fixture locali e test handler; non dimostrano comportamento sul server o sugli account reali. Dopo il commit del report lo stato Git atteso è branch dedicato pulito (`## feat/prime-file-exchange-20261014`); nessuna modifica alla working copy principale.
