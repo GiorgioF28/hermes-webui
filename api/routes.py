@@ -6301,6 +6301,13 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/daily-checklist/streaks":
         return _handle_daily_checklist_streaks(handler)
 
+    if parsed.path.startswith("/api/sicilia-crm/"):
+        from api.sicilia_crm import handle_get as handle_crm_get
+
+        if not handle_crm_get(handler, parsed):
+            j(handler, {"error": "unknown_crm_endpoint"}, status=404)
+        return True
+
     if parsed.path == "/api/projects/overview":
         return _handle_projects_overview(handler, parsed)
 
@@ -7138,6 +7145,13 @@ def handle_post(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "POST")
         return True
+    if parsed.path.startswith("/api/sicilia-crm/"):
+        from api.sicilia_crm import handle_post as handle_crm_post
+
+        if not handle_crm_post(handler, parsed, body):
+            j(handler, {"error": "unknown_crm_endpoint"}, status=404)
+        return True
+
     if parsed.path == "/api/control-center/project-next-action":
         return _handle_control_center_project_next_action(handler, body)
     if parsed.path == "/api/control-center/task-status":
