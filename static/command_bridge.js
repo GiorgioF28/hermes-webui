@@ -2537,7 +2537,7 @@
       sysNoteRetry('Storico non caricato - clicca per riprovare', loadPrimeHistory);
     });
   }
-  function renderPrimeArtifacts(artifacts) {
+  function renderPrimeArtifacts(artifacts, owner) {
     var log = $('cbLog'); if (!log || !Array.isArray(artifacts)) return;
     artifacts.forEach(function (a) {
       if (!a || !/^[0-9a-f]{32}$/.test(String(a.id || ''))) return;
@@ -2552,7 +2552,7 @@
       if (/^(application\/pdf|image\/(png|jpeg|gif|webp|bmp)|text\/(plain|markdown|csv|html))$/.test(a.mime || '')) {
         var open = document.createElement('a'); open.href = url + '?inline=1'; open.textContent = 'Apri'; open.target = '_blank'; open.rel = 'noopener noreferrer'; card.appendChild(open);
       }
-      log.appendChild(card);
+      (owner || log).appendChild(card);
     });
   }
   // Un solo messaggio dello storico -> un nodo con data-cb-msg-index, cosi' il
@@ -2658,6 +2658,7 @@
       return node;
     }
     node = node || primeSay(m.role === 'user' ? 'user' : 'prime', m.content || '', null, true, m.created_at || m.timestamp || null);
+    if (node && m.role === 'assistant' && m.prime_artifacts) renderPrimeArtifacts(m.prime_artifacts, node.querySelector('.cb-bubble') || node);
     stampPrimeNode(node, m.created_at || m.timestamp, m.role);
     if (node && briefId) node.setAttribute('data-cb-brief-id', briefId);
     if (node && hasIdx) node.setAttribute('data-cb-msg-index', String(Number(idx)));
@@ -2798,7 +2799,6 @@
     var offset = Number(data.since_index);
     if (!Number.isFinite(offset) || offset < 0) offset = 0;
     renderPrimeHistoryMessages(messages, offset, pendingClarifyId);
-    renderPrimeArtifacts(data.artifacts);
     applyPrimeHistoryWindow(data);
     // Backend vecchio (nessun message_count): ripiega sul conteggio locale.
     var total = Number(data.message_count);
@@ -2907,7 +2907,6 @@
       var sb = nearBottom(log);
       var clarifyId = (data.pending_clarify || {}).clarify_id;
       renderPrimeHistoryMessages(data.messages || [], offset, clarifyId);
-      renderPrimeArtifacts(data.artifacts);
       applyPrimeHistoryWindow(data);
       var total = Number(data.message_count);
       if (!Number.isFinite(total)) total = offset + (data.messages || []).length;

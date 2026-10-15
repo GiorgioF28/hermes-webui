@@ -12217,8 +12217,6 @@ def _handle_bridge_prime_history(handler, parsed=None):
         session_id = _request_prime_session_id(handler)
         since_index = _bridge_history_since_index(parsed)
         hist = get_prime_session_store(session_id).history_with_tool_events(since_index, compact=True)
-        from api.prime_artifacts import list_artifacts
-        hist["artifacts"] = list_artifacts(session_id)
         # Fase 1: annotate with pending brief count (best-effort)
         try:
             from api.prime_brief_queue import get_brief_queue

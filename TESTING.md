@@ -1,5 +1,14 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime file exchange: `python -m pytest tests/test_prime_file_exchange.py
+tests/test_prime_file_exchange_http.py tests/test_codex_prime_tools.py -q`
+checks document uploads, secret/ZIP rejection and the shared delivery tool.
+The HTTP/browser tests use isolated state and a synthetic external provider,
+with real Codex prompt/MCP/byte download and store reload at 1440/768/390 px.
+Set `HERMES_CAPTURE_FILE_HTTP_UI` for before/after evidence. See
+[`docs/prime-file-exchange.md`](docs/prime-file-exchange.md) for state layers
+and the operator-controlled activation smoke.
+
 Sicilia CRM: `python -m pytest tests/test_sicilia_crm.py
 tests/test_sicilia_crm_ui.py tests/test_sicilia_crm_dispatch.py
 tests/test_sicilia_crm_http.py tests/test_sicilia_crm_card.py

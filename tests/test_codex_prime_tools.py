@@ -27,7 +27,7 @@ def test_shared_tools_and_revoked_capability(runtime, monkeypatch, tmp_path):
     tools = cp.build_tools('hermes-prime', tmp_path)
     token = runtime.register(tools, threading.Event())
     names = {t['name'] for t in rpc(runtime,token,'tools/list')['result']['tools']}
-    assert names == {'delega','task_done','ask_user','prime_history','team_status'}
+    assert names == {'delega','task_done','ask_user','prime_history','team_status','prime_deliver_file'}
     with pytest.raises(urllib.error.HTTPError) as error:
         rpc(runtime,'wrong','tools/list')
     assert error.value.code == 401
@@ -73,7 +73,7 @@ def test_prompt_uses_canonical_session_and_full_persona(monkeypatch, tmp_path):
     monkeypatch.setattr(memory_retrieval,'build_prime_unlocked_memory_detail',lambda *a,**k:'MEMORY')
     monkeypatch.setattr(memory_retrieval,'build_prime_memory_context',lambda *a,**k:'MEMORY')
     class Store:
-        def history(self): return {'messages':[{'role':'user','content':'previous request'}]}
+        def history(self, **kwargs): return {'messages':[{'role':'user','content':'previous request'}]}
     monkeypatch.setattr(prime_session_store,'get_prime_session_store',lambda sid: Store())
     prompt=cp.build_prompt('current request',tmp_path,session_id='hermes-prime',user='giorgio')
     assert 'FULL PRIME mcp__hermes_prime__delega' in prompt

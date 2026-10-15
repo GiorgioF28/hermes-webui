@@ -258,7 +258,7 @@ def build_prime_attachment_note(attachments, *, current_turn: int, retain_turns:
         else:
             summary = _clean_text(str(att.get("summary") or ""))
             if summary:
-                file_lines.append(f'- "{att.get("name")}" ({att.get("mime") or "tipo sconosciuto"}, {att.get("size") or 0} byte), testo limitato: {summary}')
+                file_lines.append(f'- "{att.get("name")}" ({att.get("mime") or "tipo sconosciuto"}, {att.get("size") or 0} byte), path: {path}, testo limitato: {summary}')
             else:
                 file_lines.append(f'- "{att.get("name")}" ({att.get("mime") or "tipo sconosciuto"}, {att.get("size") or 0} byte), path: {path}. Usa uno strumento compatibile prima di descriverne il contenuto.')
     blocks: list[str] = []

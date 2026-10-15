@@ -439,7 +439,7 @@ def build_prompt(message, workspace, *, session_id, user, partial=""):
         memory = memory_retrieval.build_prime_memory_context(str(message or ""), control, task_scope=scope, include_index=False)
     return (system + "\n\n## Runtime Hermes Prime / Codex\n"
             "Sei Hermes Prime con provider Codex. Il server MCP hermes_prime espone i tool REALI "
-            "delega, task_done, ask_user, team_status, prime_history del processo Hermes. "
+            "delega, task_done, ask_user, team_status, prime_history, prime_deliver_file del processo Hermes. "
             "Per delegare alla squadra usa delega: non sostituirlo con agenti nativi Codex. "
             "Il risultato contiene l'id reale della delega; non dichiararla inviata senza quel risultato. "
             "Ogni delega contiene un solo risultato verificabile: obiettivo, percorsi/fonti, "

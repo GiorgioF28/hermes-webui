@@ -2,6 +2,9 @@
 
 ## Unreleased - Prime file exchange
 
+- Delivery cards follow their owning transcript row across reload and the
+  50-message window. Browser/HTTP/MCP checks verify byte delivery with an
+  isolated provider substitute at desktop, narrow and mobile widths.
 - Prime accepts raster images, PDF, TXT, MD, CSV, JSON, DOCX, XLSX and PPTX
   through the authenticated composer upload. Text extraction stays bounded;
   binary documents remain references unless a compatible reader is available.

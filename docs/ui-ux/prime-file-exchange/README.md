@@ -1,6 +1,45 @@
 ﻿# Prime file exchange — report
 
-## Esito
+## Verifica di integrazione Prime - 2026-10-15
+
+Pacchetto D687/D688 unito senza conflitti alla base operativa `7921c8df`
+nel worktree `integration/prime-files-20261015` (merge `ad917288`). Consegna
+prevista tramite fast-forward e push del branch operativo, senza riavvio.
+Lo stato storico sotto va letto alla data del tentativo originale.
+
+- Corretto il riferimento al path dei documenti testuali nel prompt Codex.
+- Dichiarato e invocato il vero tool MCP `prime_deliver_file`; allineati i test
+  del catalogo strumenti e la fixture della cronologia con finestra.
+- Le card sono figlie del messaggio di consegna: seguono ordine, reload e
+  finestra 50. Non si rimanda l'intero registro artefatti a ogni poll.
+- Suite di integrazione: **213 passed, 5 skipped** in 55.36 s, inclusi scambio
+  file, strumenti/identita Codex, PDF/immagini, reload/store/streaming/Stop,
+  timestamp/brief e la suite mirata CRM/progetti/worklog.
+- Ulteriore regressione del renderer reale: **1 passed**, card nel messaggio
+  proprietario, nessun duplicato, rimozione insieme alla riga fuori finestra.
+- Cinque skip: symlink filesystem senza privilegi Windows, CLI Codex reale
+  opt-in e tre screenshot Stop evidence-only. Nessun errore di test.
+- `node --check`, `py_compile` e `git diff --check`: PASS.
+- **Browser/HTTP/MCP reale, provider sintetico** a 1440/768/390 px: upload
+  multipart, validazione path, costruzione prompt Codex e invocazione MCP,
+  snapshot, download da click e identita byte, Apri con CSP, origine errata
+  403 e anonimo 401. Ricostruzione store + cold browser reload + doppio replay
+  conserva una sola card. Dopo 51 messaggi la card lascia la finestra e il
+  download gia consegnato continua a restituire gli stessi byte.
+- Evidenze: `evidence/http-before-{1440,768,390}.png` e
+  `evidence/http-after-{1440,768,390}.png`; harness composer/renderer con le
+  funzioni di produzione, server loopback limitato e stato temporaneo.
+  Nessun `server.py`, nessuna chiamata alla 8788 o provider reale.
+- Guida: [`../../prime-file-exchange.md`](../../prime-file-exchange.md).
+- Rollback senza cancellare allegati: revert del commit di completamento e
+  `git revert -m 1 ad917288`, dopo review.
+
+D700 era accodata dietro le scansioni outreach prima di questo completamento
+diretto Prime. Prima di riprenderla confrontare il branch operativo e questo
+report: non duplicare l'implementazione se gia integrata; resta utile una
+verifica indipendente senza modifiche o attivazione live.
+
+## Esito originale D687 (storico)
 
 Implementato e committato sul worktree isolato `feat/prime-file-exchange-20261014`, partendo dal baseline `dd32649c0d8f041e451bdeaa610bf856cee8c232`.
 

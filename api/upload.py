@@ -333,13 +333,12 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
 
 def handle_prime_upload(handler):
-    """POST /api/bridge/prime/upload — attach an image for Hermes Prime.
+    """POST /api/bridge/prime/upload — attach a document or raster image.
 
     Hermes Prime (Command Bridge) is a persistent SDK session, not a chat
     session, so it has no get_session() entry. Attachments land in the dedicated
     'hermes-prime' inbox, which the SDK factory already adds to the Prime
-    client's add_dirs — so Prime can read them with its Read tool. Images only:
-    the bridge attach button is for photos.
+    client's add_dirs — so Prime can read them with an appropriate format tool.
     """
     import traceback as _tb
     try:

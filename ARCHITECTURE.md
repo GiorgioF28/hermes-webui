@@ -44,6 +44,13 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 ### Command Bridge Prime history window
 
+Prime file exchange keeps input inboxes and immutable delivered snapshots in
+private attachment state. The shared Codex/Claude `prime_deliver_file` tool
+persists public metadata in a delivery transcript row; authenticated opaque-ID
+downloads return the saved bytes. Cards render inside their owning row, so
+history windows and refresh preserve order without resurrecting old files.
+See [file exchange](docs/prime-file-exchange.md) for the API/state boundaries.
+
 Codex Prime capacity recovery stays inside the existing turn owner. A rejected
 chief-model attempt may retry once with the worker profile before any observed
 assistant text or tool activity, including activity signalled by the MCP facade.
