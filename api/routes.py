@@ -6519,6 +6519,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/approval/pending":
         return _handle_approval_pending(handler, parsed)
 
+    if parsed.path.startswith("/api/bridge/prime/artifacts/"):
+        return _handle_bridge_prime_artifact(handler, parsed)
+
     if parsed.path == "/api/bridge/prime/history":
         return _handle_bridge_prime_history(handler, parsed)
 
@@ -12214,6 +12217,8 @@ def _handle_bridge_prime_history(handler, parsed=None):
         session_id = _request_prime_session_id(handler)
         since_index = _bridge_history_since_index(parsed)
         hist = get_prime_session_store(session_id).history_with_tool_events(since_index, compact=True)
+        from api.prime_artifacts import list_artifacts
+        hist["artifacts"] = list_artifacts(session_id)
         # Fase 1: annotate with pending brief count (best-effort)
         try:
             from api.prime_brief_queue import get_brief_queue
@@ -12230,6 +12235,35 @@ def _handle_bridge_prime_history(handler, parsed=None):
     except Exception as exc:
         logger.exception("bridge prime history failed")
         return j(handler, {"ok": False, "error": _sanitize_error(exc)}, status=500) or True
+
+
+def _handle_bridge_prime_artifact(handler, parsed):
+    """Serve a registered artifact for the authenticated Prime identity only."""
+    from urllib.parse import unquote, parse_qs
+    artifact_id = unquote(str(parsed.path).rsplit("/", 1)[-1])
+    if not re.fullmatch(r"[0-9a-f]{32}", artifact_id):
+        return j(handler, {"error": "Artifact not found"}, status=404)
+    try:
+        from api.prime_artifacts import artifact_bytes
+        row, data = artifact_bytes(_request_prime_session_id(handler), artifact_id)
+    except FileNotFoundError:
+        return j(handler, {"error": "Artifact not found or file changed"}, status=404)
+    inline = parse_qs(getattr(parsed, "query", "") or "").get("inline", [""])[0] == "1"
+    from urllib.parse import quote
+    name = str(row.get("name") or "download")
+    ascii_name = re.sub(r"[^\w. -]", "_", name, flags=re.ASCII) or "download"
+    disposition = "inline" if inline else "attachment"
+    handler.send_response(200)
+    handler.send_header("Content-Type", row.get("mime") or "application/octet-stream")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Content-Disposition", f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+    handler.send_header("X-Frame-Options", "SAMEORIGIN")
+    handler.end_headers()
+    handler.wfile.write(data)
+    return True
 
 
 def _handle_bridge_prime_live(handler):
@@ -12595,16 +12629,33 @@ def _handle_bridge_prime(handler, body):
         return bad(handler, "message is required")
     if not msg and attachments:
         msg = "(Uživatel přiložil soubory bez textu.)" if identity.user == "tom" else "(L'utente ha allegato file senza testo.)"
-    if identity.user == "tom" and attachments:
-        from api.upload import _session_attachment_dir
+    if attachments:
+        import mimetypes
+        from api.config import MAX_UPLOAD_BYTES
+        from api.upload import _looks_like_secret_name, _session_attachment_dir
         attachment_root = _session_attachment_dir(session_id).resolve()
         for attachment in attachments:
             try:
-                attachment_path = Path(str(attachment.get("path") or "")).resolve()
+                raw_path = Path(str(attachment.get("path") or ""))
+                if raw_path.is_symlink():
+                    raise ValueError("symlink")
+                attachment_path = raw_path.resolve(strict=True)
             except Exception:
                 return bad(handler, "Invalid attachment path", 400)
-            if not attachment_path.is_relative_to(attachment_root):
+            if not attachment_path.is_relative_to(attachment_root) or not attachment_path.is_file():
                 return j(handler, {"error": "Attachment does not belong to this Prime session"}, status=403)
+            suffix = attachment_path.suffix.lower()
+            safe_image = suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+            if _looks_like_secret_name(attachment_path.name):
+                return bad(handler, "Credential or key attachments are not supported", 400)
+            if not safe_image and suffix not in {".pdf", ".txt", ".md", ".csv", ".json", ".docx", ".xlsx", ".pptx"}:
+                return bad(handler, "Unsupported attachment format", 400)
+            if attachment_path.stat().st_size > MAX_UPLOAD_BYTES:
+                return j(handler, {"error": "Attachment exceeds the configured upload size limit"}, status=413)
+            attachment["path"] = str(attachment_path)
+            attachment["name"] = attachment_path.name
+            attachment["size"] = attachment_path.stat().st_size
+            attachment["mime"] = mimetypes.guess_type(attachment_path.name)[0] or "application/octet-stream"
     from api.prime_session_store import get_prime_session_store
 
     store = get_prime_session_store(session_id)
@@ -16424,7 +16475,7 @@ def _get_claude_registry():
                 if session_id in {"hermes-prime", "hermes-prime-tom"}:
                     from api.prime_delegation import build_prime_delegation_server
                     _mcp["team"] = build_prime_delegation_server(session_id, str(cwd))
-                    _allowed.append("mcp__team__delega")
+                    _allowed.extend(["mcp__team__delega", "mcp__team__prime_deliver_file"])
                     _sdk_session_id = _fresh_prime_sdk_session_id()
                 options = ClaudeAgentOptions(
                     cwd=str(cwd),

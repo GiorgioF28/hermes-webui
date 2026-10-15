@@ -110,6 +110,13 @@ def _sanitize_upload_name(filename: str) -> str:
     return safe_name
 
 
+def _looks_like_secret_name(filename: str) -> bool:
+    name = Path(filename.replace('\\', '/')).name.rstrip(' .').lower()
+    return (name in {"auth.json", "credentials.json", "secrets.json", "id_rsa", "id_ed25519"}
+            or name == ".env" or name.endswith(".env") or name.startswith(".env.") or name.startswith("secrets.")
+            or name.endswith((".pem", ".p12", ".pfx", ".key")))
+
+
 def _attachment_root() -> Path:
     """Return the configured upload inbox root.
 
@@ -346,10 +353,25 @@ def handle_prime_upload(handler):
         filename, file_bytes = files['file']
         if not filename:
             return j(handler, {'error': 'No filename in upload'}, status=400)
+        if _looks_like_secret_name(filename):
+            return j(handler, {'error': 'File di credenziali o chiavi non supportato'}, status=400)
         safe_name = _sanitize_upload_name(filename)
+        if _looks_like_secret_name(safe_name):
+            return j(handler, {'error': 'File di credenziali o chiavi non supportato'}, status=400)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
-        if not mime.startswith('image/'):
-            return j(handler, {'error': 'Solo immagini sono supportate qui'}, status=400)
+        allowed = {
+            '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
+            '.csv': 'text/csv', '.json': 'application/json',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        }
+        suffix = Path(safe_name).suffix.lower()
+        safe_image = suffix in {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'} and mime.startswith('image/')
+        if not safe_image and suffix not in allowed:
+            return j(handler, {'error': 'Formato non supportato. Usa immagini, PDF, TXT, MD, CSV, JSON, DOCX, XLSX o PPTX.'}, status=400)
+        if suffix in allowed:
+            mime = allowed[suffix]
         from api.identity import resolve_request_identity
         session_id = resolve_request_identity(handler).prime_session_id
         dest = _upload_destination(session_id, safe_name)
@@ -359,7 +381,7 @@ def handle_prime_upload(handler):
             'path': str(dest),
             'size': dest.stat().st_size,
             'mime': mime,
-            'is_image': True,
+            'is_image': safe_image,
         })
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)

@@ -177,6 +177,16 @@ def normalize_prime_attachments(attachments, *, bridge: str = "hermes-prime") ->
             att["kind"] = "pdf"
         elif str(att.get("mime") or "").startswith("image/"):
             att["kind"] = "image"
+        else:
+            att["kind"] = "file"
+            suffix = Path(att["name"]).suffix.lower()
+            if suffix in {".txt", ".md", ".csv", ".json"}:
+                try:
+                    raw = Path(path).read_bytes()[:PDF_EXTRACT_CHARS * 4]
+                    att["summary"] = raw.decode("utf-8-sig", errors="replace")[:PDF_EXTRACT_CHARS]
+                    att["text_truncated"] = len(raw) >= PDF_EXTRACT_CHARS * 4
+                except OSError:
+                    att["summary"] = "Testo non disponibile; non dichiarare di averlo letto."
         normalized.append(att)
     return normalized
 
@@ -246,7 +256,11 @@ def build_prime_attachment_note(attachments, *, current_turn: int, retain_turns:
                 "(disponibile con Read; dopo 2 turni resta solo placeholder testuale)"
             )
         else:
-            file_lines.append(f"- {path}")
+            summary = _clean_text(str(att.get("summary") or ""))
+            if summary:
+                file_lines.append(f'- "{att.get("name")}" ({att.get("mime") or "tipo sconosciuto"}, {att.get("size") or 0} byte), testo limitato: {summary}')
+            else:
+                file_lines.append(f'- "{att.get("name")}" ({att.get("mime") or "tipo sconosciuto"}, {att.get("size") or 0} byte), path: {path}. Usa uno strumento compatibile prima di descriverne il contenuto.')
     blocks: list[str] = []
     if pdf_lines:
         blocks.append("PDF allegati in questo turno (solo label/path/riassunto in history):\n" + "\n".join(pdf_lines))

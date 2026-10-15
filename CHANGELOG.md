@@ -1,5 +1,17 @@
 ---
 
+## Unreleased - Prime file exchange
+
+- Prime accepts raster images, PDF, TXT, MD, CSV, JSON, DOCX, XLSX and PPTX
+  through the authenticated composer upload. Text extraction stays bounded;
+  binary documents remain references unless a compatible reader is available.
+- Prime Codex and Claude can register a produced workspace/inbox file, or an
+  exact path named in a completed delegation result, with `prime_deliver_file`.
+  Its opaque, session-scoped artifact ID, digest and
+  transcript card survive refresh. Downloads require normal WebUI auth and
+  use sandbox headers for inline previews; HTML/JS is never executed in the
+  privileged chat origin. ZIP site/app deliveries require instructions.
+
 ## Unreleased - Prime Stop and activity visibility
 
 - Prime Stop authenticates its request, cancels only its owned queued/running turn, closes the matching browser stream after acknowledgement, and remains retryable on connection failure.

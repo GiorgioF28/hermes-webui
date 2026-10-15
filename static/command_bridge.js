@@ -389,6 +389,9 @@
 '.cb-prime-status{margin-top:5px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.06em;color:var(--cb-faint);}',
 '.cb-msg-foot{margin-top:7px;font-family:var(--cb-mono);font-size:9.5px;letter-spacing:.04em;color:var(--cb-faint);}',
 '.cb-msg-foot[hidden]{display:none;}',
+'.cb-prime-artifact{align-self:flex-start;display:flex;align-items:center;gap:12px;flex-wrap:wrap;max-width:92%;padding:10px 12px;border:1px solid var(--cb-line);border-radius:10px;background:rgba(255,255,255,.04);font:11px var(--cb-mono);}',
+'.cb-prime-artifact span{color:var(--cb-faint);overflow-wrap:anywhere;}',
+'.cb-prime-artifact a{color:var(--cb-accent-2);text-decoration:underline;text-underline-offset:2px;}',
 '.cb-attention-card{align-self:stretch;max-width:100%;border:1px solid rgba(255,160,92,.34);background:rgba(36,24,14,.86);border-radius:8px;padding:12px;color:var(--cb-text);box-shadow:0 16px 34px rgba(0,0,0,.26);}',
 '.cb-attention-k{font-family:var(--cb-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--cb-accent);margin-bottom:6px;}',
 '.cb-attention-title{font-size:13px;font-weight:700;color:#fff;margin-bottom:7px;}',
@@ -972,9 +975,9 @@
         '<div class="cb-actions" id="cbActions">' +
           '<button type="button" class="cb-mic" id="cbMic" aria-label="Parla a voce" title="Parla a voce">' +
             '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg></button>' +
-          '<button type="button" class="cb-attach" id="cbAttachBtn" aria-label="Allega foto" title="Allega foto">' +
+          '<button type="button" class="cb-attach" id="cbAttachBtn" aria-label="Allega file" title="Allega file">' +
             '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>' +
-          '<input id="cbFile" type="file" accept="image/*" multiple style="display:none">' +
+          '<input id="cbFile" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx,.xlsx,.pptx" multiple style="display:none">' +
           '<button class="cb-send" type="submit" form="cbForm" id="cbSend" aria-label="Invia" title="Invia">' +
             '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg></button>' +
           '<button class="cb-stop" type="button" id="cbStop" aria-label="Stop" title="Stop" hidden>' +
@@ -2534,6 +2537,24 @@
       sysNoteRetry('Storico non caricato - clicca per riprovare', loadPrimeHistory);
     });
   }
+  function renderPrimeArtifacts(artifacts) {
+    var log = $('cbLog'); if (!log || !Array.isArray(artifacts)) return;
+    artifacts.forEach(function (a) {
+      if (!a || !/^[0-9a-f]{32}$/.test(String(a.id || ''))) return;
+      var existing = Array.from(log.querySelectorAll('[data-prime-artifact]')).find(function (n) { return n.getAttribute('data-prime-artifact') === a.id; });
+      if (existing) return;
+      var url = 'api/bridge/prime/artifacts/' + encodeURIComponent(a.id);
+      var card = el('article', 'cb-prime-artifact'); card.setAttribute('data-prime-artifact', a.id);
+      var title = document.createElement('strong'); title.textContent = a.name || 'File Prime';
+      var meta = document.createElement('span'); meta.textContent = (a.mime || 'file') + ' · ' + humanSize(a.size);
+      var download = document.createElement('a'); download.href = url; download.textContent = 'Scarica'; download.setAttribute('download', a.name || 'download');
+      card.append(title, meta, download);
+      if (/^(application\/pdf|image\/(png|jpeg|gif|webp|bmp)|text\/(plain|markdown|csv|html))$/.test(a.mime || '')) {
+        var open = document.createElement('a'); open.href = url + '?inline=1'; open.textContent = 'Apri'; open.target = '_blank'; open.rel = 'noopener noreferrer'; card.appendChild(open);
+      }
+      log.appendChild(card);
+    });
+  }
   // Un solo messaggio dello storico -> un nodo con data-cb-msg-index, cosi' il
   // sync incrementale sa cosa e' gia' a video e le card delega hanno l'ancora.
   function primeTimestamp(value) {
@@ -2777,6 +2798,7 @@
     var offset = Number(data.since_index);
     if (!Number.isFinite(offset) || offset < 0) offset = 0;
     renderPrimeHistoryMessages(messages, offset, pendingClarifyId);
+    renderPrimeArtifacts(data.artifacts);
     applyPrimeHistoryWindow(data);
     // Backend vecchio (nessun message_count): ripiega sul conteggio locale.
     var total = Number(data.message_count);
@@ -2885,6 +2907,7 @@
       var sb = nearBottom(log);
       var clarifyId = (data.pending_clarify || {}).clarify_id;
       renderPrimeHistoryMessages(data.messages || [], offset, clarifyId);
+      renderPrimeArtifacts(data.artifacts);
       applyPrimeHistoryWindow(data);
       var total = Number(data.message_count);
       if (!Number.isFinite(total)) total = offset + (data.messages || []).length;
@@ -2915,7 +2938,7 @@
   function typeLabel(a) {
     if (a.error) return a.error;
     if (!a.path) return 'salvataggio… · ' + humanSize(a.size);
-    var sub = String(a.type || '').split('/')[1] || 'immagine';
+    var sub = String(a.type || '').split('/')[1] || (a.name || '').split('.').pop() || 'file';
     var label = sub.toUpperCase();
     if (a.size) label += ' · ' + humanSize(a.size);
     return label;
@@ -2927,7 +2950,7 @@
     pendingAttachments.forEach(function (a) {
       var chip = el('div', 'cb-chip' + (a.state === 'uploading' ? ' cb-chip-up' : ''));
       chip.setAttribute('data-upload-state', a.state || (a.path ? 'ready' : 'uploading'));
-      var thumb = a.url ? '<img src="' + esc(a.url) + '" alt="">' : '';
+      var thumb = a.url && /^image\//.test(a.type || '') ? '<img src="' + esc(a.url) + '" alt="">' : '';
       chip.innerHTML = thumb +
         '<div class="cb-chip-info">' +
           '<span class="cb-chip-name">' + esc(a.name) + '</span>' +
@@ -2960,8 +2983,10 @@
 
   function uploadAttachment(file) {
     if (_cbAttachmentSubmitWaiting) return;
-    if (!file || !/^image\//.test(file.type || '')) {
-      _cbAttachmentNotice = 'Posso allegare solo immagini.';
+    var ext = String(file && file.name || '').split('.').pop().toLowerCase();
+    var supported = /^image\/(png|jpeg|gif|webp|bmp)$/.test(file && file.type || '') || /^(pdf|txt|md|csv|json|docx|xlsx|pptx)$/.test(ext);
+    if (!file || !supported) {
+      _cbAttachmentNotice = 'Formato non supportato. Usa immagini, PDF, TXT, MD, CSV, JSON, DOCX, XLSX o PPTX.';
       renderAttachments();
       return;
     }
@@ -2979,7 +3004,7 @@
       name = (name || ('incolla-' + Date.now())) + '.' + ext;
     }
     var entry = { name: name, path: null, url: null, type: file.type || '', size: file.size || 0, file: file };
-    try { entry.url = URL.createObjectURL(file); } catch (_e) {}
+    if (/^image\//.test(file.type || '')) { try { entry.url = URL.createObjectURL(file); } catch (_e) {} }
     pendingAttachments.push(entry);
     startAttachmentUpload(entry);
   }
@@ -3081,7 +3106,7 @@
     inp.style.height = 'auto';
     if (window.__cbAutoGrow) window.__cbAutoGrow();
     var attachments = ready.map(function (a) { return { name: a.name, path: a.path }; });
-    var thumbs = ready.map(function (a) { return a.url; }).filter(Boolean);
+    var thumbs = ready.filter(function (a) { return /^image\//.test(a.type || ''); }).map(function (a) { return a.url; }).filter(Boolean);
     pendingAttachments = [];
     _cbAttachmentNotice = '';
     renderAttachments();
