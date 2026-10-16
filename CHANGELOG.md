@@ -1,5 +1,13 @@
 ---
 
+## Unreleased - Prime conversation scroll stability
+
+- Keep unchanged task polls from rebuilding cards, moving transcript rows or
+  clearing text selections. Reorder only displaced rows and preserve the
+  reading position during history updates, window pruning and composer resize.
+- Reveal a newly submitted message, suspend stream following during text
+  selection, and append live text without replacing its selected Text node.
+
 ## Unreleased - Prime late question replies
 
 - Keep open Prime questions answerable after timeout and reload. Late answers

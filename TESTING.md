@@ -1,5 +1,13 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime scroll stability: `python -m pytest --noconftest
+tests/test_prime_scroll_polling.py tests/test_prime_scroll_stability.py -q`
+loads the real Bridge layout/renderers offline with synthetic messages and
+provider events at 1200/650/360 px. Checks unchanged polling, selection and real
+clipboard copy, task completion, rolling-window pruning, explicit submit and
+stream follow/unpin. Set `HERMES_CAPTURE_PRIME_SCROLL_UI` for baseline/after
+screenshots and operation counts. See [evidence and scope](docs/ui-ux/prime-scroll-stability/README.md).
+
 Prime late question replies: `python -m pytest tests/test_prime_late_clarify.py
 tests/test_ask_user_command_bridge.py tests/test_clarify_timeout_unlimited.py -q`
 checks real tool timeout, active versus detached delivery, context beyond the

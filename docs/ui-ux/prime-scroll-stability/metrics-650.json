@@ -1,0 +1,16 @@
+{
+  "before": {
+    "moves": 8960,
+    "top": 3805,
+    "initialTop": 3805,
+    "selected": "",
+    "sameNodes": true
+  },
+  "after": {
+    "moves": 0,
+    "top": 3805,
+    "initialTop": 3805,
+    "selected": "Messaggio 28",
+    "sameNodes": true
+  }
+}

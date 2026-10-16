@@ -82,7 +82,8 @@ def test_silence_and_connection_loss_are_visible_without_fabricated_failure(brow
         page.evaluate("handlers.status({state:'reasoning',idle_seconds:75});ticks[0]()")
         assert 'Nessun progresso' in page.locator('#cbLog').inner_text()
         page.evaluate("var actualNow=Date.now;Date.now=()=>actualNow()+50000;ticks[0]()")
-        assert 'Connessione senza segnali' in page.locator('#cbLog').inner_text()
+        # The transport watchdog now hands silence to observer recovery.
+        assert 'Connessione non disponibile: continuo a recuperare il turno' in page.locator('#cbLog').inner_text()
         assert page.locator('#cbStop').is_visible()
         assert page.evaluate('_cbOwnTurnCount')==1
         page.evaluate("Date.now=actualNow;handlers.heartbeat({progress:{state:'tool',tool:'team_status',idle_seconds:0}})")
