@@ -1,5 +1,11 @@
 ---
 
+## Unreleased - Prime late question replies
+
+- Keep open Prime questions answerable after timeout and reload. Late answers
+  resume the original context and question; active waiters continue their own
+  turn. Preserve drafts and prevent duplicate execution across retrying devices.
+
 ## Unreleased - Prime transport recovery
 
 - Recover a disconnected browser stream in its original reply using a durable,

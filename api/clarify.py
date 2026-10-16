@@ -33,12 +33,13 @@ _clarify_sse_subscribers: dict[str, list[queue.Queue]] = {}
 class _ClarifyEntry:
     """One pending clarify request inside a session."""
 
-    __slots__ = ("event", "data", "result", "clarify_id")
+    __slots__ = ("event", "data", "result", "clarify_id", "waiter_active")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
         self.data = data
         self.result: Optional[Any] = None
+        self.waiter_active = True
         self.clarify_id: str = data.get("clarify_id", "") or uuid.uuid4().hex[:12]
 
 
@@ -345,6 +346,8 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 == list(data.get("choices_offered") or [])
             ):
                 entry = last
+                # A repeated ask can reattach after a previous tool timed out.
+                entry.waiter_active = True
                 # Dedup re-uses the existing entry with its original clarify_id.
                 # If a future caller pre-populates clarify_id in data, it is
                 # silently discarded here — the original entry's id wins.
@@ -427,16 +430,23 @@ def resolve_clarify(session_key: str, response: Any, resolve_all: bool = False) 
     return count
 
 
-def resolve_clarify_by_id(session_key: str, clarify_id: str, response: Any) -> bool:
+def detach_waiter(entry: _ClarifyEntry) -> Any:
+    """Close the tool wait atomically with response delivery at the timeout edge."""
+    with _lock:
+        entry.waiter_active = False
+        return entry.result
+
+
+def resolve_clarify_delivery(session_key: str, clarify_id: str, response: Any) -> str:
     """Resolve a specific pending clarify request by its stable id.
 
-    Returns True if the id was found and resolved, False otherwise.
+    Returns waiting, detached or missing under the same lock as timeout detach.
     """
     with _lock:
         q = _gateway_queues.get(session_key)
         if not q:
             _pending.pop(session_key, None)
-            return False
+            return "missing"
         for i, entry in enumerate(q):
             if entry.clarify_id == clarify_id:
                 q.pop(i)
@@ -451,5 +461,9 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: Any) -> b
                 publish_session_list_changed("attention_resolved")
                 entry.result = response
                 entry.event.set()
-                return True
-        return False
+                return "waiting" if entry.waiter_active else "detached"
+        return "missing"
+
+
+def resolve_clarify_by_id(session_key: str, clarify_id: str, response: Any) -> bool:
+    return resolve_clarify_delivery(session_key, clarify_id, response) != "missing"

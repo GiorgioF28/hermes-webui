@@ -1,5 +1,12 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime late question replies: `python -m pytest tests/test_prime_late_clarify.py
+tests/test_ask_user_command_bridge.py tests/test_clarify_timeout_unlimited.py -q`
+checks real tool timeout, active versus detached delivery, context beyond the
+history window, restart, duplicate devices and browser draft preservation at
+1200/650/360 px. See [late clarification contract](docs/prime-late-clarifications.md)
+for state ownership, activation and evidence capture.
+
 Prime transport recovery: `python -m pytest tests/test_prime_transport_recovery.py
 tests/test_prime_transport_continuity.py tests/test_prime_stop_progress.py -q`
 checks submission receipts, lost acknowledgements, EOF/network failures, owned

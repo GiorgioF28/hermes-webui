@@ -273,20 +273,24 @@ class PrimeSessionStore:
             self._reset_buffer_locked(None)
             return True
 
-    def begin_turn(self, message: str, attachments: list[dict] | None = None, *, request_id: str | None = None) -> str:
+    def begin_turn(self, message: str, attachments: list[dict] | None = None, *, request_id: str | None = None, owner_index: int | None = None) -> str:
         stream_id = uuid.uuid4().hex
         clean_message = str(message or "")
         with self._lock:
             data = self._read_locked()
-            data["messages"].append(
-                {
-                    "role": "user",
-                    "content": clean_message,
-                    "stream_id": stream_id,
-                    "created_at": time.time(),
-                    "attachments": attachments or [],
-                }
-            )
+            owner = {
+                "role": "user",
+                "content": clean_message,
+                "stream_id": stream_id,
+                "created_at": time.time(),
+                "attachments": attachments or [],
+            }
+            if owner_index is None:
+                data["messages"].append(owner)
+                owner_index = len(data["messages"]) - 1
+            else:
+                # A late clarify answer already owns one durable user row.
+                data["messages"][owner_index].update(stream_id=stream_id)
             data["pending_turn"] = {
                 "stream_id": stream_id,
                 "message": clean_message,
@@ -296,11 +300,79 @@ class PrimeSessionStore:
                 "recovered": False,
             }
             if request_id:
-                data["messages"][-1]["request_id"] = str(request_id)[:100]
+                data["messages"][owner_index]["request_id"] = str(request_id)[:100]
             self._reset_buffer_locked(stream_id)
             self._append_journal_locked(data, "turn_started", {"stream_id": stream_id, "role": "user"})
             self._write_locked(data)
         return stream_id
+
+    def _clarify_record_locked(self, data: dict, clarify_id: str) -> dict | None:
+        records = data.setdefault("clarify_requests", {})
+        if clarify_id in records:
+            return records[clarify_id]
+        for index, msg in enumerate(data["messages"]):
+            if msg.get("_bridge_clarify_id") == clarify_id and msg.get("_bridge_clarify_event") == "request":
+                preceding = [(i, m) for i, m in enumerate(data["messages"][:index])
+                             if m.get("role") in {"user", "assistant"} and "_prime_archive" not in m
+                             and not m.get("_bridge_clarify_event")][-6:]
+                context = [{"index": i, "role": m["role"], "content": str(m.get("content") or "")[:2000]}
+                           for i, m in preceding]
+                records[clarify_id] = {"request_index": index, "question": msg.get("content") or "",
+                                       "payload": msg.get("_bridge_clarify_payload") or {}, "context": context}
+                return records[clarify_id]
+        return None
+
+    def accept_clarify_answer(self, clarify_id: str, response: Any) -> dict:
+        """Persist first answer, then either wake its waiter or resume one turn.
+
+        The durable registry outlives the UI/model window and process restarts.
+        The store lock serializes simultaneous devices and tool persistence.
+        """
+        from api.clarify import resolve_clarify_delivery
+        with self._lock:
+            data = self._read_locked()
+            record = self._clarify_record_locked(data, clarify_id)
+            if record is None:
+                raise ValueError("Domanda non trovata in questa sessione")
+            if "response" in record:
+                if record["response"] != response:
+                    raise ValueError("Questa domanda ha gia una risposta diversa")
+                return dict(record)
+            self._write_locked(data)
+            self.append_clarify_response(clarify_id, response)
+            delivery = resolve_clarify_delivery(self.session_id, clarify_id, response)
+            data = self._read_locked()
+            record = self._clarify_record_locked(data, clarify_id)
+            owner_index = next(i for i, msg in enumerate(data["messages"])
+                               if msg.get("_bridge_clarify_id") == clarify_id and msg.get("_bridge_clarify_event") == "response")
+            record.update(response=response, owner_index=owner_index, delivery=delivery,
+                          request_id="clarify-" + clarify_id)
+            self._write_locked(data)
+            return dict(record)
+
+    def clarify_resume_prompt(self, clarify_id: str) -> str:
+        with self._lock:
+            record = self._clarify_record_locked(self._read_locked(), clarify_id)
+            if not record or "response" not in record:
+                raise ValueError("Risposta alla domanda non trovata")
+            context = json.dumps(record["context"], ensure_ascii=False)
+            return ("Risposta a una domanda rimasta aperta. Riprendi il lavoro collegato usando la scelta ricevuta; "
+                    "verifica lo stato attuale prima di agire e non duplicare deleghe gia in corso o concluse.\n"
+                    "Contesto originale (storico, non una nuova richiesta):\n" + context +
+                    "\nUsa prime_history per gli originali completi agli indici indicati.\nDomanda originale "
+                    f"(indice {record['request_index']}):\n" + record["question"] +
+                    "\nRisposta dell'utente:\n" + self._clarify_response_text(record["response"]))
+
+    def open_clarifications(self) -> list[dict]:
+        with self._lock:
+            data = self._read_locked()
+            # Also hydrate requests written by versions predating the registry.
+            for msg in data["messages"]:
+                if msg.get("_bridge_clarify_event") == "request" and not msg.get("_bridge_clarify_resolved"):
+                    self._clarify_record_locked(data, msg["_bridge_clarify_id"])
+            return [dict(record["payload"], clarify_id=cid)
+                    for cid, record in data.get("clarify_requests", {}).items()
+                    if "response" not in record and not data["messages"][record["request_index"]].get("_bridge_clarify_resolved")]
 
     def _reset_buffer_locked(self, stream_id: str | None, partial: str = "") -> None:
         self._buf_stream_id = str(stream_id) if stream_id else None
@@ -424,6 +496,7 @@ class PrimeSessionStore:
                 "clarify_requested",
                 {"clarify_id": clarify_id, "kind": str((payload or {}).get("kind") or "clarify")},
             )
+            self._clarify_record_locked(data, clarify_id)
             self._write_locked(data)
 
     def append_clarify_response(self, clarify_id: str, response: Any) -> None:
@@ -465,6 +538,10 @@ class PrimeSessionStore:
                 }
             )
             self._append_journal_locked(data, "clarify_responded", {"clarify_id": clarify_id})
+            record = self._clarify_record_locked(data, clarify_id)
+            if record is not None:
+                record.update(response=response, owner_index=len(data["messages"]) - 1,
+                              delivery="waiting", request_id="clarify-" + clarify_id)
             self._write_locked(data)
 
     @staticmethod
@@ -640,6 +717,10 @@ class PrimeSessionStore:
             owner = next(((i, m) for i, m in reversed(list(enumerate(messages)))
                           if m.get("role") == "user" and m.get("request_id") == request_id), None)
             if not owner:
+                record = next((r for r in data.get("clarify_requests", {}).values()
+                               if r.get("request_id") == request_id and r.get("delivery") == "waiting"), None)
+                if record:
+                    return {"state": "done", "clarify_only": True, "reply": "", "user_message_index": record["owner_index"]}
                 return {"state": "unknown"}
             index, message = owner
             stream_id = message.get("stream_id")

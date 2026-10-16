@@ -2488,17 +2488,15 @@
         return;
       }
       send.disabled = true;
-      apiPost('/api/clarify/respond', {
-        session_id: 'hermes-prime',
-        clarify_id: pending.clarify_id || '',
-        response: answer
-      }).then(function () {
-        resolveBridgeClarifyCard(card, answer);
-        primeSay('user', collectStructured ? bridgeStructuredEcho(answer) : answer);
-        if (typeof options.onResolved === 'function') options.onResolved(card, answer);
-      }).catch(function (e) {
-        send.disabled = false;
-        sysNote('Clarify: ' + (e && e.message ? e.message : 'errore risposta'));
+      onPrimeSubmit(null, {
+        id: pending.clarify_id,
+        response: answer,
+        text: collectStructured ? bridgeStructuredEcho(answer) : answer,
+        accepted: function (waiting) {
+          resolveBridgeClarifyCard(card, answer);
+          if (waiting && typeof options.onResolved === 'function') options.onResolved(card, answer);
+        },
+        failed: function () { send.disabled = false; }
       });
     });
     actions.appendChild(send);
@@ -2647,7 +2645,7 @@
       node = renderBridgeClarifyCard(
         { pending: m._bridge_clarify_payload },
         {
-          readOnly: true,
+          readOnly: !!m._bridge_clarify_resolved,
           resolved: !!m._bridge_clarify_resolved,
           response: m._bridge_clarify_response
         }
@@ -2810,6 +2808,7 @@
     var rev = Number(data.delegations_rev);
     if (Number.isFinite(rev)) _cbDelegationsRev = rev;
     if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
+    (data.open_clarifications || []).forEach(function (p) { renderBridgeClarifyCard({ pending: p }); });
     pollTasks();
     var pending = data.pending_turn;
     if (pending && pending.stream_id && !pending.error) {
@@ -3075,40 +3074,43 @@
     });
   }
 
-  async function onPrimeSubmit(e) {
+  async function onPrimeSubmit(e, clarifyReply) {
     if (e && e.preventDefault) e.preventDefault();
-    if (_cbAttachmentSubmitWaiting) return;
+    if (_cbAttachmentSubmitWaiting && !clarifyReply) return;
     userEngaged = true;
     var inp = $('cbInput'); if (!inp) return;
-    var v = inp.value.trim();
-    if (handlePrimeSlashCommand(v)) {
+    var v = clarifyReply ? clarifyReply.text : inp.value.trim();
+    if (!clarifyReply && handlePrimeSlashCommand(v)) {
       inp.value = '';
       inp.style.height = 'auto';
       if (window.__cbAutoGrow) window.__cbAutoGrow();
       return;
     }
-    if (!v && !pendingAttachments.length) return;
-    if (pendingAttachments.some(function (a) { return a.state === 'error'; })) return;
-    if (pendingAttachments.some(function (a) { return a.state === 'uploading'; })) {
-      var waiting = pendingAttachments.slice();
-      _cbAttachmentSubmitWaiting = true;
+    if (!v && !pendingAttachments.length && !clarifyReply) return;
+    var attachments = [], thumbs = [];
+    if (!clarifyReply) {
+      if (pendingAttachments.some(function (a) { return a.state === 'error'; })) return;
+      if (pendingAttachments.some(function (a) { return a.state === 'uploading'; })) {
+        var waiting = pendingAttachments.slice();
+        _cbAttachmentSubmitWaiting = true;
+        renderAttachments();
+        var outcomes;
+        try { outcomes = await Promise.all(waiting.map(function (a) { return a.promise; })); }
+        finally { _cbAttachmentSubmitWaiting = false; renderAttachments(); }
+        // Removing a photo cancels this send intent; failures keep the draft.
+        if (!outcomes.every(Boolean) || waiting.some(function (a) { return pendingAttachments.indexOf(a) < 0; })) return;
+      }
+      var ready = pendingAttachments.filter(function (a) { return !!a.path; });
+      if (ready.length !== pendingAttachments.length) return;
+      inp.value = '';
+      inp.style.height = 'auto';
+      if (window.__cbAutoGrow) window.__cbAutoGrow();
+      attachments = ready.map(function (a) { return { name: a.name, path: a.path }; });
+      thumbs = ready.filter(function (a) { return /^image\//.test(a.type || ''); }).map(function (a) { return a.url; }).filter(Boolean);
+      pendingAttachments = [];
+      _cbAttachmentNotice = '';
       renderAttachments();
-      var outcomes;
-      try { outcomes = await Promise.all(waiting.map(function (a) { return a.promise; })); }
-      finally { _cbAttachmentSubmitWaiting = false; renderAttachments(); }
-      // Removing a photo cancels this send intent; failures keep the draft.
-      if (!outcomes.every(Boolean) || waiting.some(function (a) { return pendingAttachments.indexOf(a) < 0; })) return;
     }
-    var ready = pendingAttachments.filter(function (a) { return !!a.path; });
-    if (ready.length !== pendingAttachments.length) return;
-    inp.value = '';
-    inp.style.height = 'auto';
-    if (window.__cbAutoGrow) window.__cbAutoGrow();
-    var attachments = ready.map(function (a) { return { name: a.name, path: a.path }; });
-    var thumbs = ready.filter(function (a) { return /^image\//.test(a.type || ''); }).map(function (a) { return a.url; }).filter(Boolean);
-    pendingAttachments = [];
-    _cbAttachmentNotice = '';
-    renderAttachments();
     var userNode = primeSay('user', v, thumbs);
     _cbOwnTurnCount += 1;
     stopSpeak(); // un nuovo turno interrompe la voce precedente
@@ -3121,6 +3123,14 @@
     if (liveUsage) { liveUsage.hidden = true; liveUsage.textContent = ''; }
     var reply = '', settled = false, speech = { spokenLen: 0 }, finalUsage = null;
     var requestId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+    if (clarifyReply) requestId = 'clarify-' + clarifyReply.id;
+    var clarifyAccepted = false;
+    function acceptClarify(waiting, index) {
+      if (!clarifyReply || clarifyAccepted) return;
+      clarifyAccepted = true;
+      if (userNode && index != null) userNode.setAttribute('data-cb-msg-index', String(index));
+      clarifyReply.accepted(waiting);
+    }
     var controller = new AbortController();
     var owner = { requestId: requestId, streamId: null, controller: controller };
     var recoveryTimer = null, recoveryController = null, recovering = false;
@@ -3211,6 +3221,10 @@
     var fail = function (text) {
       if (settled) return;
       settled = true;
+      if (clarifyReply && !clarifyAccepted) {
+        clarifyReply.failed();
+        if (userNode) userNode.remove();
+      }
       clearRecovery();
       clearInterval(progressTimer);
       _primeBrowserTurns = _primeBrowserTurns.filter(function (t) { return t !== owner; });
@@ -3287,6 +3301,13 @@
             if (ph) updatePrimeLiveText(ph, reply);
           }
           if (request.state === 'done' || request.state === 'cancelled') {
+            acceptClarify(!!request.clarify_only, request.user_message_index);
+            if (request.clarify_only) {
+              var recoveredChoicePlaceholder = ph;
+              finish('scelta ricevuta');
+              if (recoveredChoicePlaceholder) recoveredChoicePlaceholder.remove();
+              return;
+            }
             reply = request.reply || '';
             if (ph && request.assistant_message_index != null) {
               ph.setAttribute('data-cb-msg-index', String(request.assistant_message_index));
@@ -3333,8 +3354,12 @@
     fetch(new URL('api/bridge/prime', document.baseURI || location.href).href, {
       method: 'POST', credentials: 'same-origin', signal: controller.signal,
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
-      body: JSON.stringify({ message: v, attachments: attachments, request_id: requestId })
+      body: JSON.stringify(Object.assign({ message: v, attachments: attachments, request_id: requestId },
+        clarifyReply ? { clarify_id: clarifyReply.id, clarify_response: clarifyReply.response } : {}))
     }).then(function (r) {
+      if (clarifyReply && !r.ok) {
+        return r.json().then(function (d) { fail(d.error || 'Risposta alla domanda non accettata.'); });
+      }
       return streamPrimeResponse(r, {
         activity: function () { lastSignal = Date.now(); },
         heartbeat: function (d) {
@@ -3344,6 +3369,7 @@
         },
         started: function (d) {
           if (settled || !d || !d.stream_id) return;
+          acceptClarify(false, d.user_message_index);
           owner.streamId = d.stream_id;
           setPrimeStreaming(true, d.stream_id);
           stampPrimeNode(userNode, d.created_at, 'user');
@@ -3383,6 +3409,13 @@
         tool: function (d) { if (!settled && d && d.tool) renderToolCard(d.tool, d.summary || ''); },
         done: function (d) {
           if (settled) return;
+          acceptClarify(!!(d && d.clarify_only), d && d.user_message_index);
+          if (d && d.clarify_only) {
+            var choicePlaceholder = ph;
+            finish('scelta ricevuta');
+            if (choicePlaceholder) choicePlaceholder.remove();
+            return;
+          }
           if (d && d.usage) showUsage(d.usage);
           if (ph && d) stampPrimeNode(ph, d.created_at, 'assistant');
           // The canonical final answer replaces interim process text.

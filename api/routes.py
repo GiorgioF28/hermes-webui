@@ -12217,6 +12217,7 @@ def _handle_bridge_prime_history(handler, parsed=None):
         session_id = _request_prime_session_id(handler)
         since_index = _bridge_history_since_index(parsed)
         hist = get_prime_session_store(session_id).history_with_tool_events(since_index, compact=True)
+        hist["open_clarifications"] = get_prime_session_store(session_id).open_clarifications()
         # Fase 1: annotate with pending brief count (best-effort)
         try:
             from api.prime_brief_queue import get_brief_queue
@@ -12630,9 +12631,10 @@ def _handle_bridge_prime(handler, body):
     identity = _request_identity(handler)
     session_id = identity.prime_session_id
     msg = str((body or {}).get("message") or "").strip()
+    clarify_id = str((body or {}).get("clarify_id") or "").strip()
     raw_atts = (body or {}).get("attachments")
     attachments = [a for a in raw_atts if isinstance(a, dict)] if isinstance(raw_atts, list) else []
-    if not msg and not attachments:
+    if not msg and not attachments and not clarify_id:
         return bad(handler, "message is required")
     if not msg and attachments:
         msg = "(Uživatel přiložil soubory bez textu.)" if identity.user == "tom" else "(L'utente ha allegato file senza testo.)"
@@ -12666,6 +12668,16 @@ def _handle_bridge_prime(handler, body):
     from api.prime_session_store import get_prime_session_store
 
     store = get_prime_session_store(session_id)
+    clarify_record = None
+    if clarify_id:
+        response = (body or {}).get("clarify_response")
+        if response is None or not str(response).strip():
+            return bad(handler, "clarify_response is required")
+        try:
+            clarify_record = store.accept_clarify_answer(clarify_id, response)
+        except ValueError as exc:
+            return bad(handler, str(exc), 409)
+        msg = store._clarify_response_text(clarify_record["response"])
     incoming_settings = {}
     if "model" in (body or {}):
         incoming_settings["model"] = str((body or {}).get("model") or "").strip() or None
@@ -12690,11 +12702,19 @@ def _handle_bridge_prime(handler, body):
 
     from api.streaming import _sse
 
+    if clarify_record and clarify_record["delivery"] == "waiting":
+        # The original tool/stream continues; do not reserve a second turn.
+        try:
+            _sse(handler, "done", {"clarify_only": True, "reply": "", "user_message_index": clarify_record["owner_index"]})
+        except _CLIENT_DISCONNECT_ERRORS:
+            pass
+        return True
+
     stream_id = None
     write_lock = threading.Lock()
     observer_gone = threading.Event()
     stop_heartbeat = threading.Event()
-    request_id = str((body or {}).get("request_id") or uuid.uuid4().hex)[:100]
+    request_id = (clarify_record["request_id"] if clarify_record else str((body or {}).get("request_id") or uuid.uuid4().hex))[:100]
     cancel_event = threading.Event()
     request = {"cancel_event": cancel_event, "stream_id": None}
     with _PRIME_ACTIVE_LOCK:
@@ -12745,6 +12765,17 @@ def _handle_bridge_prime(handler, body):
         if not acquired:
             emit("done", {"reply": "", "cancelled": True})
             return True
+        if clarify_record:
+            receipt = store.browser_request(request_id)
+            if receipt["state"] != "unknown":
+                # A second device, a retry or a lost acknowledgement observes
+                # the first execution. Interrupted work is never auto-replayed.
+                if receipt["state"] == "done":
+                    emit("started", receipt)
+                    emit("done", {**receipt, "created_at": receipt.get("answer_created_at")})
+                else:
+                    emit("error", {"error": "Questa risposta e gia stata presa in carico; controlla lo storico prima di riprendere il lavoro."})
+                return True
         # live() carries message_count, so the anchor no longer copies the whole
         # transcript (~2 MB) on every turn start just to count it.
         try:
@@ -12752,7 +12783,11 @@ def _handle_bridge_prime(handler, body):
         except Exception:
             anchor_message_index = int((store.history() or {}).get("message_count") or 0)
         anchor_created_at = time.time()
-        stream_id = store.begin_turn(msg, attachments, request_id=request_id)
+        if clarify_record:
+            anchor_message_index = clarify_record["owner_index"]
+        stream_id = store.begin_turn(msg, attachments, request_id=request_id,
+                                     **({"owner_index": anchor_message_index} if clarify_record else {}))
+        provider_msg = store.clarify_resume_prompt(clarify_id) if clarify_record else msg
         with _PRIME_ACTIVE_LOCK:
             request["stream_id"] = stream_id
         _prime_active_set(session_id=session_id, stream_id=stream_id, cancel_event=cancel_event,
@@ -12793,7 +12828,7 @@ def _handle_bridge_prime(handler, body):
                 _bind_turn_session_identity = None
             if _bind_turn_session_identity is None:
                 result = _call_hermes_prime_reply_for_bridge(
-                    msg,
+                    provider_msg,
                     workspace,
                     attachments=attachments,
                     on_token=_token,
@@ -12806,7 +12841,7 @@ def _handle_bridge_prime(handler, body):
             else:
                 with _bind_turn_session_identity(session_id):
                     result = _call_hermes_prime_reply_for_bridge(
-                        msg,
+                        provider_msg,
                         workspace,
                         attachments=attachments,
                         on_token=_token,

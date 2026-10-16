@@ -146,7 +146,7 @@ def test_command_bridge_frontend_renders_structured_clarify_cards():
     assert "cb-option-description" in source
     assert "bridgeStructuredEcho" in source
     assert "pending_clarify" in source
-    assert "apiPost('/api/clarify/respond'" in source
+    assert "clarify_response: clarifyReply.response" in source
     assert "function resolveBridgeClarifyCard" in source
     assert "cb-resolved" in source
     assert "data-option-label" in source

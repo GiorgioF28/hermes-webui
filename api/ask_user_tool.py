@@ -100,13 +100,17 @@ async def _run_ask_user(session_id: str, args: dict[str, Any]) -> dict[str, Any]
     # the asyncio loop so we never block the loop the SDK runs on.
     # timeout=None -> attende finche' l'utente risponde o il turno viene
     # annullato (clear_pending sveglia l'evento).
-    resolved = await asyncio.to_thread(entry.event.wait, timeout)
-    if not resolved or entry.result is None:
+    try:
+        await asyncio.to_thread(entry.event.wait, timeout)
+    finally:
+        # A timed-out/cancelled tool must never silently consume a later answer.
+        result = clarify.detach_waiter(entry)
+    if result is None:
         return {
             "content": [
                 {
                     "type": "text",
-                    "text": "L'utente non ha risposto in tempo; procedi con la tua scelta migliore e spiegala.",
+                    "text": "La scelta resta aperta: l'utente non ha ancora risposto. Non decidere al suo posto; una risposta successiva riprendera il contesto.",
                 }
             ]
         }
