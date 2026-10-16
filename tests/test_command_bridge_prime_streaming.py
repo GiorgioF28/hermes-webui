@@ -627,7 +627,7 @@ def test_command_bridge_frontend_consumes_post_sse_without_touching_task_polling
     assert "onResolved: function ()" in source
     assert "done: function (d)" in source
     assert "if (d && d.usage) showUsage(d.usage);" in source
-    assert "if (!settled) { fail('Connessione interrotta [transport_cut]." in source
+    assert "if (!settled) recoverTransport('eof_before_done');" in source
     assert "if (!reply && ph && ph.parentNode)" in source
     assert "api('api/bridge/tasks?compact=1')" in source
     assert "setInterval(pollTasks, 3000)" in source
@@ -672,7 +672,7 @@ def test_command_bridge_frontend_always_clears_streaming_after_final_render():
     assert "node.textContent = raw" in render
 
     # EOF without done is degraded observation, never proof of completion.
-    assert "if (!settled) { fail('Connessione interrotta [transport_cut]." in source
+    assert "if (!settled) recoverTransport('eof_before_done');" in source
     assert "if (!settled && reply) finish(" not in source
 
 

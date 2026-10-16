@@ -1,5 +1,13 @@
 # Hermes Web UI: Browser Testing Plan
 
+Prime transport recovery: `python -m pytest tests/test_prime_transport_recovery.py
+tests/test_prime_transport_continuity.py tests/test_prime_stop_progress.py -q`
+checks submission receipts, lost acknowledgements, EOF/network failures, owned
+Stop, late responses and an actual isolated TCP shutdown without replaying the
+provider. Chromium covers 1200/650/360 px. Set `HERMES_CAPTURE_TRANSPORT_UI` for
+before/after evidence; see [transport recovery](docs/prime-transport-recovery.md)
+for state invariants, diagnostics and operator activation checks.
+
 Prime file exchange: `python -m pytest tests/test_prime_file_exchange.py
 tests/test_prime_file_exchange_http.py tests/test_codex_prime_tools.py -q`
 checks document uploads, secret/ZIP rejection and the shared delivery tool.

@@ -6526,7 +6526,7 @@ def handle_get(handler, parsed) -> bool:
         return _handle_bridge_prime_history(handler, parsed)
 
     if parsed.path == "/api/bridge/prime/live":
-        return _handle_bridge_prime_live(handler)
+        return _handle_bridge_prime_live(handler, parsed)
 
     if parsed.path == "/api/bridge/prime/brief/status":
         return _handle_bridge_prime_brief_status(handler, parsed)
@@ -12264,13 +12264,22 @@ def _handle_bridge_prime_artifact(handler, parsed):
     return True
 
 
-def _handle_bridge_prime_live(handler):
+def _handle_bridge_prime_live(handler, parsed=None):
     """GET /api/bridge/prime/live -- current Prime turn for light reconnect polling."""
     try:
         from api.prime_session_store import get_prime_session_store
 
         session_id = _request_prime_session_id(handler)
-        payload = get_prime_session_store(session_id).live()
+        store = get_prime_session_store(session_id)
+        payload = store.live()
+        request_id = str((parse_qs(parsed.query).get("request_id") or [""])[0])[:100] if parsed else ""
+        if request_id:
+            request_state = store.browser_request(request_id)
+            with _PRIME_ACTIVE_LOCK:
+                request = _PRIME_BROWSER_REQUESTS.get((session_id, request_id))
+                if request and request_state["state"] == "unknown":
+                    request_state = {"state": "queued", "stream_id": request.get("stream_id")}
+            payload["request"] = request_state
         active = _prime_active_snapshot(session_id)
         if active:
             payload["active"] = True
@@ -12743,7 +12752,7 @@ def _handle_bridge_prime(handler, body):
         except Exception:
             anchor_message_index = int((store.history() or {}).get("message_count") or 0)
         anchor_created_at = time.time()
-        stream_id = store.begin_turn(msg, attachments)
+        stream_id = store.begin_turn(msg, attachments, request_id=request_id)
         with _PRIME_ACTIVE_LOCK:
             request["stream_id"] = stream_id
         _prime_active_set(session_id=session_id, stream_id=stream_id, cancel_event=cancel_event,

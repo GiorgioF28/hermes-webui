@@ -256,6 +256,9 @@ class PrimeSessionStore:
                         "role": "assistant",
                         "content": partial,
                         "created_at": time.time(),
+                        "stream_id": stream_id,
+                        "reply_to_index": next((i for i, m in enumerate(data["messages"])
+                                                if m.get("role") == "user" and m.get("stream_id") == stream_id), None),
                         "interrupted": True,
                         "error": str(reason or "interrupted by WebUI restart"),
                     }
@@ -270,7 +273,7 @@ class PrimeSessionStore:
             self._reset_buffer_locked(None)
             return True
 
-    def begin_turn(self, message: str, attachments: list[dict] | None = None) -> str:
+    def begin_turn(self, message: str, attachments: list[dict] | None = None, *, request_id: str | None = None) -> str:
         stream_id = uuid.uuid4().hex
         clean_message = str(message or "")
         with self._lock:
@@ -292,6 +295,8 @@ class PrimeSessionStore:
                 "partial_output": "",
                 "recovered": False,
             }
+            if request_id:
+                data["messages"][-1]["request_id"] = str(request_id)[:100]
             self._reset_buffer_locked(stream_id)
             self._append_journal_locked(data, "turn_started", {"stream_id": stream_id, "role": "user"})
             self._write_locked(data)
@@ -627,13 +632,45 @@ class PrimeSessionStore:
                 "history_window": window,
             }
 
+    def browser_request(self, request_id: str) -> dict[str, Any]:
+        """Read one browser submission without adopting another active turn."""
+        with self._lock:
+            data = self._read_locked()
+            messages = data.get("messages") or []
+            owner = next(((i, m) for i, m in reversed(list(enumerate(messages)))
+                          if m.get("role") == "user" and m.get("request_id") == request_id), None)
+            if not owner:
+                return {"state": "unknown"}
+            index, message = owner
+            stream_id = message.get("stream_id")
+            result = {"stream_id": stream_id, "user_message_index": index,
+                      "created_at": message.get("created_at")}
+            pending = data.get("pending_turn")
+            if pending and pending.get("stream_id") == stream_id:
+                return dict(result, state="error" if pending.get("error") else "running",
+                            partial_output=pending.get("partial_output") or "",
+                            error=pending.get("error"))
+            answer = next(((i, m) for i, m in reversed(list(enumerate(messages)))
+                           if m.get("role") == "assistant" and m.get("stream_id") == stream_id), None)
+            terminal = next((e.get("event") for e in reversed(data.get("journal") or [])
+                             if e.get("stream_id") == stream_id and e.get("event") in
+                             {"turn_finished", "turn_cancelled", "turn_error", "turn_interrupted_on_restart"}), None)
+            if answer:
+                answer_index, row = answer
+                return dict(result, state="cancelled" if row.get("cancelled") else
+                            "interrupted" if row.get("interrupted") else "error" if row.get("error") else "done",
+                            reply=row.get("content") or "", usage=row.get("usage") or {},
+                            prime_artifacts=row.get("prime_artifacts") or [],
+                            assistant_message_index=answer_index, answer_created_at=row.get("created_at"))
+            return dict(result, state="cancelled" if terminal == "turn_cancelled" else "interrupted")
+
     def live(self) -> dict[str, Any]:
         with self._lock:
             data = self._read_locked()
             pending = data.get("pending_turn")
             return {
                 "ok": True,
-                "active": bool(pending),
+                "active": bool(pending) and not bool(pending.get("error")),
                 "pending_turn": dict(pending) if isinstance(pending, dict) else None,
                 "settings": dict(data.get("settings") or {}),
                 "updated_at": data.get("updated_at"),

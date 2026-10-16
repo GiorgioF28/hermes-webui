@@ -2812,7 +2812,7 @@
     if (pendingClarify) renderBridgeClarifyCard({ pending: pendingClarify });
     pollTasks();
     var pending = data.pending_turn;
-    if (pending && pending.stream_id) {
+    if (pending && pending.stream_id && !pending.error) {
       var node = primeSay('prime', pending.partial_output || '', null, true);
       if (node) node.classList.add('cb-recovered');
       if (node) {
@@ -3123,6 +3123,12 @@
     var requestId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
     var controller = new AbortController();
     var owner = { requestId: requestId, streamId: null, controller: controller };
+    var recoveryTimer = null, recoveryController = null, recovering = false;
+    function clearRecovery() {
+      clearTimeout(recoveryTimer);
+      if (recoveryController) recoveryController.abort();
+      recoveryController = null;
+    }
     _primeBrowserTurns.push(owner);
     var startedAt = Date.now(), lastSignal = startedAt, idleSeconds = 0, waitingUser = false;
     var lastState = 'starting', lastTool = '', progressTimer;
@@ -3164,6 +3170,7 @@
     var finish = function (label) {
       if (settled) return;
       settled = true;
+      clearRecovery();
       clearInterval(progressTimer);
       _primeBrowserTurns = _primeBrowserTurns.filter(function (t) { return t !== owner; });
       try {
@@ -3204,6 +3211,7 @@
     var fail = function (text) {
       if (settled) return;
       settled = true;
+      clearRecovery();
       clearInterval(progressTimer);
       _primeBrowserTurns = _primeBrowserTurns.filter(function (t) { return t !== owner; });
       try {
@@ -3220,12 +3228,104 @@
       }
     };
     owner.finish = finish; owner.status = showStatus;
+    // Reconcile this submission by its durable identity. Never replay the POST
+    // or adopt whatever different turn happens to be active in the session.
+    function recoverTransport(reason) {
+      if (settled || recovering) return;
+      recovering = true;
+      clearInterval(progressTimer);
+      controller.abort(); // Detach only this observer; server work keeps running.
+      var recoveryStarted = Date.now();
+      turnUi.updateStatus('Connessione interrotta: recupero del turno in corso\u2026 Stop disponibile.', !!reply);
+      var cfg = window.__HERMES_CONFIG__ || {};
+      var diagnostic = { event: 'transport_cut', source: 'command_bridge_prime',
+        stream_id: owner.streamId || '', reason: reason,
+        online: navigator.onLine, visibility_state: document.visibilityState, url_path: location.pathname };
+      fetch(new URL('api/client-events/log', document.baseURI || location.href).href, {
+        method: 'POST', credentials: 'same-origin', keepalive: true,
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': cfg.csrfToken || '' },
+        body: JSON.stringify(diagnostic)
+      }).catch(function () {});
+      function readStatus() {
+        if (settled) return;
+        recoveryController = new AbortController();
+        var current = recoveryController;
+        var deadline = setTimeout(function () { current.abort(); }, 5000);
+        fetch(new URL('api/bridge/prime/live?request_id=' + encodeURIComponent(requestId), document.baseURI || location.href).href, {
+          credentials: 'same-origin', cache: 'no-store', signal: current.signal
+        }).then(function (r) {
+          if (!r.ok) throw new Error('status unavailable');
+          return r.json();
+        }).then(function (data) {
+          if (settled) return;
+          var request = data && data.request;
+          if (!request) {
+            // A frontend can be served before its backend is activated. Avoid
+            // guessing ownership on an older server without request lookup.
+            fail('Recupero del turno non disponibile su questa versione del server. Controlla la cronologia prima di reinviare.');
+            return;
+          }
+          if (request.stream_id) {
+            if (owner.streamId && owner.streamId !== request.stream_id) throw new Error('ownership mismatch');
+            owner.streamId = request.stream_id;
+            setPrimeStreaming(true, owner.streamId);
+            if (userNode) {
+              userNode.setAttribute('data-cb-stream-id', owner.streamId);
+              userNode.setAttribute('data-cb-role', 'user');
+              if (request.user_message_index != null) userNode.setAttribute('data-cb-msg-index', String(request.user_message_index));
+              stampPrimeNode(userNode, request.created_at, 'user');
+            }
+            if (ph) {
+              ph.setAttribute('data-cb-stream-id', owner.streamId);
+              ph.setAttribute('data-cb-role', 'assistant');
+              if (request.user_message_index != null) ph.setAttribute('data-cb-reply-to-index', String(request.user_message_index));
+              stampPrimeNode(ph, request.created_at, 'assistant');
+            }
+          }
+          if (typeof request.partial_output === 'string') {
+            reply = request.partial_output;
+            if (ph) updatePrimeLiveText(ph, reply);
+          }
+          if (request.state === 'done' || request.state === 'cancelled') {
+            reply = request.reply || '';
+            if (ph && request.assistant_message_index != null) {
+              ph.setAttribute('data-cb-msg-index', String(request.assistant_message_index));
+              ph.setAttribute('data-prime-settled', 'true');
+              stampPrimeNode(ph, request.answer_created_at, 'assistant');
+            }
+            showUsage(request.usage);
+            finish(request.state === 'cancelled' ? 'interrotto' : '\u2713 completato');
+            if (bubble && request.prime_artifacts && request.prime_artifacts.length) renderPrimeArtifacts(request.prime_artifacts, bubble);
+            repositionPrimeTaskCards();
+          } else if (request.state === 'error' || request.state === 'interrupted') {
+            if (request.reply) { reply = request.reply; if (ph) updatePrimeLiveText(ph, reply); }
+            fail('Hermes Prime: il turno risulta interrotto sul server. Il testo parziale resta disponibile; nessun messaggio reinviato.');
+          } else if (request.state === 'unknown' && Date.now() - recoveryStarted >= 30000) {
+            // Unknown means no receipt, not proof that an in-flight POST will
+            // never arrive. Preserve the draft for review without auto-sending.
+            if (!inp.value.trim()) inp.value = v;
+            if (!pendingAttachments.length && ready.length) { pendingAttachments = ready; renderAttachments(); }
+            fail('Invio non confermato dal server. Testo conservato nella bozza: controlla la cronologia prima di reinviare.');
+          } else {
+            turnUi.updateStatus(request.state === 'queued' ? 'Turno ricevuto, in coda. Stop disponibile.' :
+              'Recupero del turno in corso\u2026 Stop disponibile.', !!reply);
+          }
+        }).catch(function () {
+          if (!settled) turnUi.updateStatus('Connessione non disponibile: continuo a recuperare il turno. Stop disponibile.', !!reply);
+        }).then(function () {
+          clearTimeout(deadline);
+          if (recoveryController === current) recoveryController = null;
+          if (!settled) recoveryTimer = setTimeout(readStatus, 2000);
+        });
+      }
+      readStatus();
+    }
     showStatus('starting');
     progressTimer = setInterval(function () {
       if (settled) return;
       var silence = Math.floor((Date.now() - lastSignal) / 1000);
       var total = Math.floor((Date.now() - startedAt) / 1000);
-      if (silence >= 45) turnUi.updateStatus('Connessione senza segnali da ' + silence + ' s. Stop disponibile.', !!reply);
+      if (silence >= 45) recoverTransport('heartbeat_timeout');
       else if (waitingUser) turnUi.updateStatus('In attesa della tua scelta \u00b7 ' + total + ' s', !!reply);
       else if (idleSeconds >= 60) turnUi.updateStatus('Nessun progresso dal modello da ' + idleSeconds + ' s. Ultima attivit\u00e0: ' + (lastTool || lastState) + '. Stop disponibile.', !!reply);
     }, 1000);
@@ -3314,15 +3414,12 @@
     }).then(function () {
       // EOF without `done` proves only that the observer lost its stream.
       // The server may still be working; partial tokens are not a final answer.
-      if (!settled) { fail('Connessione interrotta [transport_cut]. Il lavoro sul server può continuare: recupero lo stato automaticamente.'); startPrimeLivePolling(null); }
+      if (!settled) recoverTransport('eof_before_done');
     })
       .catch(function (e) {
         if (settled) return;
-        // Ramo trasporto: la fetch/stream SSE e' caduta a livello di rete. Diamo
-        // comunque il motivo (perche') invece del generico "non riesco a contattare".
-        var why = (e && e.message) ? (' (' + e.message + ')') : '';
-        fail('Connessione con Hermes Prime interrotta [transport_cut]' + why + '. Il lavoro sul server può continuare: recupero lo stato automaticamente.');
-        startPrimeLivePolling(null);
+        // A transport exception is not a terminal provider result.
+        recoverTransport(e && e.name === 'AbortError' ? 'browser_abort' : 'fetch_or_stream_failed');
       });
   }
 

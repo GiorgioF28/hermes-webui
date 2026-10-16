@@ -1,5 +1,14 @@
 ---
 
+## Unreleased - Prime transport recovery
+
+- Recover a disconnected browser stream in its original reply using a durable,
+  session-scoped submission receipt, including lost first acknowledgements.
+  Keep Stop available, replace partial output with the saved final answer and
+  preserve interrupted outcomes. Never automatically resend the prompt.
+- Recover after missing SSE heartbeats, bound sequential status reads and log
+  minimal browser transport diagnostics without message content or raw errors.
+
 ## Unreleased - Prime file exchange
 
 - Delivery cards follow their owning transcript row across reload and the
